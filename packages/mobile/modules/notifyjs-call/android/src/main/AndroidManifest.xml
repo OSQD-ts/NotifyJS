@@ -9,9 +9,29 @@
   <uses-permission android:name="android.permission.WAKE_LOCK" />
   <uses-permission android:name="android.permission.VIBRATE" />
 
+  <!--
+    Keeps the process - and therefore the WebSocket - alive while the app is
+    off screen. "specialUse" is the honest category: this is not media,
+    location or a data sync, it is a long-lived connection the user asked for.
+  -->
+  <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+  <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+  <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+
   <application>
     <receiver
       android:name=".CallActionReceiver"
       android:exported="false" />
+
+    <service
+      android:name=".NotifyjsWatchService"
+      android:exported="false"
+      android:foregroundServiceType="specialUse"
+      android:stopWithTask="false">
+      <property
+        android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+        android:value="Maintains a connection to the user's own alerting hub so that
+                       incoming alerts and calls arrive while the app is off screen." />
+    </service>
   </application>
 </manifest>

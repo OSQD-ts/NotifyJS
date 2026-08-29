@@ -8,8 +8,13 @@ import {
   type Notification,
 } from '@notifyjs/protocol';
 import * as Network from 'expo-network';
-import * as Notifications from 'expo-notifications';
-import { dismissCall, showIncomingCall } from '../modules/notifyjs-call';
+import {
+  dismissCall,
+  showAlert,
+  showIncomingCall,
+  startWatching,
+  stopWatching,
+} from '../modules/notifyjs-call';
 import { nobleCrypto } from './crypto';
 import { secureStorage } from './storage';
 import { getPushToken } from './push';
@@ -80,6 +85,10 @@ export function useNotify(url: string, deviceName: string, pendingCode?: string)
       ),
       client.on('ready', () => {
         setState((s) => ({ ...s, role: client.role, paired: true, error: undefined }));
+        // Android reclaims the process once the app leaves the screen, taking
+        // the socket with it. This keeps both alive so alerts still arrive
+        // when the app is backgrounded, swiped away, or the screen is off.
+        startWatching(client.serverName ?? 'NotifyJS');
         // Registered on every connect: Expo rotates tokens, and the hub only
         // ever keeps the most recent one.
         void getPushToken().then((token) => {
@@ -87,13 +96,20 @@ export function useNotify(url: string, deviceName: string, pendingCode?: string)
         });
       }),
       client.on('notification', (n) => {
-        setState((s) =>
+        let isNew = false;
+        setState((s) => {
           // Unacknowledged notifications are re-sent by the hub, so the same
           // id can arrive more than once.
-          s.notifications.some((existing) => existing.id === n.id)
-            ? s
-            : { ...s, notifications: [n, ...s.notifications].slice(0, 200) },
-        );
+          if (s.notifications.some((existing) => existing.id === n.id)) return s;
+          isNew = true;
+          return { ...s, notifications: [n, ...s.notifications].slice(0, 200) };
+        });
+
+        if (isNew) {
+          // Posted natively rather than through a JS scheduler, so it shows
+          // whether the app is in front, behind, or the screen is off.
+          showAlert(n.id, `${n.severity.toUpperCase()}: ${n.title}`, n.body ?? n.channel);
+        }
         client.ack([n.id], { seq: n.seq });
       }),
       client.on('call', (call) => {
@@ -117,14 +133,9 @@ export function useNotify(url: string, deviceName: string, pendingCode?: string)
           ...s,
           serviceDown: { title: spec.alert.title, body: spec.alert.body, silentForMs },
         }));
-        void Notifications.scheduleNotificationAsync({
-          content: {
-            title: spec.alert.title,
-            body: spec.alert.body,
-            sound: 'default',
-          },
-          trigger: null,
-        });
+        // Native, for the same reason as ordinary alerts: the moment worth
+        // reporting is usually the moment the app is not on screen.
+        showAlert(`watchdog-${spec.alert.title}`, spec.alert.title, spec.alert.body ?? '');
       }),
 
       client.on('service:back', () => setState((s) => ({ ...s, serviceDown: undefined }))),
@@ -169,6 +180,14 @@ export function useNotify(url: string, deviceName: string, pendingCode?: string)
       // leaving the pairing screen sitting there with no explanation. A
       // failure the user cannot see is worse than one they can.
       try {
+        // An explicit code is an explicit instruction: scanning one while
+        // already paired means "join this hub instead", so the old identity
+        // is discarded rather than used to authenticate against a hub that
+        // has never heard of it.
+        if (pendingCode && (await client.isPaired())) {
+          await client.forgetCredentials();
+        }
+
         const paired = await client.isPaired();
         setState((s) => ({ ...s, paired }));
 
@@ -223,6 +242,8 @@ export function useNotify(url: string, deviceName: string, pendingCode?: string)
   }, []);
 
   const unpair = useCallback(async () => {
+    // Nothing left to listen for, so stop paying the battery cost.
+    stopWatching();
     clientRef.current.disconnect();
     await clientRef.current.forgetCredentials();
     setState((s) => ({ ...s, paired: false, status: 'unpaired', notifications: [] }));

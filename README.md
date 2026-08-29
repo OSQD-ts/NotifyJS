@@ -516,17 +516,30 @@ not the default dialer. The app detects this (`canUseFullScreen()`) and can send
 the user straight to the settings page; without it the call degrades to an
 ordinary high-priority notification rather than failing.
 
-**What this does and does not cover.** The call is delivered over the device's
-open WebSocket, so it reaches a phone that is locked and asleep for as long as
-Android keeps that socket alive — verified on a sleeping emulator: the screen
-lit up, the call took over the keyguard, and answering reported back to the hub.
-Once Android suspends the app (deep Doze, or the app swiped away) the socket is
-gone and nothing can be delivered until it returns. Closing *that* gap needs a
-high-priority FCM push to wake the app first: the hub already sends wake-up
-pushes (`push.enabled`), but turning one into a full-screen call needs an
-`expo-notifications` background task and an EAS project ID, which is not wired
-up here. Until then, pair a machine running `notifyjs listen` as the reliable
-always-on target.
+### Staying connected while the app is closed
+
+Everything arrives over the device's WebSocket, and Android reclaims an app's
+process shortly after it leaves the screen — taking the socket with it. That is
+why an alerting app that works perfectly while you are looking at it can go
+silent the moment you are not.
+
+The app runs a small **foreground service** whose only job is to exist, keeping
+the process and its connection alive. It starts automatically once the device
+is paired, and shows a permanent low-priority notification ("Listening for
+alerts") because Android requires one — that notification is the visible price
+of being reachable. Alerts and calls are then posted natively rather than by a
+JavaScript timer, so they arrive whether the app is in front, behind, or the
+screen is off.
+
+Unpairing stops the service.
+
+**The one case this cannot cover:** if you *force-stop* the app from Android
+settings, the system delivers nothing to it at all until you open it again —
+that is an OS rule no app can work around, and only a Firebase Cloud Messaging
+push can wake an app in that state. Adding FCM means a Firebase project and
+sending alert titles through Google, which is the trade this project otherwise
+avoids. If you need coverage for force-stopped phones, pair a machine running
+`notifyjs listen` as an always-on second target.
 
 iOS needs CallKit and PushKit for the equivalent, which is not implemented — the
 in-app call screen is what runs there. The protocol needs no changes for it; the

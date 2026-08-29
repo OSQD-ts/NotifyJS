@@ -14,10 +14,10 @@ import androidx.core.app.NotificationManagerCompat
  */
 class CallActionReceiver : BroadcastReceiver() {
   override fun onReceive(context: Context, intent: Intent) {
-    val callId = intent.getStringExtra(NotifyjsCallModule.EXTRA_CALL_ID) ?: return
+    val callId = intent.getStringExtra(CallNotification.EXTRA_CALL_ID) ?: return
     NotificationManagerCompat.from(context).cancel(callId.hashCode())
 
-    if (intent.action != NotifyjsCallModule.ACTION_ANSWER) {
+    if (intent.action != CallNotification.ACTION_ANSWER) {
       // A decline is recorded by the app on its next connection; the hub also
       // moves on by itself once the ring timeout expires.
       return
@@ -27,7 +27,7 @@ class CallActionReceiver : BroadcastReceiver() {
       .getLaunchIntentForPackage(context.packageName)
       ?.apply {
         addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
-        putExtra(NotifyjsCallModule.EXTRA_CALL_ID, callId)
+        putExtra(CallNotification.EXTRA_CALL_ID, callId)
         putExtra("notifyjs_answered", true)
       } ?: return
     context.startActivity(launch)

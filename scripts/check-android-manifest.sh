@@ -59,7 +59,24 @@ if [ -n "$APK" ] && [ -f "$APK" ]; then
     else
       echo "  ok      RECORD_AUDIO absent from the shipped APK"
     fi
-    for perm in INTERNET POST_NOTIFICATIONS VIBRATE USE_FULL_SCREEN_INTENT; do
+    # The foreground service is contributed by the native module's own
+    # manifest, so it exists only after the merger runs - the source manifest
+    # never mentions it. Losing it means alerts silently stop the moment the
+    # app leaves the screen, which is exactly the failure it was added to fix.
+    #
+    # Captured rather than piped into `grep -q`: under `set -o pipefail` grep
+    # exits at the first match, aapt dies of SIGPIPE, and the pipeline reports
+    # failure - so a present service reads as missing.
+    MERGED="$("$AAPT" dump xmltree "$APK" AndroidManifest.xml 2>/dev/null || true)"
+    if echo "$MERGED" | grep -q 'NotifyjsWatchService'; then
+      echo "  ok      foreground service is registered"
+    else
+      echo "  MISSING foreground service - alerts would stop when the app closes"
+      fail=1
+    fi
+
+    for perm in INTERNET POST_NOTIFICATIONS VIBRATE USE_FULL_SCREEN_INTENT \
+                FOREGROUND_SERVICE FOREGROUND_SERVICE_SPECIAL_USE; do
       if echo "$PERMS" | grep -q "$perm"; then
         echo "  ok      $perm present"
       else

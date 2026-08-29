@@ -117,19 +117,9 @@ function Connected({
     return () => sub.remove();
   }, [state.status, sync]);
 
-  // Mirror incoming notifications into the OS tray so they persist after the
-  // user swipes the app away.
-  useEffect(() => {
-    const latest = state.notifications[0];
-    if (!latest) return;
-    void Notifications.scheduleNotificationAsync({
-      content: {
-        title: `${latest.severity.toUpperCase()}: ${latest.title}`,
-        body: latest.body ?? latest.channel,
-      },
-      trigger: null,
-    });
-  }, [state.notifications[0]?.id]);
+  // Notifications are posted by the native module now, which works whether the
+  // app is in front, behind, or the screen is off - a JS scheduler only runs
+  // while JavaScript does.
 
   const handlePair = useCallback(
     async (code: string) => {
