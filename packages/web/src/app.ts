@@ -1,9 +1,13 @@
 import {
   NotifyClient,
   SEVERITIES,
+  defaultPreferences,
   isPairingCodeValid,
+  normalizePreferences,
+  severityRank,
   webStorage,
   type CallRequest,
+  type ClientPreferences,
   type Device,
   type Notification,
   type Severity,
@@ -28,7 +32,7 @@ const client = new NotifyClient({
   crypto: webCrypto,
   storage: webStorage(),
   createSocket: (url) => new WebSocket(url) as never,
-  deviceName: localStorage.getItem('notifyjs.name') ?? 'Browser',
+  deviceName: loadPreferences().deviceName,
   platform: 'web',
   model: navigator.userAgent.slice(0, 60),
   autoReconnect: true,
@@ -40,6 +44,105 @@ const ringer = new Ringer();
 const feed: Notification[] = [];
 let activeFilter: Severity | 'all' = 'all';
 let activeCall: CallRequest | undefined;
+
+/* ---------------------------------------------------------------- */
+/* Settings                                                          */
+/* ---------------------------------------------------------------- */
+
+const PREFS_KEY = 'notifyjs.preferences';
+
+/**
+ * What this browser wants, as opposed to what its role permits. Applied on
+ * top of the hub's filtering, so it can only ever narrow the feed.
+ */
+let prefs: ClientPreferences = loadPreferences();
+
+function loadPreferences(): ClientPreferences {
+  try {
+    const raw = localStorage.getItem(PREFS_KEY);
+    return normalizePreferences(raw ? JSON.parse(raw) : null, 'Browser');
+  } catch {
+    // Unreadable settings must not stop the dashboard from loading.
+    return defaultPreferences('Browser');
+  }
+}
+
+function savePreferences(patch: Partial<ClientPreferences>): void {
+  prefs = normalizePreferences({ ...prefs, ...patch }, prefs.deviceName);
+  try {
+    localStorage.setItem(PREFS_KEY, JSON.stringify(prefs));
+  } catch {
+    // Private browsing: the settings apply for this session regardless.
+  }
+  renderSettings();
+  renderFeed();
+}
+
+function renderSettings(): void {
+  $<HTMLInputElement>('pref-name').value = prefs.deviceName;
+  $<HTMLSelectElement>('pref-severity').value = prefs.minSeverity;
+  $<HTMLInputElement>('pref-sound').checked = prefs.sound;
+  $<HTMLInputElement>('pref-desktop').checked =
+    'Notification' in window && Notification.permission === 'granted';
+  $<HTMLInputElement>('pref-speech').checked = prefs.speech.enabled;
+  $<HTMLInputElement>('pref-rate').value = String(prefs.speech.rate);
+  $('pref-rate-value').textContent = `${prefs.speech.rate.toFixed(1)}x`;
+  $<HTMLInputElement>('pref-repeat').value = String(prefs.speech.repeat);
+  $('pref-repeat-value').textContent = `${prefs.speech.repeat}x`;
+  $('settings-hub').textContent = `${client.serverName ?? 'NotifyJS'} at ${location.host}`;
+}
+
+function wireSettings(): void {
+  const severity = $<HTMLSelectElement>('pref-severity');
+  severity.replaceChildren(
+    ...SEVERITIES.map((s) => {
+      const option = document.createElement('option');
+      option.value = s;
+      option.textContent = s;
+      return option;
+    }),
+  );
+
+  $('settings-toggle').addEventListener('click', () => {
+    renderSettings();
+    $('settings').hidden = false;
+  });
+  $('settings-close').addEventListener('click', () => ($('settings').hidden = true));
+
+  $('pref-name').addEventListener('change', (e) =>
+    savePreferences({ deviceName: (e.target as HTMLInputElement).value }),
+  );
+  severity.addEventListener('change', (e) =>
+    savePreferences({ minSeverity: (e.target as HTMLSelectElement).value as Severity }),
+  );
+  $('pref-sound').addEventListener('change', (e) =>
+    savePreferences({ sound: (e.target as HTMLInputElement).checked }),
+  );
+  $('pref-speech').addEventListener('change', (e) =>
+    savePreferences({ speech: { ...prefs.speech, enabled: (e.target as HTMLInputElement).checked } }),
+  );
+  $('pref-rate').addEventListener('input', (e) =>
+    savePreferences({ speech: { ...prefs.speech, rate: Number((e.target as HTMLInputElement).value) } }),
+  );
+  $('pref-repeat').addEventListener('input', (e) =>
+    savePreferences({ speech: { ...prefs.speech, repeat: Number((e.target as HTMLInputElement).value) } }),
+  );
+
+  // Permission can only be requested from a gesture, so it lives here rather
+  // than being toggled programmatically.
+  $('pref-desktop').addEventListener('change', async () => {
+    await ringer.unlock();
+    await Notification.requestPermission();
+    renderSettings();
+    updateNotificationButton();
+  });
+
+  $('pref-forget').addEventListener('click', async () => {
+    client.disconnect();
+    await client.forgetCredentials();
+    location.reload();
+  });
+}
 
 /* ---------------------------------------------------------------- */
 /* Pairing                                                           */
@@ -70,7 +173,7 @@ $('pair-form').addEventListener('submit', (e) => {
     showPairing('That code is not valid. Check for a typo and try again.');
     return;
   }
-  if (name) localStorage.setItem('notifyjs.name', name);
+  if (name) savePreferences({ deviceName: name });
 
   $<HTMLButtonElement>('pair-submit').disabled = true;
   $('pair-error').hidden = true;
@@ -109,7 +212,9 @@ function buildFilters(): void {
 
 function renderFeed(): void {
   const list = $('feed');
-  const visible = feed.filter((n) => matchesFilter(n, activeFilter));
+  const visible = feed
+    .filter((n) => severityRank(n.severity) >= severityRank(prefs.minSeverity))
+    .filter((n) => matchesFilter(n, activeFilter));
   $('empty').hidden = visible.length > 0;
   list.replaceChildren(
     ...visible.map((n) =>
@@ -178,7 +283,7 @@ function openCall(call: CallRequest): void {
   // immediately rather than waiting its turn behind the feed.
   announce(`Incoming alert from ${call.from}. ${call.message}`);
   $<HTMLButtonElement>('call-answer').focus();
-  ringer.start();
+  if (prefs.sound) ringer.start();
 }
 
 function closeCall(): void {
@@ -232,7 +337,15 @@ $('call-answer').addEventListener('click', async () => {
   $('call-decline').hidden = true;
   $('call-speaking').hidden = false;
 
-  await speak(call);
+  if (prefs.speech.enabled) {
+    await speak({
+      ...call,
+      rate: prefs.speech.rate,
+      pitch: prefs.speech.pitch,
+      repeat: prefs.speech.repeat,
+      lang: prefs.speech.lang || call.lang,
+    });
+  }
   client.endCall(call.id);
   closeCall();
 });
@@ -351,6 +464,8 @@ client.on('ready', (ready) => {
   $('device-line').textContent = `${ready.deviceName} · ${ready.role}`;
   $('devices-toggle').hidden = !canManage();
   $('snooze').hidden = false;
+  $('settings-toggle').hidden = false;
+  renderSettings();
   updateNotificationButton();
   // Catch up on anything sent while this tab was closed.
   client.sync();
@@ -448,6 +563,40 @@ client.on('error', (err) => {
   }
 });
 
+/* ---------------------------------------------------------------- */
+/* Staying current                                                   */
+/* ---------------------------------------------------------------- */
+
+/**
+ * The dashboard is served by the hub, so upgrading the hub is what ships a new
+ * dashboard - but a tab left open keeps running the old assets indefinitely.
+ * Noticing the version changed and offering a reload closes that gap without
+ * ever reloading out from under someone mid-incident.
+ */
+let loadedVersion: string | undefined;
+
+async function checkHubVersion(): Promise<void> {
+  try {
+    const info = (await (await fetch('./hub.json', { cache: 'no-store' })).json()) as {
+      version?: string;
+    };
+    if (!info.version) return;
+
+    if (loadedVersion === undefined) {
+      loadedVersion = info.version;
+      return;
+    }
+    if (info.version === loadedVersion) return;
+
+    $('app-update-text').textContent = `NotifyJS ${info.version} is running on the hub.`;
+    $('app-update').hidden = false;
+  } catch {
+    // The hub being briefly unreachable is the watchdog's business, not this.
+  }
+}
+
+$('app-update-reload').addEventListener('click', () => location.reload());
+
 /** Coming back from background may have missed frames; resync. */
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'visible' && client.status === 'ready') client.sync();
@@ -455,7 +604,12 @@ document.addEventListener('visibilitychange', () => {
 
 async function main(): Promise<void> {
   buildFilters();
+  wireSettings();
   renderFeed();
+
+  void checkHubVersion();
+  // Slow on purpose: this is a courtesy, not a race.
+  setInterval(() => void checkHubVersion(), 10 * 60_000);
   if (await client.isPaired()) {
     showApp();
     await client.connect();

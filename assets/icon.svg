@@ -1,0 +1,37 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <!--
+    NotifyJS mark: a bell that also reads as a signal.
+
+    The bell says "alert"; the two arcs say "this travels to you". Drawn as
+    solid geometry rather than thin strokes so it survives being scaled down
+    to a 48px launcher icon or a 24px status-bar glyph.
+  -->
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#4b7dff"/>
+      <stop offset="1" stop-color="#1b3fb8"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="1024" height="1024" fill="url(#bg)"/>
+
+  <g fill="none" stroke="#ffffff" stroke-width="34" stroke-linecap="round" opacity="0.45">
+    <path d="M246 352 Q178 488 246 624"/>
+    <path d="M778 352 Q846 488 778 624"/>
+  </g>
+
+  <g fill="#ffffff">
+    <circle cx="512" cy="224" r="27"/>
+    <path d="M512 237
+             C610 237 682 314 682 410
+             L682 521
+             C682 557 700 584 722 602
+             L722 629
+             L302 629
+             L302 602
+             C324 584 342 557 342 521
+             L342 410
+             C342 314 414 237 512 237 Z"/>
+    <circle cx="512" cy="690" r="51"/>
+  </g>
+</svg>

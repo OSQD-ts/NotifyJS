@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <!--
+    Android status-bar glyph. The platform discards colour and keeps only the
+    alpha channel, so this is the same bell as a solid white silhouette on
+    transparency - no gradient, no arcs, nothing that would turn into mush at
+    24px.
+  -->
+  <g fill="#ffffff">
+    <circle cx="512" cy="224" r="27"/>
+    <path d="M512 237
+             C610 237 682 314 682 410
+             L682 521
+             C682 557 700 584 722 602
+             L722 629
+             L302 629
+             L302 602
+             C324 584 342 557 342 521
+             L342 410
+             C342 314 414 237 512 237 Z"/>
+    <circle cx="512" cy="690" r="51"/>
+  </g>
+</svg>

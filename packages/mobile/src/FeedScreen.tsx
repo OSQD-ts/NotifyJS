@@ -1,51 +1,59 @@
 import { FlatList, RefreshControl, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
-import type { ConnectionStatus, Notification } from '@notifyjs/protocol';
+import type { SourceState } from '@notifyjs/protocol';
+import type { FeedEntry } from './useSources';
 import { SEVERITY_COLORS, useTheme } from './theme';
 
 interface Props {
-  notifications: Notification[];
-  status: ConnectionStatus;
-  role: string | undefined;
-  hubName: string;
+  feed: FeedEntry[];
+  sources: SourceState[];
   snoozedUntil: number;
-  serviceDown: { title: string; body?: string } | undefined;
   onRefresh(): void;
-  onUnpair(): void;
   onSnooze(): void;
+  onOpenSettings(): void;
 }
 
-const STATUS_COLORS: Partial<Record<ConnectionStatus, string>> = {
-  ready: '#35c48a',
-  connecting: '#e0a33a',
-  reconnecting: '#e0a33a',
-  error: '#ff6b6b',
-  revoked: '#ff6b6b',
-};
-
 export function FeedScreen({
-  notifications,
-  status,
-  role,
-  hubName,
+  feed,
+  sources,
   snoozedUntil,
-  serviceDown,
   onRefresh,
-  onUnpair,
   onSnooze,
+  onOpenSettings,
 }: Props) {
   const t = useTheme();
   const snoozing = snoozedUntil > Date.now();
+
+  const enabled = sources.filter((s) => s.enabled);
+  const connected = enabled.filter((s) => s.status === 'ready').length;
+  const down = sources.filter((s) => s.serviceDown);
+
+  // With several hubs, a single status word would hide which one is unhappy.
+  const summary =
+    sources.length === 0
+      ? 'no sources'
+      : `${connected}/${enabled.length} connected`;
 
   return (
     <View style={[styles.root, { backgroundColor: t.bg }]}>
       <View style={[styles.header, { borderColor: t.border, backgroundColor: t.surface }]}>
         <View style={styles.headerText}>
-          <Text style={[styles.hub, { color: t.text }]}>{hubName}</Text>
-          <Text style={[styles.role, { color: t.muted }]}>{role ? `role: ${role}` : 'not paired'}</Text>
+          <Text style={[styles.hub, { color: t.text }]}>NotifyJS</Text>
+          <Text style={[styles.role, { color: t.muted }]}>{summary}</Text>
         </View>
         <View style={styles.headerRight}>
-          <View style={[styles.dot, { backgroundColor: STATUS_COLORS[status] ?? t.muted }]} />
-          <Text style={[styles.status, { color: t.muted }]}>{status}</Text>
+          <View
+            style={[
+              styles.dot,
+              {
+                backgroundColor:
+                  down.length > 0
+                    ? SEVERITY_COLORS.critical
+                    : connected === enabled.length && enabled.length > 0
+                      ? SEVERITY_COLORS.success
+                      : t.muted,
+              },
+            ]}
+          />
           <TouchableOpacity
             onPress={onSnooze}
             hitSlop={10}
@@ -56,39 +64,44 @@ export function FeedScreen({
               {snoozing ? 'Snoozed' : 'Snooze'}
             </Text>
           </TouchableOpacity>
-          <TouchableOpacity onPress={onUnpair} hitSlop={10} accessibilityRole="button">
-            <Text style={[styles.unpair, { color: t.muted }]}>Unpair</Text>
+          <TouchableOpacity onPress={onOpenSettings} hitSlop={10} accessibilityRole="button">
+            <Text style={[styles.unpair, { color: t.muted }]}>Settings</Text>
           </TouchableOpacity>
         </View>
       </View>
 
-      {serviceDown ? (
+      {down.map((source) => (
         <View
+          key={source.id}
           style={[styles.serviceDown, { backgroundColor: t.surface, borderColor: SEVERITY_COLORS.critical }]}
           accessibilityRole="alert"
         >
           <Text style={[styles.serviceDownTitle, { color: SEVERITY_COLORS.critical }]}>
-            {serviceDown.title}
+            {source.serviceDown?.title}
           </Text>
-          {serviceDown.body ? (
-            <Text style={[styles.serviceDownBody, { color: t.muted }]}>{serviceDown.body}</Text>
+          {source.serviceDown?.body ? (
+            <Text style={[styles.serviceDownBody, { color: t.muted }]}>{source.serviceDown.body}</Text>
           ) : null}
         </View>
-      ) : null}
+      ))}
 
       <FlatList
-        data={notifications}
-        keyExtractor={(n) => n.id}
-        contentContainerStyle={notifications.length === 0 ? styles.emptyWrap : styles.list}
+        data={feed}
+        keyExtractor={(e) => `${e.sourceId}:${e.notification.id}`}
+        contentContainerStyle={feed.length === 0 ? styles.emptyWrap : styles.list}
         refreshControl={
           <RefreshControl refreshing={false} onRefresh={onRefresh} tintColor={t.muted} />
         }
         ListEmptyComponent={
           <Text style={[styles.empty, { color: t.muted }]}>
-            Nothing yet. Alerts from your app will appear here.
+            {sources.length === 0
+              ? 'No sources yet. Open Settings to add one.'
+              : 'Nothing yet. Alerts from your hubs will appear here.'}
           </Text>
         }
-        renderItem={({ item }) => (
+        renderItem={({ item: entry }) => {
+          const item = entry.notification;
+          return (
           <View
             style={[
               styles.item,
@@ -107,7 +120,7 @@ export function FeedScreen({
                 {item.severity.toUpperCase()}
               </Text>
               <Text style={[styles.channel, { color: t.muted, backgroundColor: t.surface2 }]}>
-                {item.channel}
+                {entry.sourceLabel} · {item.channel}
               </Text>
               <Text style={[styles.time, { color: t.muted }]}>
                 {new Date(item.ts).toLocaleTimeString()}
@@ -115,11 +128,12 @@ export function FeedScreen({
             </View>
             <Text style={[styles.title, { color: t.text }]}>{item.title}</Text>
             {item.body ? <Text style={[styles.body, { color: t.muted }]}>{item.body}</Text> : null}
-            {item.resolvedAt ? (
+            {entry.resolvedAt ? (
               <Text style={[styles.resolved, { color: SEVERITY_COLORS.success }]}>Resolved</Text>
             ) : null}
           </View>
-        )}
+          );
+        }}
       />
     </View>
   );

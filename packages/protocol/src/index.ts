@@ -8,3 +8,6 @@ export * from './rbac.js';
 export * from './crypto.js';
 export * from './client.js';
 export * from './link.js';
+export * from './preferences.js';
+export * from './sources.js';
+export * from './updates.js';

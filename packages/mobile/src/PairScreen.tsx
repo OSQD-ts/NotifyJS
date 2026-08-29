@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import {
   ActivityIndicator,
+  Image,
   KeyboardAvoidingView,
   Platform,
   StyleSheet,
@@ -13,12 +14,14 @@ import { isPairingCodeValid } from '@notifyjs/protocol';
 import { useTheme } from './theme';
 
 interface Props {
-  onPair(code: string): Promise<void>;
+  onPair(code: string, url: string): Promise<void>;
   onScan(): void;
   hubUrl: string;
   onChangeHub(url: string): void;
   error?: string;
   busy: boolean;
+  /** Present only when there is already a source to go back to. */
+  onCancel?(): void;
 }
 
 /** Formats as the user types: XXXX-XXXX-XXXX. */
@@ -30,7 +33,7 @@ function format(raw: string): string {
     .replace(/(.{4})(?=.)/g, '$1-');
 }
 
-export function PairScreen({ onPair, onScan, hubUrl, onChangeHub, error, busy }: Props) {
+export function PairScreen({ onPair, onScan, hubUrl, onChangeHub, error, busy, onCancel }: Props) {
   const t = useTheme();
   const [code, setCode] = useState('');
   const [localError, setLocalError] = useState<string | undefined>();
@@ -44,7 +47,7 @@ export function PairScreen({ onPair, onScan, hubUrl, onChangeHub, error, busy }:
       return;
     }
     setLocalError(undefined);
-    await onPair(code);
+    await onPair(code, hubUrl);
   };
 
   return (
@@ -53,10 +56,10 @@ export function PairScreen({ onPair, onScan, hubUrl, onChangeHub, error, busy }:
       behavior={Platform.OS === 'ios' ? 'padding' : undefined}
     >
       <View style={[styles.card, { backgroundColor: t.surface, borderColor: t.border }]}>
-        <Text style={styles.bell}>{'\u{1F514}'}</Text>
-        <Text style={[styles.title, { color: t.text }]}>Connect this phone</Text>
+        <Image source={require('../assets/icon.png')} style={styles.mark} />
+        <Text style={[styles.title, { color: t.text }]}>Add a source</Text>
         <Text style={[styles.sub, { color: t.muted }]}>
-          Enter the pairing code from your hub. It works once and expires in minutes.
+          Scan or enter a pairing code. A phone can watch as many hubs as you like.
         </Text>
 
         <TouchableOpacity
@@ -106,6 +109,12 @@ export function PairScreen({ onPair, onScan, hubUrl, onChangeHub, error, busy }:
         {(localError ?? error) ? (
           <Text style={styles.error}>{localError ?? error}</Text>
         ) : null}
+
+        {onCancel ? (
+          <TouchableOpacity onPress={onCancel} accessibilityRole="button">
+            <Text style={[styles.hubLine, { color: t.muted }]}>Cancel</Text>
+          </TouchableOpacity>
+        ) : null}
       </View>
     </KeyboardAvoidingView>
   );
@@ -114,7 +123,7 @@ export function PairScreen({ onPair, onScan, hubUrl, onChangeHub, error, busy }:
 const styles = StyleSheet.create({
   root: { flex: 1, justifyContent: 'center', padding: 24 },
   card: { borderRadius: 16, borderWidth: 1, padding: 28, alignItems: 'center' },
-  bell: { fontSize: 34, marginBottom: 8 },
+  mark: { width: 64, height: 64, borderRadius: 16, marginBottom: 10 },
   title: { fontSize: 21, fontWeight: '700', marginBottom: 6 },
   sub: { fontSize: 14, textAlign: 'center', marginBottom: 22, lineHeight: 20 },
   scanButton: { marginTop: 4, marginBottom: 6 },

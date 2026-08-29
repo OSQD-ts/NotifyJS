@@ -1,16 +1,16 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { AppState, StyleSheet, View } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
-import * as Notifications from 'expo-notifications';
 import * as Linking from 'expo-linking';
+import * as Notifications from 'expo-notifications';
+import { parsePairingLink } from '@notifyjs/protocol';
 
-import { useNotify } from './src/useNotify';
+import { useSources } from './src/useSources';
 import { PairScreen } from './src/PairScreen';
 import { ScanScreen } from './src/ScanScreen';
 import { FeedScreen } from './src/FeedScreen';
 import { CallScreen } from './src/CallScreen';
-import { PREF_KEYS, getPref, setPref } from './src/storage';
-import { parsePairingLink } from '@notifyjs/protocol';
+import { SettingsScreen } from './src/SettingsScreen';
 import { useTheme } from './src/theme';
 
 /** Alerts should surface even while the app is in the foreground. */
@@ -22,186 +22,143 @@ Notifications.setNotificationHandler({
   }),
 });
 
-const DEFAULT_HUB = 'ws://192.168.1.10:7741';
+type View_ = 'feed' | 'settings' | 'add' | 'scan';
 
 export default function App() {
   const t = useTheme();
-  const [hubUrl, setHubUrl] = useState(DEFAULT_HUB);
-  const [deviceName, setDeviceName] = useState('Phone');
-  const [loaded, setLoaded] = useState(false);
+  const { manager, sources, feed, activeCall, prefs, loaded, savePrefs, closeCall } = useSources();
+
+  const [view, setView] = useState<View_>('feed');
   const [busy, setBusy] = useState(false);
-  /**
-   * A code waiting to be redeemed. Held here rather than passed to a client
-   * method, because redeeming it usually changes the hub URL too - and that
-   * rebuilds the client underneath.
-   */
-  const [pendingCode, setPendingCode] = useState<string | undefined>();
-
-  /**
-   * A notifyjs:// link, scanned by the system camera or tapped elsewhere.
-   * Handled at this level so the hub URL is in place before the client that
-   * will redeem the code is built.
-   */
-  useEffect(() => {
-    const handle = (url: string | null) => {
-      const link = url ? parsePairingLink(url) : undefined;
-      if (!link) return;
-      setHubUrl(link.hub);
-      void setPref(PREF_KEYS.url, link.hub);
-      setPendingCode(link.code);
-    };
-    void Linking.getInitialURL().then(handle);
-    const sub = Linking.addEventListener('url', (e) => handle(e.url));
-    return () => sub.remove();
-  }, []);
-
-  // Load saved preferences before creating the client, so it is built once
-  // with the right URL rather than connecting to the default and reconnecting.
-  useEffect(() => {
-    void (async () => {
-      const [url, name] = await Promise.all([getPref(PREF_KEYS.url), getPref(PREF_KEYS.name)]);
-      if (url) setHubUrl(url);
-      if (name) setDeviceName(name);
-      setLoaded(true);
-    })();
-  }, []);
+  const [error, setError] = useState<string | undefined>();
+  const [snoozedUntil, setSnoozedUntil] = useState(0);
+  const [pendingUrl, setPendingUrl] = useState<string | undefined>();
 
   useEffect(() => {
     void Notifications.requestPermissionsAsync();
   }, []);
 
-  if (!loaded) return <View style={[styles.root, { backgroundColor: t.bg }]} />;
-  return (
-    <Connected
-      hubUrl={hubUrl}
-      deviceName={deviceName}
-      setHubUrl={setHubUrl}
-      pendingCode={pendingCode}
-      setPendingCode={setPendingCode}
-      busy={busy}
-      setBusy={setBusy}
-    />
-  );
-}
-
-interface ConnectedProps {
-  hubUrl: string;
-  deviceName: string;
-  setHubUrl(url: string): void;
-  pendingCode: string | undefined;
-  setPendingCode(code: string | undefined): void;
-  busy: boolean;
-  setBusy(v: boolean): void;
-}
-
-function Connected({
-  hubUrl,
-  deviceName,
-  setHubUrl,
-  pendingCode,
-  setPendingCode,
-  busy,
-  setBusy,
-}: ConnectedProps) {
-  const t = useTheme();
-  const [scanning, setScanning] = useState(false);
-  const { state, client, pair, clearCall, sync, unpair, snooze, unsnooze, snoozedUntil } =
-    useNotify(hubUrl, deviceName, pendingCode);
-
-  // The socket only lives while the app does. Coming back to the foreground
-  // is the moment to ask the hub what was missed.
-  useEffect(() => {
-    const sub = AppState.addEventListener('change', (next) => {
-      if (next === 'active' && state.status === 'ready') sync();
-    });
-    return () => sub.remove();
-  }, [state.status, sync]);
-
-  // Notifications are posted by the native module now, which works whether the
-  // app is in front, behind, or the screen is off - a JS scheduler only runs
-  // while JavaScript does.
-
-  const handlePair = useCallback(
-    async (code: string) => {
+  /** Adds a source, surfacing failures instead of leaving a dead screen. */
+  const addSource = useCallback(
+    async (input: { link?: string; url?: string; code: string }) => {
       setBusy(true);
-      await setPref(PREF_KEYS.url, hubUrl);
+      setError(undefined);
       try {
-        await pair(code);
+        await manager.add(input);
+        setView('feed');
+        setPendingUrl(undefined);
+      } catch (err) {
+        setError(err instanceof Error ? err.message : String(err));
+        // Show the failure rather than swallowing it: a link that fails while
+        // the settings screen is open would otherwise do nothing visible.
+        setView('add');
       } finally {
         setBusy(false);
       }
     },
-    [hubUrl, pair, setBusy],
-  );
-
-  // Once paired, drop the code so a later remount does not try to redeem a
-  // single-use code a second time.
-  useEffect(() => {
-    if (state.paired && pendingCode) setPendingCode(undefined);
-  }, [state.paired, pendingCode, setPendingCode]);
-
-  const changeHub = useCallback(
-    (url: string) => {
-      setHubUrl(url);
-      void setPref(PREF_KEYS.url, url);
-    },
-    [setHubUrl],
+    [manager],
   );
 
   /**
-   * A scanned link carries the hub address as well as the code. Both are
-   * handed upwards: changing the URL rebuilds the client, and the new one
-   * redeems the code once it exists.
+   * A notifyjs:// link opens the app straight into adding that hub. Handled
+   * here rather than in a screen so it works whichever screen is showing.
    */
-  const onScanned = useCallback(
-    (link: { hub: string; code: string }) => {
-      setScanning(false);
-      changeHub(link.hub);
-      setPendingCode(link.code);
-    },
-    [changeHub, setPendingCode],
-  );
+  const handledLinks = useRef(new Set<string>());
 
-  if (state.activeCall) {
-    const call = state.activeCall;
+  useEffect(() => {
+    const handle = (url: string | null) => {
+      if (!url) return;
+      // `getInitialURL()` keeps returning the URL the app was *launched* with,
+      // so without this every later link re-attempts that original one - and a
+      // pairing code is single-use, so the retry always fails.
+      if (handledLinks.current.has(url)) return;
+      handledLinks.current.add(url);
+
+      const link = parsePairingLink(url);
+      if (link) void addSource({ url: link.hub, code: link.code });
+    };
+    void Linking.getInitialURL().then(handle);
+    const sub = Linking.addEventListener('url', (e) => handle(e.url));
+    return () => sub.remove();
+  }, [addSource]);
+
+  // Coming back to the foreground is the moment to ask what was missed.
+  useEffect(() => {
+    const sub = AppState.addEventListener('change', (next) => {
+      if (next === 'active') manager.syncAll();
+    });
+    return () => sub.remove();
+  }, [manager]);
+
+  if (!loaded) return <View style={[styles.root, { backgroundColor: t.bg }]} />;
+
+  if (activeCall) {
+    const { call, sourceId } = activeCall;
     return (
       <>
         <StatusBar style={t.isDark ? 'light' : 'dark'} />
         <CallScreen
           call={call}
-          onAnswer={() => client.answerCall(call.id)}
+          speech={prefs.speech}
+          onAnswer={() => manager.answerCall(sourceId, call.id)}
           onDecline={() => {
-            client.declineCall(call.id);
-            clearCall(call.id);
+            manager.declineCall(sourceId, call.id);
+            closeCall(activeCall);
           }}
           onFinished={() => {
-            client.endCall(call.id);
-            clearCall(call.id);
+            manager.endCall(sourceId, call.id);
+            closeCall(activeCall);
           }}
         />
       </>
     );
   }
 
-  if (!state.paired) {
-    if (scanning) {
-      return (
-        <>
-          <StatusBar style="light" />
-          <ScanScreen onScanned={onScanned} onCancel={() => setScanning(false)} />
-        </>
-      );
-    }
+  if (view === 'scan') {
+    return (
+      <>
+        <StatusBar style="light" />
+        <ScanScreen
+          onScanned={(link) => void addSource({ url: link.hub, code: link.code })}
+          onCancel={() => setView('add')}
+        />
+      </>
+    );
+  }
+
+  // The pairing screen doubles as the empty state and as "add another source".
+  if (view === 'add' || sources.length === 0) {
     return (
       <>
         <StatusBar style={t.isDark ? 'light' : 'dark'} />
         <PairScreen
-          onPair={handlePair}
-          onScan={() => setScanning(true)}
-          hubUrl={hubUrl}
-          onChangeHub={changeHub}
-          error={state.error}
+          onPair={(code, url) => addSource({ url, code })}
+          onScan={() => setView('scan')}
+          hubUrl={pendingUrl ?? 'ws://192.168.1.10:7741'}
+          onChangeHub={setPendingUrl}
+          error={error}
           busy={busy}
+          onCancel={sources.length > 0 ? () => setView('settings') : undefined}
+        />
+      </>
+    );
+  }
+
+  if (view === 'settings') {
+    return (
+      <>
+        <StatusBar style={t.isDark ? 'light' : 'dark'} />
+        <SettingsScreen
+          prefs={prefs}
+          sources={sources}
+          onChange={savePrefs}
+          onAddSource={() => {
+            setError(undefined);
+            setView('add');
+          }}
+          onToggleSource={(id, enabled) => void manager.setEnabled(id, enabled)}
+          onRemoveSource={(id) => void manager.remove(id)}
+          onClose={() => setView('feed')}
         />
       </>
     );
@@ -211,15 +168,20 @@ function Connected({
     <>
       <StatusBar style={t.isDark ? 'light' : 'dark'} />
       <FeedScreen
-        notifications={state.notifications}
-        status={state.status}
-        role={state.role}
-        hubName={client.serverName ?? 'NotifyJS'}
+        feed={feed}
+        sources={sources}
         snoozedUntil={snoozedUntil}
-        serviceDown={state.serviceDown}
-        onRefresh={sync}
-        onUnpair={unpair}
-        onSnooze={() => (snoozedUntil > Date.now() ? unsnooze() : snooze(30 * 60_000))}
+        onRefresh={() => manager.syncAll()}
+        onSnooze={() => {
+          if (snoozedUntil > Date.now()) {
+            manager.unsnoozeAll();
+            setSnoozedUntil(0);
+          } else {
+            manager.snoozeAll(30 * 60_000);
+            setSnoozedUntil(Date.now() + 30 * 60_000);
+          }
+        }}
+        onOpenSettings={() => setView('settings')}
       />
     </>
   );

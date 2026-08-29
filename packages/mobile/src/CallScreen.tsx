@@ -8,6 +8,8 @@ import { SEVERITY_COLORS, useTheme } from './theme';
 
 interface Props {
   call: CallRequest;
+  /** The listener's own speech settings, which win over the call's defaults. */
+  speech: { enabled: boolean; rate: number; pitch: number; lang: string; repeat: number };
   onAnswer(): void;
   onDecline(): void;
   onFinished(): void;
@@ -24,7 +26,7 @@ const RING_PATTERN = [0, 700, 800, 700, 1600];
  * way a phone call does - see the CallKit / ConnectionService notes in the
  * README; the protocol side needs no changes for it.
  */
-export function CallScreen({ call, onAnswer, onDecline, onFinished }: Props) {
+export function CallScreen({ call, speech, onAnswer, onDecline, onFinished }: Props) {
   const t = useTheme();
   const [speaking, setSpeaking] = useState(false);
   useKeepAwake();
@@ -50,14 +52,20 @@ export function CallScreen({ call, onAnswer, onDecline, onFinished }: Props) {
     setSpeaking(true);
     onAnswer();
 
-    const repeats = Math.max(1, Math.min(call.repeat ?? 1, 5));
+    if (!speech.enabled) {
+      // Answering still counts; the person simply does not want it read out.
+      onFinished();
+      return;
+    }
+
+    const repeats = Math.max(1, Math.min(speech.repeat || call.repeat || 1, 5));
     let spoken = 0;
 
     const speakOnce = () => {
       Speech.speak(call.message, {
-        language: call.lang ?? 'en-US',
-        rate: call.rate ?? 1,
-        pitch: call.pitch ?? 1,
+        language: speech.lang || call.lang || 'en-US',
+        rate: speech.rate || call.rate || 1,
+        pitch: speech.pitch || call.pitch || 1,
         onDone: () => (++spoken < repeats ? speakOnce() : onFinished()),
         // A TTS failure must still close the call, or the screen would be
         // stuck with no way back to the feed.

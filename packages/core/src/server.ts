@@ -807,6 +807,9 @@ export class Notifier extends EventEmitter<NotifierEvents> {
           name: this.opts.name,
           serverId: this.store.serverId,
           protocol: PROTOCOL_VERSION,
+          // Lets the dashboard notice the hub was upgraded underneath it and
+          // offer a reload, rather than running stale assets indefinitely.
+          version: NOTIFYJS_VERSION,
           ws: this.url,
         }),
       );
@@ -1628,6 +1631,9 @@ export class Notifier extends EventEmitter<NotifierEvents> {
 }
 
 /* -------------------------------------------------------------------- */
+
+/** Stamped in at bundle time; falls back for source checkouts. */
+const NOTIFYJS_VERSION = process.env.NOTIFYJS_VERSION ?? '0.1.0';
 
 const MAX_ACK_RETRIES = 20;
 

@@ -41,6 +41,10 @@ if (result.outcome !== 'answered') {
 | `@notifyjs/cli` | `notifyjs serve` for a standalone hub, `notifyjs listen` to turn a desktop into a device. |
 | `@notifyjs/mobile` | React Native (Expo) app: notification feed plus a full-screen call screen with TTS. |
 
+The icon is generated from one SVG source (`assets/icon.svg`) into every size
+each platform wants — launcher, Android adaptive foreground, splash, monochrome
+status-bar glyph, and the web favicon — with `npm run icons`.
+
 ```
 your app  ──imports──►  @notifyjs/core
                              │  WebSocket server on :7741
@@ -501,6 +505,33 @@ hub address and the code together. (Typing both by hand still works.) The app
 holds a WebSocket while it is running, mirrors notifications into the OS tray,
 and shows a full-screen call UI that vibrates and speaks on answer.
 
+### Several hubs at once
+
+A phone or dashboard can subscribe to as many hubs as you like — a home server,
+a work hub, a side project — and see one merged feed. Each subscription is a
+**separate identity**: its own keypair, its own role, its own history. Hubs
+never learn about each other, and revoking a device on one has no effect on the
+rest. Alerts are tagged with the hub they came from, and a call names its
+source so you know who is ringing.
+
+Add one by scanning its QR code or pasting a pairing link; mute one without
+unpairing it; remove one and its keypair is discarded.
+
+### Settings
+
+Both clients have a settings screen covering what the person carrying the
+device gets to decide, as opposed to what the hub's role decides for them:
+
+- **Sources** — add, mute, remove.
+- **Device name** — how this device appears in each hub's device list.
+- **Show at least** — a personal severity floor. Applied *after* the role
+  filter, so it can only ever narrow what you see, never widen it.
+- **Sound and vibration**, and desktop notification permission on the web.
+- **Speech** — whether answering a call reads the message aloud, how fast, and
+  how many times.
+- **Stay connected** (Android) — the foreground service, with the permanent
+  notification it costs stated plainly.
+
 ### Calls on a locked screen
 
 On Android the app ships a small native module (`modules/notifyjs-call`) that
@@ -572,6 +603,34 @@ npm test
 - **Dashboard** — rendering against jsdom, including the rule that alert text is
   never parsed as markup.
 - **CLI** — driven as a subprocess against a live hub.
+
+## Staying up to date
+
+**The hub and CLI** update themselves:
+
+```bash
+notifyjs update --check     # what is available
+notifyjs update             # download, verify, replace
+notifyjs update --prerelease  # track the rolling build from main
+```
+
+`serve` also mentions a newer build on startup, without blocking or nagging.
+
+The download is checked against the release's own `SHA256SUMS.txt` before
+anything is touched, and the swap is an atomic rename — so a truncated or
+tampered archive never reaches the filesystem, and there is no moment where the
+binary is half-written. The previous build is kept as `notifyjs.previous`,
+because the likeliest thing to go wrong with an update is the new version.
+
+**The phone app** checks on opening Settings and offers a one-tap update. It
+downloads the APK and hands it to Android's installer — the app cannot install
+anything itself, and the system still asks you to confirm. An alerting app that
+silently replaced its own code would be a worse property than a version being a
+few days old.
+
+**The dashboard** is served by the hub, so upgrading the hub ships a new
+dashboard. A tab left open notices the version changed and offers a reload
+rather than reloading out from under you mid-incident.
 
 ## Releasing
 

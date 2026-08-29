@@ -5,13 +5,15 @@
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <title>NotifyJS</title>
     <link rel="stylesheet" href="./styles.css" />
-    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><text y='26' font-size='26'>&#128276;</text></svg>" />
+    <link rel="icon" type="image/svg+xml" href="./icon.svg" />
+    <link rel="alternate icon" href="./favicon.png" />
+    <link rel="apple-touch-icon" href="./favicon.png" />
   </head>
   <body>
     <!-- Pairing gate: shown until this browser holds device credentials. -->
     <section id="pair" class="pair" hidden>
       <div class="pair-card">
-        <div class="bell" aria-hidden="true">&#128276;</div>
+        <img class="pair-mark" src="./icon.svg" alt="" width="72" height="72" />
         <h1>Connect this device</h1>
         <p class="muted">
           Enter the pairing code from your hub. It works once and expires in minutes.
@@ -36,13 +38,14 @@
     <div id="app" hidden>
       <header>
         <div class="brand">
-          <span class="bell" aria-hidden="true">&#128276;</span>
+          <img class="brand-mark" src="./icon.svg" alt="" width="28" height="28" />
           <div>
             <strong id="hub-name">NotifyJS</strong>
             <span id="device-line" class="muted small"></span>
           </div>
         </div>
         <div class="header-actions">
+          <button id="settings-toggle" class="ghost" hidden>Settings</button>
           <button id="snooze" class="ghost" hidden>Snooze 30m</button>
           <button id="enable-notifications" class="ghost" hidden>Enable alerts</button>
           <button id="devices-toggle" class="ghost" hidden>Devices</button>
@@ -53,6 +56,12 @@
       <!-- Screen readers get a one-line summary of each new alert; reading the
            whole feed again on every arrival would be unusable. -->
       <p id="announcer" class="visually-hidden" role="status" aria-live="polite"></p>
+
+      <!-- Shown when the hub has been upgraded underneath this page. -->
+      <div id="app-update" class="app-update" hidden role="status">
+        <span id="app-update-text"></span>
+        <button id="app-update-reload">Reload</button>
+      </div>
 
       <!-- Raised by this browser, not by the hub: if the hub could tell you it
            was down, it would not be down. -->
@@ -71,6 +80,60 @@
           Nothing yet. Notifications sent from your app will appear here in real time.
         </p>
       </main>
+
+      <!-- Settings, kept in a drawer so the feed stays the primary view -->
+      <aside id="settings" class="drawer" hidden aria-label="Settings">
+        <div class="drawer-head">
+          <h2>Settings</h2>
+          <button id="settings-close" class="ghost" aria-label="Close">&times;</button>
+        </div>
+        <div class="drawer-body">
+          <section class="setting">
+            <label for="pref-name">Device name</label>
+            <p class="muted small">How this browser appears in the hub's device list.</p>
+            <input id="pref-name" maxlength="64" />
+          </section>
+
+          <section class="setting">
+            <label for="pref-severity">Show at least</label>
+            <p class="muted small">
+              Narrows what you see. It can never show more than your role allows.
+            </p>
+            <select id="pref-severity"></select>
+          </section>
+
+          <section class="setting toggle">
+            <label for="pref-sound">Ring on calls</label>
+            <input type="checkbox" id="pref-sound" />
+          </section>
+
+          <section class="setting toggle">
+            <label for="pref-desktop">Desktop notifications</label>
+            <input type="checkbox" id="pref-desktop" />
+          </section>
+
+          <section class="setting toggle">
+            <label for="pref-speech">Speak the message when answering</label>
+            <input type="checkbox" id="pref-speech" />
+          </section>
+
+          <section class="setting">
+            <label for="pref-rate">Speech speed <span id="pref-rate-value" class="muted"></span></label>
+            <input type="range" id="pref-rate" min="0.5" max="2" step="0.1" />
+          </section>
+
+          <section class="setting">
+            <label for="pref-repeat">Repeat spoken message <span id="pref-repeat-value" class="muted"></span></label>
+            <input type="range" id="pref-repeat" min="1" max="5" step="1" />
+          </section>
+
+          <section class="setting">
+            <h3 class="setting-heading">This hub</h3>
+            <p id="settings-hub" class="muted small"></p>
+            <button id="pref-forget" class="ghost">Unpair this browser</button>
+          </section>
+        </div>
+      </aside>
 
       <!-- Devices / admin drawer, only rendered for roles that may manage them -->
       <aside id="devices" class="drawer" hidden>

@@ -10,6 +10,7 @@ import { nodeCrypto } from '@notifyjs/protocol/node';
 import { readFileSync } from 'node:fs';
 import { fileStorage, defaultPath } from './storage.js';
 import { generateSelfSigned } from './cert.js';
+import { apply as applyUpdate, check as checkUpdate } from './selfupdate.js';
 import { desktopNotify, printNotification, speakCall } from './desktop.js';
 
 const HELP = `notifyjs - self-hosted notifications for your own devices
@@ -26,6 +27,7 @@ Usage
   notifyjs watch <name> [options] Expect a check-in, and alert when it stops
   notifyjs checkin <name>         Record a check-in for a watched job
   notifyjs watches                List what the hub is expecting
+  notifyjs update [options]       Check for and install a newer build
 
 Common options
   --url <ws://host:7741>   Hub to connect to (default ws://localhost:7741)
@@ -54,6 +56,11 @@ send / call options
   --severity <level>       debug|info|success|warning|error|critical
   --channel <name>         Channel to publish on (default default)
   --body <text>            Longer body text
+
+update options
+  --check                  Report what is available without installing
+  --prerelease             Include the rolling "latest" build from main
+  --repo <owner/name>      Source repository (default OSQD-ts/NotifyJS)
 
 watch options
   --every <duration>       How often a check-in is expected, e.g. 24h
@@ -92,6 +99,8 @@ async function main(): Promise<void> {
       return checkin(rest);
     case 'watches':
       return watches(rest);
+    case 'update':
+      return update(rest);
     case 'help':
     case '--help':
     case '-h':
@@ -166,6 +175,18 @@ async function serve(argv: string[]): Promise<void> {
         `  Valid for 15 minutes, one use.\n\n`,
     );
   }
+
+  // Best effort and never blocking: a hub must start whether or not GitHub is
+  // reachable, and an update notice is not worth delaying an alert path for.
+  void checkUpdate({ repository: DEFAULT_REPO, currentVersion: VERSION })
+    .then((result) => {
+      if (result.available && result.latest) {
+        process.stdout.write(
+          `\n  a newer build is available: ${result.latest.tag} (run "notifyjs update")\n\n`,
+        );
+      }
+    })
+    .catch(() => {});
 
   hub.on('device:paired', (d) => process.stdout.write(`paired: ${d.name} (${d.role})\n`));
   hub.on('banned', (b) =>
@@ -534,6 +555,51 @@ async function watches(argv: string[]): Promise<void> {
     );
   }
   client.disconnect();
+}
+
+/** Version stamped in at bundle time; falls back for source checkouts. */
+const VERSION = process.env.NOTIFYJS_VERSION ?? '0.1.0';
+const DEFAULT_REPO = 'OSQD-ts/NotifyJS';
+
+async function update(argv: string[]): Promise<void> {
+  const { values } = parseArgs({
+    args: argv,
+    options: {
+      check: { type: 'boolean', default: false },
+      prerelease: { type: 'boolean', default: false },
+      repo: { type: 'string' },
+    },
+  });
+
+  const repository = values.repo ?? DEFAULT_REPO;
+  process.stdout.write(`current version ${VERSION}, checking ${repository}...\n`);
+
+  const result = await checkUpdate({
+    repository,
+    currentVersion: VERSION,
+    includePrerelease: values.prerelease,
+  });
+
+  if (!result.latest) {
+    throw new Error('could not read the release feed - check the network or --repo');
+  }
+  if (!result.available) {
+    process.stdout.write(`already up to date (latest is ${result.latest.version})\n`);
+    return;
+  }
+
+  process.stdout.write(`\n  ${result.latest.tag} is available\n  ${result.latest.url}\n\n`);
+  if (values.check) {
+    process.stdout.write('run "notifyjs update" to install it\n');
+    return;
+  }
+
+  const installed = await applyUpdate(result.latest);
+  process.stdout.write(
+    `installed ${installed.version} to ${installed.installedAt}\n` +
+      `the previous build is kept at ${installed.backup}\n` +
+      `restart any running hub to pick it up\n`,
+  );
 }
 
 main().catch((err: unknown) => {

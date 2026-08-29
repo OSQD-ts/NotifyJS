@@ -16,3 +16,8 @@ packages/mobile/ios/
 
 # Copied from the repo root by each package's `prepack`. One source of truth.
 packages/*/LICENSE
+
+# Rendered from assets/*.svg by `npm run icons`.
+packages/mobile/assets/
+packages/web/public/favicon.png
+packages/web/public/icon.svg

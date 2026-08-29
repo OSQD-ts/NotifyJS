@@ -7,6 +7,7 @@
     "userInterfaceStyle": "automatic",
     "scheme": "notifyjs",
     "splash": {
+      "image": "./assets/splash.png",
       "resizeMode": "contain",
       "backgroundColor": "#0e1116"
     },
@@ -32,16 +33,27 @@
         "POST_NOTIFICATIONS",
         "INTERNET",
         "CAMERA",
-        "USE_FULL_SCREEN_INTENT"
+        "USE_FULL_SCREEN_INTENT",
+        "REQUEST_INSTALL_PACKAGES"
       ],
       "usesCleartextTraffic": true,
       "blockedPermissions": [
         "android.permission.RECORD_AUDIO"
-      ]
+      ],
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/adaptive-icon.png",
+        "backgroundColor": "#1b3fb8"
+      }
     },
     "plugins": [
       "expo-secure-store",
-      "expo-notifications",
+      [
+        "expo-notifications",
+        {
+          "icon": "./assets/notification-icon.png",
+          "color": "#1b3fb8"
+        }
+      ],
       [
         "expo-camera",
         {
@@ -59,6 +71,10 @@
         }
       ],
       "./plugins/withLockScreenCalls"
-    ]
+    ],
+    "icon": "./assets/icon.png",
+    "web": {
+      "favicon": "./assets/favicon.png"
+    }
   }
 }

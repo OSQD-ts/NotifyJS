@@ -24,5 +24,11 @@
   },
   "devDependencies": {
     "@types/ws": "^8.5.12"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
   }
 }
