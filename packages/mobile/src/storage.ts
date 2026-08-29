@@ -1,5 +1,5 @@
 import * as SecureStore from 'expo-secure-store';
-import type { ClientStorage } from '@notifyjs/protocol';
+import type { ClientStorage } from '@osqd/notifyjs-protocol';
 
 /**
  * Credentials live in the iOS Keychain / Android Keystore rather than

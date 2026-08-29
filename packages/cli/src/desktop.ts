@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process';
 import { platform } from 'node:os';
-import type { CallRequest, Notification, Severity } from '@notifyjs/protocol';
+import type { CallRequest, Notification, Severity } from '@osqd/notifyjs-protocol';
 
 /** CSI introducer, built at runtime to keep a raw escape byte out of source. */
 const CSI = String.fromCharCode(27) + '[';

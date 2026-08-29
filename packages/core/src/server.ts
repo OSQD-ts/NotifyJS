@@ -33,8 +33,8 @@ import {
   type Role,
   type Severity,
   type Targeting,
-} from '@notifyjs/protocol';
-import { nodeCrypto } from '@notifyjs/protocol/node';
+} from '@osqd/notifyjs-protocol';
+import { nodeCrypto } from '@osqd/notifyjs-protocol/node';
 
 import { resolveOptions, type NotifierOptions, type ResolvedOptions } from './options.js';
 import { Store } from './store.js';
@@ -1616,7 +1616,7 @@ export class Notifier extends EventEmitter<NotifierEvents> {
 
     try {
       const require = createRequire(import.meta.url);
-      const entry = require.resolve('@notifyjs/web');
+      const entry = require.resolve('@osqd/notifyjs-web');
       return dirname(entry);
     } catch {
       // Not resolvable: either a packaged binary, or web is not installed.

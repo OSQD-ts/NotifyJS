@@ -3,7 +3,7 @@ import { AppState, StyleSheet, View } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
 import * as Linking from 'expo-linking';
 import * as Notifications from 'expo-notifications';
-import { parsePairingLink } from '@notifyjs/protocol';
+import { parsePairingLink } from '@osqd/notifyjs-protocol';
 
 import { useSources } from './src/useSources';
 import { PairScreen } from './src/PairScreen';

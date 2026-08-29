@@ -1,5 +1,5 @@
 {
-  "name": "@notifyjs/mobile",
+  "name": "@osqd/notifyjs-mobile",
   "version": "0.1.0",
   "private": true,
   "description": "NotifyJS phone app: notifications and spoken alert calls, over your own hub.",
@@ -13,7 +13,7 @@
   "dependencies": {
     "@noble/ed25519": "^2.1.0",
     "@noble/hashes": "^1.4.0",
-    "@notifyjs/protocol": "file:../protocol",
+    "@osqd/notifyjs-protocol": "file:../protocol",
     "expo": "~51.0.0",
     "expo-build-properties": "^0.12.5",
     "expo-camera": "~15.0.16",

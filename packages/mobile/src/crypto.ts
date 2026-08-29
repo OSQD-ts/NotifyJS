@@ -1,8 +1,8 @@
 import * as ed from '@noble/ed25519';
 import { sha512 } from '@noble/hashes/sha512';
 import * as Crypto from 'expo-crypto';
-import type { CryptoProvider, KeyPair } from '@notifyjs/protocol';
-import { fromBase64Url, toBase64Url, utf8 } from '@notifyjs/protocol';
+import type { CryptoProvider, KeyPair } from '@osqd/notifyjs-protocol';
+import { fromBase64Url, toBase64Url, utf8 } from '@osqd/notifyjs-protocol';
 
 /**
  * React Native has no `node:crypto` and no WebCrypto Ed25519, so the phone

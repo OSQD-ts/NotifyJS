@@ -1,4 +1,4 @@
-import type { Severity } from '@notifyjs/protocol';
+import type { Severity } from '@osqd/notifyjs-protocol';
 
 export interface HeartbeatSpec {
   /** How often a check-in is expected. */

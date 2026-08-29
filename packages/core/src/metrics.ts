@@ -1,4 +1,4 @@
-import type { CallOutcome, Severity } from '@notifyjs/protocol';
+import type { CallOutcome, Severity } from '@osqd/notifyjs-protocol';
 
 /**
  * Counters for a hub you self-host and then forget about.

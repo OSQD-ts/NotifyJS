@@ -7,7 +7,7 @@ import { join, resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 
-import { Notifier } from '@notifyjs/core';
+import { Notifier } from '@osqd/notifyjs';
 
 const run = promisify(execFile);
 const BIN = resolve(dirname(fileURLToPath(import.meta.url)), '../dist/bin.js');

@@ -10,7 +10,7 @@ import {
   TouchableOpacity,
   View,
 } from 'react-native';
-import { isPairingCodeValid } from '@notifyjs/protocol';
+import { isPairingCodeValid } from '@osqd/notifyjs-protocol';
 import { useTheme } from './theme';
 
 interface Props {

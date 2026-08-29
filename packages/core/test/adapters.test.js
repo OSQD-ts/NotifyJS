@@ -6,8 +6,8 @@ import { join } from 'node:path';
 import WebSocket from 'ws';
 
 import { Notifier, captureCrashes, expressErrorHandler, createLogStream, logHandler } from '../dist/index.js';
-import { NotifyClient, memoryStorage } from '@notifyjs/protocol';
-import { nodeCrypto } from '@notifyjs/protocol/node';
+import { NotifyClient, memoryStorage } from '@osqd/notifyjs-protocol';
+import { nodeCrypto } from '@osqd/notifyjs-protocol/node';
 
 let hub;
 let storeDir;

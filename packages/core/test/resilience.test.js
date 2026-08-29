@@ -6,8 +6,8 @@ import { join } from 'node:path';
 import WebSocket from 'ws';
 
 import { Notifier, RemoteNotifier, Watchdog, parseDuration, formatDuration } from '../dist/index.js';
-import { NotifyClient, memoryStorage } from '@notifyjs/protocol';
-import { nodeCrypto } from '@notifyjs/protocol/node';
+import { NotifyClient, memoryStorage } from '@osqd/notifyjs-protocol';
+import { nodeCrypto } from '@osqd/notifyjs-protocol/node';
 
 const PORT = 7881;
 let hub;

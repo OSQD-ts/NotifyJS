@@ -35,7 +35,12 @@ await build({
   // No shebang banner here: esbuild preserves the one already on bin.ts, and
   // a second copy on line 2 is a syntax error that silently defeats pkg's
   // bytecode step - producing a binary whose entry point is missing.
-  define: { 'process.env.NOTIFYJS_VERSION': JSON.stringify(version) },
+  define: {
+    'process.env.NOTIFYJS_VERSION': JSON.stringify(version),
+    // Lets the updater reason about the rolling build, which carries a moving
+    // tag rather than a version.
+    'process.env.NOTIFYJS_BUILT_AT': JSON.stringify(String(Date.now())),
+  },
   // ws loads these native speedups opportunistically inside a try/catch; they
   // are optional and must not be pulled into the bundle.
   external: ['bufferutil', 'utf-8-validate'],

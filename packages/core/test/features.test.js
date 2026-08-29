@@ -13,8 +13,8 @@ import {
   inQuietHours,
   parsePairingLink,
   buildPairingLink,
-} from '@notifyjs/protocol';
-import { nodeCrypto } from '@notifyjs/protocol/node';
+} from '@osqd/notifyjs-protocol';
+import { nodeCrypto } from '@osqd/notifyjs-protocol/node';
 
 const PORT = 7861;
 let hub;

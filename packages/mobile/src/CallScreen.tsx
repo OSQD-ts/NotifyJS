@@ -3,7 +3,7 @@ import { StyleSheet, Text, TouchableOpacity, Vibration, View } from 'react-nativ
 import * as Speech from 'expo-speech';
 import * as Haptics from 'expo-haptics';
 import { useKeepAwake } from 'expo-keep-awake';
-import type { CallRequest } from '@notifyjs/protocol';
+import type { CallRequest } from '@osqd/notifyjs-protocol';
 import { SEVERITY_COLORS, useTheme } from './theme';
 
 interface Props {

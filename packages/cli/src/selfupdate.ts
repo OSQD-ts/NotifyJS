@@ -14,7 +14,7 @@ import { dirname, join } from 'node:path';
 import { pipeline } from 'node:stream/promises';
 import { Readable } from 'node:stream';
 import { execFile } from 'node:child_process';
-import { checkForUpdate, findAsset, type ReleaseInfo, type UpdateCheck } from '@notifyjs/protocol';
+import { checkForUpdate, findAsset, type ReleaseInfo, type UpdateCheck } from '@osqd/notifyjs-protocol';
 
 /** Matches this machine to the asset built for it. */
 export function assetPattern(): RegExp {
@@ -27,6 +27,7 @@ export interface UpdateOptions {
   repository: string;
   currentVersion: string;
   includePrerelease?: boolean;
+  currentBuiltAt?: number;
 }
 
 export async function check(options: UpdateOptions): Promise<UpdateCheck> {
@@ -34,6 +35,7 @@ export async function check(options: UpdateOptions): Promise<UpdateCheck> {
     repository: options.repository,
     currentVersion: options.currentVersion,
     includePrerelease: options.includePrerelease ?? false,
+    currentBuiltAt: options.currentBuiltAt,
   });
 }
 

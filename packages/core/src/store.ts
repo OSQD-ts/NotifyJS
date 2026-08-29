@@ -8,7 +8,7 @@ import {
 } from 'node:fs';
 import { join } from 'node:path';
 import type { Heartbeat } from './watchdog.js';
-import type { EscalationPolicy } from '@notifyjs/protocol';
+import type { EscalationPolicy } from '@osqd/notifyjs-protocol';
 import {
   defaultRoles,
   pairingCodeHash,
@@ -17,7 +17,7 @@ import {
   type Notification,
   type PairingCode,
   type Role,
-} from '@notifyjs/protocol';
+} from '@osqd/notifyjs-protocol';
 
 /** Reads the last `limit` JSON lines, skipping any the process died mid-write. */
 function readTail<T>(file: string, limit: number): T[] {

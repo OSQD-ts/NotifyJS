@@ -1,4 +1,4 @@
-import type { Notification, Severity } from '@notifyjs/protocol';
+import type { Notification, Severity } from '@osqd/notifyjs-protocol';
 
 /**
  * The parts of the dashboard that turn data into DOM.

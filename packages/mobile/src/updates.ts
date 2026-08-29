@@ -2,7 +2,7 @@ import { Platform } from 'react-native';
 import * as FileSystem from 'expo-file-system';
 import * as IntentLauncher from 'expo-intent-launcher';
 import Constants from 'expo-constants';
-import { checkForUpdate, findAsset, type ReleaseInfo } from '@notifyjs/protocol';
+import { checkForUpdate, findAsset, type ReleaseInfo } from '@osqd/notifyjs-protocol';
 
 export const REPOSITORY = 'OSQD-ts/NotifyJS';
 

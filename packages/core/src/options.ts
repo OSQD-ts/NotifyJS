@@ -1,4 +1,4 @@
-import { DEFAULT_PORT, type Severity } from '@notifyjs/protocol';
+import { DEFAULT_PORT, type Severity } from '@osqd/notifyjs-protocol';
 
 /**
  * Brute-force defences. The hub is expected to sit on a port that is open to

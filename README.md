@@ -8,8 +8,12 @@ There is no third-party push service and no relay in the middle. The hub is a
 WebSocket server that runs **inside your own process**, on a port you choose
 (7741 by default), and your devices connect straight to it.
 
+```bash
+npm install @osqd/notifyjs
+```
+
 ```ts
-import { Notifier } from '@notifyjs/core';
+import { Notifier } from '@osqd/notifyjs';
 
 const notify = new Notifier({ port: 7741, name: 'Checkout Service' });
 await notify.start();
@@ -33,20 +37,30 @@ if (result.outcome !== 'answered') {
 
 ## What is in the box
 
+Published to npm under the [`@osqd`](https://www.npmjs.com/org/osqd) scope.
+Every push to the default branch publishes a rolling prerelease under the
+`next` tag; version tags publish under `latest`, which is what a plain
+`npm install` gives you.
+
+```bash
+npm install @osqd/notifyjs        # the released version
+npm install @osqd/notifyjs@next   # the rolling build from main
+```
+
 | Package | What it is |
 | --- | --- |
-| `@notifyjs/core` | The library you import. Embeds the hub, RBAC, and call orchestration. |
-| `@notifyjs/protocol` | Wire protocol, RBAC model, and the client every device shares. |
-| `@notifyjs/web` | Self-hosted dashboard, served by the hub itself at `http://host:7741`. |
-| `@notifyjs/cli` | `notifyjs serve` for a standalone hub, `notifyjs listen` to turn a desktop into a device. |
-| `@notifyjs/mobile` | React Native (Expo) app: notification feed plus a full-screen call screen with TTS. |
+| `@osqd/notifyjs` | The library you import. Embeds the hub, RBAC, and call orchestration. |
+| `@osqd/notifyjs-protocol` | Wire protocol, RBAC model, and the client every device shares. |
+| `@osqd/notifyjs-web` | Self-hosted dashboard, served by the hub itself at `http://host:7741`. |
+| `@osqd/notifyjs-cli` | `notifyjs serve` for a standalone hub, `notifyjs listen` to turn a desktop into a device. |
+| `@osqd/notifyjs-mobile` | React Native (Expo) app: notification feed plus a full-screen call screen with TTS. |
 
 The icon is generated from one SVG source (`assets/icon.svg`) into every size
 each platform wants — launcher, Android adaptive foreground, splash, monochrome
 status-bar glyph, and the web favicon — with `npm run icons`.
 
 ```
-your app  ──imports──►  @notifyjs/core
+your app  ──imports──►  @osqd/notifyjs
                              │  WebSocket server on :7741
                              │
         ┌────────────────────┼────────────────────┐
@@ -219,7 +233,7 @@ notifyjs serve --port 7741        # on a box that stays up
 ```
 
 ```ts
-import { RemoteNotifier } from '@notifyjs/core';
+import { RemoteNotifier } from '@osqd/notifyjs';
 
 const notify = new RemoteNotifier({
   url: 'wss://alerts.example.com:7741',
@@ -458,7 +472,7 @@ leak the content of an alert. Set `metricsToken` to require a bearer token.
 ## Wiring it into an existing app
 
 ```ts
-import { captureCrashes, expressErrorHandler, createLogStream } from '@notifyjs/core';
+import { captureCrashes, expressErrorHandler, createLogStream } from '@osqd/notifyjs';
 
 captureCrashes(notify, { call: true });   // uncaught exceptions + rejections
 app.use(expressErrorHandler(notify));     // 5xx responses, mounted last

@@ -12,8 +12,8 @@ import {
   SIG_AUTH,
   PROTOCOL_VERSION,
   encodePairingCode,
-} from '@notifyjs/protocol';
-import { nodeCrypto } from '@notifyjs/protocol/node';
+} from '@osqd/notifyjs-protocol';
+import { nodeCrypto } from '@osqd/notifyjs-protocol/node';
 
 const PORT = 7854;
 let hub;

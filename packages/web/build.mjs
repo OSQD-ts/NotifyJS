@@ -3,7 +3,7 @@ import { join } from 'node:path';
 
 /**
  * The dashboard is plain ES modules served straight off the hub - no bundler.
- * Browsers cannot resolve the bare `@notifyjs/protocol` specifier that tsc
+ * Browsers cannot resolve the bare `@osqd/notifyjs-protocol` specifier that tsc
  * emits, and an inline import map would need a CSP exception, so instead the
  * protocol's build is vendored in and the specifiers rewritten to real paths.
  */

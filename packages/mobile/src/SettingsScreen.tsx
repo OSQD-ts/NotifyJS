@@ -10,7 +10,7 @@ import {
   TouchableOpacity,
   View,
 } from 'react-native';
-import { SEVERITIES, type ClientPreferences, type Severity, type SourceState } from '@notifyjs/protocol';
+import { SEVERITIES, type ClientPreferences, type Severity, type SourceState } from '@osqd/notifyjs-protocol';
 import { canUseFullScreen, openFullScreenSettings } from '../modules/notifyjs-call';
 import { currentVersion, downloadAndInstall, findAppUpdate, type AppUpdate } from './updates';
 import { SEVERITY_COLORS, useTheme } from './theme';

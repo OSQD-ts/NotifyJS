@@ -6,8 +6,8 @@ import { join } from 'node:path';
 import WebSocket from 'ws';
 
 import { Notifier } from '../dist/index.js';
-import { SourceManager, memoryStorage, defaultPreferences, normalizePreferences } from '@notifyjs/protocol';
-import { nodeCrypto } from '@notifyjs/protocol/node';
+import { SourceManager, memoryStorage, defaultPreferences, normalizePreferences } from '@osqd/notifyjs-protocol';
+import { nodeCrypto } from '@osqd/notifyjs-protocol/node';
 
 /** Two independent hubs, as a person with a home server and a work one would have. */
 let home;

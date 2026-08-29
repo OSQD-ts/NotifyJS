@@ -47,7 +47,7 @@ jobs:
 
       - run: npm ci
 
-      # The app resolves @notifyjs/protocol through `file:../protocol`, whose
+      # The app resolves @osqd/notifyjs-protocol through `file:../protocol`, whose
       # entry point is its build output.
       - run: npm run build
 
@@ -128,7 +128,7 @@ jobs:
           cat serve.log
 
           # The dashboard must be served from the directory beside the binary,
-          # since a packaged build cannot resolve @notifyjs/web as a module.
+          # since a packaged build cannot resolve @osqd/notifyjs-web as a module.
           curl -sf http://127.0.0.1:7799/health > /dev/null
           curl -sf http://127.0.0.1:7799/ > /dev/null
           curl -sf http://127.0.0.1:7799/app.js > /dev/null

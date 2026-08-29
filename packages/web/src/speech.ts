@@ -1,4 +1,4 @@
-import type { CallRequest } from '@notifyjs/protocol';
+import type { CallRequest } from '@osqd/notifyjs-protocol';
 
 /**
  * Ringing and speech for the browser client.

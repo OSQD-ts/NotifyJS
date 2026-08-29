@@ -1,5 +1,5 @@
 {
-  "name": "@notifyjs/web",
+  "name": "@osqd/notifyjs-web",
   "version": "0.1.0",
   "description": "Self-hosted NotifyJS dashboard, served straight off the hub.",
   "license": "SEE LICENSE IN LICENSE",
@@ -16,6 +16,18 @@
     "prepack": "node -e \"require('fs').copyFileSync('../../LICENSE','LICENSE')\""
   },
   "dependencies": {
-    "@notifyjs/protocol": "0.1.0"
+    "@osqd/notifyjs-protocol": "0.1.0"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/OSQD-ts/NotifyJS.git",
+    "directory": "packages/web"
+  },
+  "homepage": "https://github.com/OSQD-ts/NotifyJS#readme",
+  "bugs": {
+    "url": "https://github.com/OSQD-ts/NotifyJS/issues"
   }
 }

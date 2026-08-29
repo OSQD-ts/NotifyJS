@@ -1,5 +1,5 @@
 {
-  "name": "@notifyjs/protocol",
+  "name": "@osqd/notifyjs-protocol",
   "version": "0.1.0",
   "description": "Wire protocol, RBAC model and crypto primitives shared by every NotifyJS peer.",
   "license": "SEE LICENSE IN LICENSE",
@@ -29,5 +29,17 @@
     "build": "tsc -b",
     "watch": "tsc -b -w",
     "prepack": "node -e \"require('fs').copyFileSync('../../LICENSE','LICENSE')\""
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/OSQD-ts/NotifyJS.git",
+    "directory": "packages/protocol"
+  },
+  "homepage": "https://github.com/OSQD-ts/NotifyJS#readme",
+  "bugs": {
+    "url": "https://github.com/OSQD-ts/NotifyJS/issues"
   }
 }

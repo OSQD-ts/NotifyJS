@@ -7,7 +7,7 @@
  *
  *   node examples/basic/demo.mjs
  */
-import { Notifier } from '@notifyjs/core';
+import { Notifier } from '@osqd/notifyjs';
 
 const notify = new Notifier({
   port: Number(process.env.PORT ?? 7741),

@@ -33,4 +33,4 @@ export { Store } from './store.js';
 export { Guard, normalizeIp } from './guard.js';
 export { CallOrchestrator } from './calls.js';
 export type { CallEvent, CallTarget } from './calls.js';
-export * from '@notifyjs/protocol';
+export * from '@osqd/notifyjs-protocol';

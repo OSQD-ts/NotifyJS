@@ -13,7 +13,7 @@
  * Within a few seconds the hub alerts that the service stopped checking in -
  * an alert the service could not possibly have sent for itself.
  */
-import { RemoteNotifier } from '@notifyjs/core';
+import { RemoteNotifier } from '@osqd/notifyjs';
 
 const notify = new RemoteNotifier({
   url: process.env.NOTIFY_URL ?? 'ws://localhost:7741',

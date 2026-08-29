@@ -10,7 +10,7 @@
  * Pair a phone or a browser, wait for the countdown, and watch the alarm come
  * from the device rather than from here - because by then there is no "here".
  */
-import { Notifier } from '@notifyjs/core';
+import { Notifier } from '@osqd/notifyjs';
 
 const notify = new Notifier({
   name: 'Checkout Service',

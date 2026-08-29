@@ -6,7 +6,7 @@ import {
   type CallRequest,
   type ConnectionStatus,
   type Notification,
-} from '@notifyjs/protocol';
+} from '@osqd/notifyjs-protocol';
 import * as Network from 'expo-network';
 import {
   dismissCall,

@@ -1,5 +1,5 @@
 import { Writable } from 'node:stream';
-import type { Severity } from '@notifyjs/protocol';
+import type { Severity } from '@osqd/notifyjs-protocol';
 import type { NotifyInput } from './server.js';
 
 /**

@@ -1,5 +1,5 @@
 import { FlatList, RefreshControl, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
-import type { SourceState } from '@notifyjs/protocol';
+import type { SourceState } from '@osqd/notifyjs-protocol';
 import type { FeedEntry } from './useSources';
 import { SEVERITY_COLORS, useTheme } from './theme';
 

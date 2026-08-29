@@ -1,6 +1,6 @@
 import type { WebSocket } from 'ws';
-import type { Capability, Device, Role, ServerMessage } from '@notifyjs/protocol';
-import { PROTOCOL_VERSION } from '@notifyjs/protocol';
+import type { Capability, Device, Role, ServerMessage } from '@osqd/notifyjs-protocol';
+import { PROTOCOL_VERSION } from '@osqd/notifyjs-protocol';
 import { MessageLimiter } from './guard.js';
 
 export type SessionState = 'handshake' | 'ready' | 'closed';

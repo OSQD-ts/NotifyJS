@@ -11,7 +11,7 @@ import {
   type SourcedCall,
   type SourcedNotification,
   type SourceState,
-} from '@notifyjs/protocol';
+} from '@osqd/notifyjs-protocol';
 
 import { dismissCall, showAlert, showIncomingCall, startWatching, stopWatching } from '../modules/notifyjs-call';
 import { nobleCrypto } from './crypto';

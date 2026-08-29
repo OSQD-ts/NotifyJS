@@ -13,7 +13,7 @@
     "node": ">=20"
   },
   "scripts": {
-    "build": "npm run icons && npm run build -w @notifyjs/protocol && npm run build -w @notifyjs/core && npm run build -w @notifyjs/web && npm run build -w @notifyjs/cli",
+    "build": "npm run icons && npm run build -w @osqd/notifyjs-protocol && npm run build -w @osqd/notifyjs && npm run build -w @osqd/notifyjs-web && npm run build -w @osqd/notifyjs-cli",
     "clean": "rm -rf packages/*/dist packages/*/*.tsbuildinfo packages/mobile/assets packages/web/public/icon.svg packages/web/public/favicon.png",
     "test": "node --test packages/core/test/*.test.js packages/cli/test/*.test.js packages/web/test/*.test.js",
     "demo": "node examples/basic/demo.mjs",

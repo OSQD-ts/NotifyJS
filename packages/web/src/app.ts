@@ -11,8 +11,8 @@ import {
   type Device,
   type Notification,
   type Severity,
-} from '@notifyjs/protocol';
-import { webCrypto } from '@notifyjs/protocol/web';
+} from '@osqd/notifyjs-protocol';
+import { webCrypto } from '@osqd/notifyjs-protocol/web';
 import { Ringer, speak, stopSpeaking } from './speech.js';
 import {
   announcementFor,

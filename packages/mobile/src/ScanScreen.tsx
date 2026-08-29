@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 import { CameraView, useCameraPermissions } from 'expo-camera';
-import { parsePairingLink, type PairingLink } from '@notifyjs/protocol';
+import { parsePairingLink, type PairingLink } from '@osqd/notifyjs-protocol';
 import { useTheme } from './theme';
 
 interface Props {

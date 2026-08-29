@@ -9,8 +9,8 @@ import {
   type EscalationPolicy,
   type Notification,
   type Severity,
-} from '@notifyjs/protocol';
-import { nodeCrypto } from '@notifyjs/protocol/node';
+} from '@osqd/notifyjs-protocol';
+import { nodeCrypto } from '@osqd/notifyjs-protocol/node';
 
 import type { CallInput, NotifyInput } from './server.js';
 import type { Heartbeat, HeartbeatSpec } from './watchdog.js';

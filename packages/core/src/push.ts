@@ -1,4 +1,4 @@
-import type { Device, Notification, CallRequest } from '@notifyjs/protocol';
+import type { Device, Notification, CallRequest } from '@osqd/notifyjs-protocol';
 import type { PushOptions } from './options.js';
 
 /**

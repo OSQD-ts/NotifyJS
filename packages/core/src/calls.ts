@@ -1,5 +1,5 @@
-import type { CallRequest, CallResult, ServerMessage } from '@notifyjs/protocol';
-import { PROTOCOL_VERSION } from '@notifyjs/protocol';
+import type { CallRequest, CallResult, ServerMessage } from '@osqd/notifyjs-protocol';
+import { PROTOCOL_VERSION } from '@osqd/notifyjs-protocol';
 
 /** The slice of a session the orchestrator needs; keeps calls unit-testable. */
 export interface CallTarget {

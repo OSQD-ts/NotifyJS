@@ -1,4 +1,4 @@
-import type { Notification, Severity } from '@notifyjs/protocol';
+import type { Notification, Severity } from '@osqd/notifyjs-protocol';
 import type { FloodOptions } from './options.js';
 
 interface Window {

@@ -3,9 +3,9 @@ import { parseArgs } from 'node:util';
 import { createInterface } from 'node:readline/promises';
 import WebSocket from 'ws';
 
-import { Notifier, type Severity } from '@notifyjs/core';
-import { NotifyClient, isPairingCodeValid, type Device } from '@notifyjs/protocol';
-import { nodeCrypto } from '@notifyjs/protocol/node';
+import { Notifier, type Severity } from '@osqd/notifyjs';
+import { NotifyClient, isPairingCodeValid, type Device } from '@osqd/notifyjs-protocol';
+import { nodeCrypto } from '@osqd/notifyjs-protocol/node';
 
 import { readFileSync } from 'node:fs';
 import { fileStorage, defaultPath } from './storage.js';
@@ -559,6 +559,7 @@ async function watches(argv: string[]): Promise<void> {
 
 /** Version stamped in at bundle time; falls back for source checkouts. */
 const VERSION = process.env.NOTIFYJS_VERSION ?? '0.1.0';
+const BUILT_AT = Number(process.env.NOTIFYJS_BUILT_AT ?? 0) || undefined;
 const DEFAULT_REPO = 'OSQD-ts/NotifyJS';
 
 async function update(argv: string[]): Promise<void> {
@@ -578,6 +579,7 @@ async function update(argv: string[]): Promise<void> {
     repository,
     currentVersion: VERSION,
     includePrerelease: values.prerelease,
+    currentBuiltAt: BUILT_AT,
   });
 
   if (!result.latest) {

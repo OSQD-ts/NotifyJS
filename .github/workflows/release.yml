@@ -106,7 +106,7 @@ jobs:
 
       - run: npm ci
 
-      # The app depends on @notifyjs/protocol through `file:../protocol`, whose
+      # The app depends on @osqd/notifyjs-protocol through `file:../protocol`, whose
       # entry point is its build output - so the workspace must be built before
       # the app's own install can resolve it.
       - name: Build workspace packages
@@ -243,6 +243,92 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+  # ---------------------------------------------------------------------
+  # npm packages.
+  #
+  # A push to the default branch publishes a prerelease under the `next` tag;
+  # a version tag publishes the real thing under `latest`. Every push needs a
+  # version npm has not seen before, so main builds carry the run number - and
+  # `next` keeps them from becoming what `npm install` gives people by default.
+  # ---------------------------------------------------------------------
+  npm:
+    name: Publish to npm
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # Required for npm provenance, which attests that these bytes were built
+      # by this workflow from this commit.
+      id-token: write
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 20
+          cache: npm
+          registry-url: https://registry.npmjs.org
+
+      - run: npm ci
+      - run: npm run build
+      - run: npm test
+
+      - name: Decide the version to publish
+        id: version
+        run: |
+          BASE=$(node -p "require('./package.json').version")
+          if [ "$IS_TAG" = "true" ]; then
+            VERSION="${NOTIFYJS_VERSION#v}"
+            TAG=latest
+          else
+            # Unique per run and ordered, so a later build always wins.
+            VERSION="${BASE}-main.${{ github.run_number }}"
+            TAG=next
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "dist_tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "publishing $VERSION under the '$TAG' tag"
+
+      - name: Stamp the version across the workspace
+        run: node scripts/set-version.mjs "${{ steps.version.outputs.version }}"
+
+      - name: Publish
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          if [ -z "$NODE_AUTH_TOKEN" ]; then
+            echo "NPM_TOKEN is not set; skipping publish."
+            exit 0
+          fi
+          # Dependency order: a package must not be published before something
+          # it depends on, or an install between the two resolves nothing.
+          for pkg in protocol web core cli; do
+            name=$(node -p "require('./packages/$pkg/package.json').name")
+            echo "::group::$name"
+            # Republishing an existing version is an error, not a failure -
+            # a re-run of the same workflow should be a no-op, not a red X.
+            if npm view "$name@${{ steps.version.outputs.version }}" version >/dev/null 2>&1; then
+              echo "already published, skipping"
+            else
+              npm publish --workspace "$name" \
+                --tag "${{ steps.version.outputs.dist_tag }}" \
+                --access public \
+                --provenance
+            fi
+            echo "::endgroup::"
+          done
+
+      - name: Summary
+        run: |
+          {
+            echo "### Published \`${{ steps.version.outputs.version }}\` to npm"
+            echo
+            echo "Installed by default: \`npm i @osqd/notifyjs\`"
+            if [ "${{ steps.version.outputs.dist_tag }}" = "next" ]; then
+              echo
+              echo "This is a rolling build. \`npm i @osqd/notifyjs@next\` to get it."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
 
   # ---------------------------------------------------------------------
   # Collect everything into one GitHub Release.

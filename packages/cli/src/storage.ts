@@ -1,7 +1,7 @@
 import { mkdirSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join, dirname } from 'node:path';
-import type { ClientStorage } from '@notifyjs/protocol';
+import type { ClientStorage } from '@osqd/notifyjs-protocol';
 
 /**
  * File-backed credential storage for the CLI.

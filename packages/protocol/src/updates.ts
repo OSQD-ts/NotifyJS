@@ -39,6 +39,14 @@ export interface CheckOptions {
    * is what separates "track every push to main" from "tagged versions only".
    */
   includePrerelease?: boolean;
+  /**
+   * When this build was produced, as epoch milliseconds.
+   *
+   * The rolling build is published under a fixed `latest` tag, which carries
+   * no version to compare against - so for those the only meaningful question
+   * is whether the release is newer than the binary asking.
+   */
+  currentBuiltAt?: number;
   timeoutMs?: number;
   /** Override for tests, or for a mirror. */
   endpoint?: string;
@@ -77,6 +85,11 @@ export function isNewer(candidate: string, current: string): boolean {
   return compareVersions(candidate, current) > 0;
 }
 
+/** True when a tag looks like a version rather than a moving label. */
+export function looksVersioned(tag: string): boolean {
+  return /^v?\d+(\.\d+)*/.test(tag.trim());
+}
+
 /** Fetches the newest release, or undefined when the feed cannot be read. */
 export async function checkForUpdate(options: CheckOptions): Promise<UpdateCheck> {
   const {
@@ -106,7 +119,29 @@ export async function checkForUpdate(options: CheckOptions): Promise<UpdateCheck
       // line can be published after a newer release.
       .sort((a, b) => compareVersions(b.version, a.version));
 
-    const latest = candidates[0];
+    // A moving tag like `latest` sorts to nothing useful, so pick the newest
+    // by publish time among those and compare that way instead.
+    const versioned = candidates.filter((r) => looksVersioned(r.tag));
+    const moving = candidates
+      .filter((r) => !looksVersioned(r.tag))
+      .sort((a, b) => b.publishedAt - a.publishedAt);
+
+    const latestVersioned = versioned[0];
+    const latestMoving = includePrerelease ? moving[0] : undefined;
+
+    if (latestMoving && options.currentBuiltAt) {
+      const movingIsNewer = latestMoving.publishedAt > options.currentBuiltAt;
+      const versionedIsNewer =
+        latestVersioned && isNewer(latestVersioned.version, current);
+
+      // Prefer a real version when one is genuinely newer; otherwise the
+      // rolling build is the only thing on offer.
+      if (!versionedIsNewer && movingIsNewer) {
+        return { current, latest: latestMoving, available: true };
+      }
+    }
+
+    const latest = latestVersioned ?? candidates[0];
     if (!latest) return { current, available: false };
 
     return { current, latest, available: isNewer(latest.version, current) };

@@ -1,5 +1,5 @@
 {
-  "name": "@notifyjs/cli",
+  "name": "@osqd/notifyjs-cli",
   "version": "0.1.0",
   "description": "NotifyJS command line: run a standalone hub, pair devices, and listen on a desktop.",
   "license": "SEE LICENSE IN LICENSE",
@@ -18,8 +18,8 @@
     "prepack": "node -e \"require('fs').copyFileSync('../../LICENSE','LICENSE')\""
   },
   "dependencies": {
-    "@notifyjs/core": "0.1.0",
-    "@notifyjs/protocol": "0.1.0",
+    "@osqd/notifyjs": "0.1.0",
+    "@osqd/notifyjs-protocol": "0.1.0",
     "ws": "^8.18.0"
   },
   "devDependencies": {
@@ -30,5 +30,17 @@
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
     }
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/OSQD-ts/NotifyJS.git",
+    "directory": "packages/cli"
+  },
+  "homepage": "https://github.com/OSQD-ts/NotifyJS#readme",
+  "bugs": {
+    "url": "https://github.com/OSQD-ts/NotifyJS/issues"
   }
 }

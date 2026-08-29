@@ -7,8 +7,8 @@ import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, chmodSync 
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { checkForUpdate, compareVersions, isNewer, findAsset } from '@notifyjs/protocol';
-import { apply, assetPattern } from '@notifyjs/cli';
+import { checkForUpdate, compareVersions, isNewer, findAsset } from '@osqd/notifyjs-protocol';
+import { apply, assetPattern } from '@osqd/notifyjs-cli';
 
 test('versions compare numerically, not alphabetically', () => {
   assert.equal(compareVersions('0.2.0', '0.1.0'), 1);
@@ -210,4 +210,47 @@ test('a source checkout run under node refuses to overwrite node itself', async 
   const { info, close } = await releaseServer('#!/bin/sh\necho new\n');
   await assert.rejects(() => apply(info, { targetPath: process.execPath }), /packaged binary/);
   close();
+});
+
+test('the rolling build is discoverable even though its tag is not a version', async () => {
+  const builtAt = Date.parse('2026-01-01T00:00:00Z');
+  const feed = releaseFeed([
+    // The rolling release keeps a fixed `latest` tag so it can be replaced on
+    // every push - which means there is no version to compare, only a date.
+    release('latest', { prerelease: true, published_at: '2026-02-01T00:00:00Z' }),
+    release('v0.1.0', { published_at: '2025-12-01T00:00:00Z' }),
+  ]);
+
+  const stable = await checkForUpdate({
+    repository: 'x/y', currentVersion: '0.1.0', currentBuiltAt: builtAt, fetchImpl: feed,
+  });
+  assert.equal(stable.available, false, 'without --prerelease it is invisible');
+
+  const rolling = await checkForUpdate({
+    repository: 'x/y', currentVersion: '0.1.0', includePrerelease: true,
+    currentBuiltAt: builtAt, fetchImpl: feed,
+  });
+  assert.equal(rolling.available, true, 'a rolling build newer than this one is offered');
+  assert.equal(rolling.latest.tag, 'latest');
+});
+
+test('a rolling build older than the running binary is not offered', async () => {
+  const feed = releaseFeed([release('latest', { prerelease: true, published_at: '2026-01-01T00:00:00Z' })]);
+  const result = await checkForUpdate({
+    repository: 'x/y', currentVersion: '0.1.0', includePrerelease: true,
+    currentBuiltAt: Date.parse('2026-03-01T00:00:00Z'), fetchImpl: feed,
+  });
+  assert.equal(result.available, false, 'a local build newer than the feed is not downgraded');
+});
+
+test('a real release still wins over the rolling build', async () => {
+  const feed = releaseFeed([
+    release('latest', { prerelease: true, published_at: '2026-02-01T00:00:00Z' }),
+    release('v0.9.0', { published_at: '2026-02-02T00:00:00Z' }),
+  ]);
+  const result = await checkForUpdate({
+    repository: 'x/y', currentVersion: '0.1.0', includePrerelease: true,
+    currentBuiltAt: Date.parse('2026-01-01T00:00:00Z'), fetchImpl: feed,
+  });
+  assert.equal(result.latest.tag, 'v0.9.0', 'a tagged version is preferred when it is newer');
 });
