@@ -82,6 +82,7 @@ export function useSources() {
           `${entry.sourceId}:${entry.notification.id}`,
           `${entry.notification.severity.toUpperCase()}: ${entry.notification.title}`,
           entry.notification.body ?? `${entry.sourceLabel} · ${entry.notification.channel}`,
+          { sound: prefsRef.current.sound, vibrate: prefsRef.current.vibrate },
         );
       }),
 
@@ -112,7 +113,10 @@ export function useSources() {
       ),
 
       manager.on('service:missing', ({ sourceLabel, title, body }) =>
-        showAlert(`watchdog-${sourceLabel}`, title, body ?? ''),
+        showAlert(`watchdog-${sourceLabel}`, title, body ?? '', {
+          sound: prefsRef.current.sound,
+          vibrate: prefsRef.current.vibrate,
+        }),
       ),
     ];
 

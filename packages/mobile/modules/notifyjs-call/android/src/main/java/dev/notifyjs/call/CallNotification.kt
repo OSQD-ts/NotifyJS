@@ -22,6 +22,19 @@ import androidx.core.app.Person
 object CallNotification {
   const val CHANNEL_ID = "notifyjs_incoming_calls"
   const val WATCH_CHANNEL_ID = "notifyjs_watching"
+
+  /**
+   * Ordinary alerts get their own channels, separate from calls.
+   *
+   * A channel's sound is fixed once Android has created it, so the only way to
+   * honour the app's Sound and Vibrate settings is to pick a different channel
+   * - and the only way to change an existing channel's behaviour is to use a
+   * new id. Each of these uses the default *notification* tone; the ringtone
+   * belongs to calls alone.
+   */
+  const val ALERT_CHANNEL_ID = "notifyjs_alerts_v2"
+  const val ALERT_VIBRATE_ONLY_CHANNEL_ID = "notifyjs_alerts_vibrate_v2"
+  const val ALERT_SILENT_CHANNEL_ID = "notifyjs_alerts_silent_v2"
   const val ACTION_ANSWER = "dev.notifyjs.call.ANSWER"
   const val ACTION_DECLINE = "dev.notifyjs.call.DECLINE"
   const val EXTRA_CALL_ID = "notifyjs_call_id"
@@ -54,6 +67,56 @@ object CallNotification {
         setBypassDnd(true)
       }
       manager.createNotificationChannel(calls)
+    }
+
+    // Alerts: the default notification tone, never the ringtone. Heads-up so
+    // an error still gets attention, but nothing that bypasses Do Not Disturb -
+    // that privilege is reserved for a call.
+    if (manager.getNotificationChannel(ALERT_CHANNEL_ID) == null) {
+      manager.createNotificationChannel(
+        NotificationChannel(ALERT_CHANNEL_ID, "Alerts", NotificationManager.IMPORTANCE_HIGH).apply {
+          description = "Notifications sent by your hubs."
+          lockscreenVisibility = Notification.VISIBILITY_PUBLIC
+          enableVibration(true)
+          setSound(
+            RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION),
+            AudioAttributes.Builder()
+              .setUsage(AudioAttributes.USAGE_NOTIFICATION)
+              .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+              .build(),
+          )
+        },
+      )
+    }
+
+    if (manager.getNotificationChannel(ALERT_VIBRATE_ONLY_CHANNEL_ID) == null) {
+      manager.createNotificationChannel(
+        NotificationChannel(
+          ALERT_VIBRATE_ONLY_CHANNEL_ID,
+          "Alerts (vibrate only)",
+          NotificationManager.IMPORTANCE_HIGH,
+        ).apply {
+          description = "Notifications sent by your hubs, without a sound."
+          lockscreenVisibility = Notification.VISIBILITY_PUBLIC
+          enableVibration(true)
+          setSound(null, null)
+        },
+      )
+    }
+
+    if (manager.getNotificationChannel(ALERT_SILENT_CHANNEL_ID) == null) {
+      manager.createNotificationChannel(
+        NotificationChannel(
+          ALERT_SILENT_CHANNEL_ID,
+          "Alerts (silent)",
+          NotificationManager.IMPORTANCE_DEFAULT,
+        ).apply {
+          description = "Notifications sent by your hubs, shown without sound or vibration."
+          lockscreenVisibility = Notification.VISIBILITY_PUBLIC
+          enableVibration(false)
+          setSound(null, null)
+        },
+      )
     }
 
     if (manager.getNotificationChannel(WATCH_CHANNEL_ID) == null) {
@@ -119,11 +182,25 @@ object CallNotification {
       .build()
   }
 
+  /** Chooses the channel matching what the person asked for in Settings. */
+  fun alertChannel(sound: Boolean, vibrate: Boolean): String = when {
+    sound -> ALERT_CHANNEL_ID
+    vibrate -> ALERT_VIBRATE_ONLY_CHANNEL_ID
+    else -> ALERT_SILENT_CHANNEL_ID
+  }
+
   /**
    * An ordinary alert. Separate from the call path because it must not ring,
    * take over the screen, or be undismissable.
    */
-  fun showAlert(context: Context, id: String, title: String, body: String) {
+  fun showAlert(
+    context: Context,
+    id: String,
+    title: String,
+    body: String,
+    sound: Boolean = true,
+    vibrate: Boolean = true,
+  ) {
     val launch = launchIntent(context, null) ?: return
     val open = PendingIntent.getActivity(
       context,
@@ -132,7 +209,7 @@ object CallNotification {
       PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
     )
 
-    val notification = NotificationCompat.Builder(context, CHANNEL_ID)
+    val notification = NotificationCompat.Builder(context, alertChannel(sound, vibrate))
       .setSmallIcon(android.R.drawable.stat_notify_chat)
       .setContentTitle(title)
       .setContentText(body)

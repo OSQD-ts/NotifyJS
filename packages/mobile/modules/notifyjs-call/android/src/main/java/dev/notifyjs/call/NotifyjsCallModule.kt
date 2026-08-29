@@ -92,9 +92,9 @@ class NotifyjsCallModule : Module() {
     }
 
     /** Posts an ordinary alert, so notifications work with no JS timers. */
-    Function("showAlert") { id: String, title: String, body: String ->
+    Function("showAlert") { id: String, title: String, body: String, sound: Boolean, vibrate: Boolean ->
       CallNotification.ensureChannels(context)
-      CallNotification.showAlert(context, id, title, body)
+      CallNotification.showAlert(context, id, title, body, sound, vibrate)
     }
   }
 }

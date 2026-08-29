@@ -11,7 +11,7 @@ export interface IncomingCallOptions {
 interface NotifyjsCallNative {
   showIncomingCall(options: IncomingCallOptions): void;
   dismissCall(id: string): void;
-  showAlert(id: string, title: string, body: string): void;
+  showAlert(id: string, title: string, body: string, sound: boolean, vibrate: boolean): void;
   canUseFullScreen(): boolean;
   openFullScreenSettings(): void;
   startWatching(hubName: string): void;
@@ -43,9 +43,20 @@ export function dismissCall(id: string): void {
   native?.dismissCall(id);
 }
 
-/** Posts an ordinary alert without relying on a JS timer being alive. */
-export function showAlert(id: string, title: string, body: string): void {
-  native?.showAlert(id, title, body);
+/**
+ * Posts an ordinary alert without relying on a JS timer being alive.
+ *
+ * Uses the default notification tone, never the ringtone - that belongs to
+ * calls. `sound` and `vibrate` select between channels, because Android fixes
+ * a channel's behaviour at creation and will not let it be changed later.
+ */
+export function showAlert(
+  id: string,
+  title: string,
+  body: string,
+  { sound = true, vibrate = true }: { sound?: boolean; vibrate?: boolean } = {},
+): void {
+  native?.showAlert(id, title, body, sound, vibrate);
 }
 
 /** False when Android would downgrade a call to an ordinary notification. */
