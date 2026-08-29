@@ -9,6 +9,7 @@ import {
 } from '@notifyjs/protocol';
 import * as Network from 'expo-network';
 import * as Notifications from 'expo-notifications';
+import { dismissCall, showIncomingCall } from '../modules/notifyjs-call';
 import { nobleCrypto } from './crypto';
 import { secureStorage } from './storage';
 import { getPushToken } from './push';
@@ -95,7 +96,17 @@ export function useNotify(url: string, deviceName: string, pendingCode?: string)
         );
         client.ack([n.id], { seq: n.seq });
       }),
-      client.on('call', (call) => setState((s) => ({ ...s, activeCall: call }))),
+      client.on('call', (call) => {
+        setState((s) => ({ ...s, activeCall: call }));
+        // The in-app screen only exists while the app is on screen. This is
+        // what reaches a locked phone sitting on a bedside table.
+        showIncomingCall({
+          id: call.id,
+          from: call.from,
+          message: call.message,
+          severity: call.severity,
+        });
+      }),
 
       /**
        * The hub cannot tell you it has died. This phone can, because it is the
@@ -120,9 +131,10 @@ export function useNotify(url: string, deviceName: string, pendingCode?: string)
 
       // An announced restart is not an incident.
       client.on('service:bye', () => setState((s) => ({ ...s, serviceDown: undefined }))),
-      client.on('call.cancel', ({ callId }) =>
-        setState((s) => (s.activeCall?.id === callId ? { ...s, activeCall: undefined } : s)),
-      ),
+      client.on('call.cancel', ({ callId }) => {
+        dismissCall(callId);
+        setState((s) => (s.activeCall?.id === callId ? { ...s, activeCall: undefined } : s));
+      }),
       // The condition ended, so the alert should stop taking up the screen.
       client.on('resolve', ({ ids }) =>
         setState((s) => ({
@@ -185,8 +197,14 @@ export function useNotify(url: string, deviceName: string, pendingCode?: string)
 
   const pair = useCallback((code: string) => clientRef.current.pair(code), []);
 
-  const clearCall = useCallback(() => {
-    setState((s) => ({ ...s, activeCall: undefined }));
+  const clearCall = useCallback((callId?: string) => {
+    // The notification must go with the call, or a ringing entry outlives the
+    // incident on the lock screen.
+    if (callId) dismissCall(callId);
+    setState((s) => {
+      if (s.activeCall) dismissCall(s.activeCall.id);
+      return { ...s, activeCall: undefined };
+    });
   }, []);
 
   const sync = useCallback(() => clientRef.current.sync(), []);

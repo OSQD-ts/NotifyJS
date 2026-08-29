@@ -182,11 +182,11 @@ function Connected({
           onAnswer={() => client.answerCall(call.id)}
           onDecline={() => {
             client.declineCall(call.id);
-            clearCall();
+            clearCall(call.id);
           }}
           onFinished={() => {
             client.endCall(call.id);
-            clearCall();
+            clearCall(call.id);
           }}
         />
       </>

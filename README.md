@@ -55,7 +55,9 @@ your app  ──imports──►  @notifyjs/core
 ## Download
 
 Grab a build from [Releases](../../releases) — none of them need Node.js
-installed.
+installed. Every push to the default branch refreshes a **Latest build**
+prerelease, so there is always something current to download; tagged versions
+(`v0.2.0`) get their own permanent release.
 
 | Platform | File |
 | --- | --- |
@@ -499,11 +501,35 @@ hub address and the code together. (Typing both by hand still works.) The app
 holds a WebSocket while it is running, mirrors notifications into the OS tray,
 and shows a full-screen call UI that vibrates and speaks on answer.
 
-The call screen is an in-app screen, which works in Expo Go with no native
-build. For a call that rings over the lock screen the way a real phone call
-does, add [`react-native-callkeep`](https://github.com/react-native-webrtc/react-native-callkeep)
-(CallKit on iOS, ConnectionService on Android) in a development build and
-trigger it from the `call` event. The protocol needs no changes for that — the
+### Calls on a locked screen
+
+On Android the app ships a small native module (`modules/notifyjs-call`) that
+raises a real incoming call rather than a banner: a `CATEGORY_CALL` notification
+on a high-importance channel carrying a **full-screen intent**, with the
+activity marked `showWhenLocked` and `turnScreenOn`. A call lights the screen,
+takes over the keyguard, rings with the system ringtone, bypasses Do Not
+Disturb, and offers Answer and Decline — answering brings the app forward and
+speaks the message.
+
+Android 14 made full-screen alerts a user-granted permission for apps that are
+not the default dialer. The app detects this (`canUseFullScreen()`) and can send
+the user straight to the settings page; without it the call degrades to an
+ordinary high-priority notification rather than failing.
+
+**What this does and does not cover.** The call is delivered over the device's
+open WebSocket, so it reaches a phone that is locked and asleep for as long as
+Android keeps that socket alive — verified on a sleeping emulator: the screen
+lit up, the call took over the keyguard, and answering reported back to the hub.
+Once Android suspends the app (deep Doze, or the app swiped away) the socket is
+gone and nothing can be delivered until it returns. Closing *that* gap needs a
+high-priority FCM push to wake the app first: the hub already sends wake-up
+pushes (`push.enabled`), but turning one into a full-screen call needs an
+`expo-notifications` background task and an EAS project ID, which is not wired
+up here. Until then, pair a machine running `notifyjs listen` as the reliable
+always-on target.
+
+iOS needs CallKit and PushKit for the equivalent, which is not implemented — the
+in-app call screen is what runs there. The protocol needs no changes for it; the
 `call` frame already carries everything a native call UI wants.
 
 A phone only holds the socket while the app is alive. Turn on push wake-ups

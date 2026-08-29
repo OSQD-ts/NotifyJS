@@ -1,0 +1,17 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+  <!--
+    A full-screen intent is what makes an incoming call take over a locked
+    screen instead of appearing as a banner. Android 14 requires the user to
+    grant it for anything that is not a default calling app, which the module
+    surfaces through canUseFullScreen()/openSettings().
+  -->
+  <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
+  <uses-permission android:name="android.permission.WAKE_LOCK" />
+  <uses-permission android:name="android.permission.VIBRATE" />
+
+  <application>
+    <receiver
+      android:name=".CallActionReceiver"
+      android:exported="false" />
+  </application>
+</manifest>
