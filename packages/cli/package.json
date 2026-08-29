@@ -1,0 +1,17 @@
+{
+  "name": "@notifyjs/cli",
+  "version": "0.1.0",
+  "description": "NotifyJS command line: run a standalone hub, pair devices, and listen on a desktop.",
+  "license": "MIT",
+  "type": "module",
+  "main": "./dist/index.js",
+  "bin": { "notifyjs": "./dist/bin.js" },
+  "files": ["dist", "src"],
+  "scripts": { "build": "tsc -b" },
+  "dependencies": {
+    "@notifyjs/core": "0.1.0",
+    "@notifyjs/protocol": "0.1.0",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": { "@types/ws": "^8.5.12" }
+}

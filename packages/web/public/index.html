@@ -1,0 +1,120 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <title>NotifyJS</title>
+    <link rel="stylesheet" href="./styles.css" />
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><text y='26' font-size='26'>&#128276;</text></svg>" />
+  </head>
+  <body>
+    <!-- Pairing gate: shown until this browser holds device credentials. -->
+    <section id="pair" class="pair" hidden>
+      <div class="pair-card">
+        <div class="bell" aria-hidden="true">&#128276;</div>
+        <h1>Connect this device</h1>
+        <p class="muted">
+          Enter the pairing code from your hub. It works once and expires in minutes.
+        </p>
+        <form id="pair-form" autocomplete="off">
+          <input
+            id="code"
+            inputmode="latin"
+            spellcheck="false"
+            placeholder="XXXX-XXXX-XXXX"
+            aria-label="Pairing code"
+            maxlength="14"
+          />
+          <input id="device-name" placeholder="Name this device" aria-label="Device name" maxlength="40" />
+          <button type="submit" id="pair-submit">Pair device</button>
+        </form>
+        <p id="pair-error" class="error" role="alert" hidden></p>
+      </div>
+    </section>
+
+    <!-- Main app -->
+    <div id="app" hidden>
+      <header>
+        <div class="brand">
+          <span class="bell" aria-hidden="true">&#128276;</span>
+          <div>
+            <strong id="hub-name">NotifyJS</strong>
+            <span id="device-line" class="muted small"></span>
+          </div>
+        </div>
+        <div class="header-actions">
+          <button id="snooze" class="ghost" hidden>Snooze 30m</button>
+          <button id="enable-notifications" class="ghost" hidden>Enable alerts</button>
+          <button id="devices-toggle" class="ghost" hidden>Devices</button>
+          <span id="status" class="status" data-state="connecting">connecting</span>
+        </div>
+      </header>
+
+      <!-- Screen readers get a one-line summary of each new alert; reading the
+           whole feed again on every arrival would be unusable. -->
+      <p id="announcer" class="visually-hidden" role="status" aria-live="polite"></p>
+
+      <!-- Raised by this browser, not by the hub: if the hub could tell you it
+           was down, it would not be down. -->
+      <div id="service-down" class="service-down" hidden role="alert">
+        <strong id="service-down-title"></strong>
+        <span id="service-down-body"></span>
+      </div>
+
+      <main>
+        <div class="toolbar">
+          <div class="filters" id="filters" role="group" aria-label="Filter by severity"></div>
+          <button id="clear" class="ghost small-btn">Clear feed</button>
+        </div>
+        <ul id="feed" class="feed" aria-label="Notifications"></ul>
+        <p id="empty" class="empty">
+          Nothing yet. Notifications sent from your app will appear here in real time.
+        </p>
+      </main>
+
+      <!-- Devices / admin drawer, only rendered for roles that may manage them -->
+      <aside id="devices" class="drawer" hidden>
+        <div class="drawer-head">
+          <h2>Devices</h2>
+          <button id="devices-close" class="ghost" aria-label="Close">&times;</button>
+        </div>
+        <div class="drawer-body">
+          <button id="new-code" class="primary">Create pairing code</button>
+          <div id="new-code-out" hidden>
+            <p class="muted small">Scan with the phone app, or type the code:</p>
+            <img id="code-qr" class="code-qr" alt="Pairing QR code" />
+            <code id="code-value" class="code-value"></code>
+            <label class="muted small" for="code-role">Role</label>
+            <select id="code-role"></select>
+          </div>
+          <ul id="device-list" class="device-list"></ul>
+        </div>
+      </aside>
+    </div>
+
+    <!-- Full-screen incoming call, mirrors the phone app's behaviour -->
+    <section
+      id="call"
+      class="call"
+      hidden
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="call-from"
+      aria-describedby="call-message"
+    >
+      <div class="call-inner">
+        <p class="call-label">Incoming alert</p>
+        <h2 id="call-from">NotifyJS</h2>
+        <p id="call-severity" class="call-severity"></p>
+        <p id="call-message" class="call-message"></p>
+        <div class="call-actions">
+          <button id="call-decline" class="decline">Decline</button>
+          <button id="call-answer" class="answer">Answer</button>
+        </div>
+        <p id="call-speaking" class="muted small" hidden>Speaking&hellip;</p>
+      </div>
+    </section>
+
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>

@@ -1,0 +1,142 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Cancel superseded runs so a burst of pushes does not queue behind itself.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Build and test (Node ${{ matrix.node }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [20, 22]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+
+      - run: npm ci
+
+      - name: Build all packages
+        run: npm run build
+
+      - name: Test
+        run: npm test
+
+  mobile:
+    name: Mobile app typecheck and bundle
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - run: npm ci
+
+      # The app resolves @notifyjs/protocol through `file:../protocol`, whose
+      # entry point is its build output.
+      - run: npm run build
+
+      - name: Install app dependencies
+        working-directory: packages/mobile
+        run: npm install
+
+      - name: Typecheck against real Expo and React Native types
+        working-directory: packages/mobile
+        run: npx tsc --noEmit
+
+      # A typecheck does not prove Metro can resolve the local workspace
+      # package or the native modules; bundling does.
+      - name: Bundle with Metro
+        working-directory: packages/mobile
+        run: npx expo export --platform android --output-dir /tmp/expo-export
+
+  package:
+    name: Packaged binary smoke test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - run: npm ci
+      - run: npm run build
+
+      # A bundle can compile cleanly and still produce an executable that
+      # cannot start - a stray second shebang was enough to do it once. The
+      # only way to know is to run the packaged artifact.
+      - name: Bundle and package
+        run: |
+          node scripts/bundle.mjs
+          node scripts/package.mjs --target node20-linux-x64 --name notifyjs-linux-x64
+
+      - name: Run the packaged binary
+        run: |
+          mkdir -p /tmp/smoke
+          tar xzf build/artifacts/notifyjs-linux-x64.tar.gz -C /tmp/smoke
+          cd /tmp/smoke/notifyjs
+
+          ./notifyjs help > /dev/null
+          ./notifyjs serve --port 7799 --data ./hub > serve.log 2>&1 &
+
+          for i in $(seq 1 30); do
+            curl -sf http://127.0.0.1:7799/health > /dev/null && break
+            sleep 1
+          done
+
+          echo "--- hub log ---"
+          cat serve.log
+
+          # The dashboard must be served from the directory beside the binary,
+          # since a packaged build cannot resolve @notifyjs/web as a module.
+          curl -sf http://127.0.0.1:7799/health > /dev/null
+          curl -sf http://127.0.0.1:7799/ > /dev/null
+          curl -sf http://127.0.0.1:7799/app.js > /dev/null
+          grep -qE '[0-9A-Z]{4}-[0-9A-Z]{4}-[0-9A-Z]{4}' serve.log
+
+          echo "packaged binary serves the dashboard and issues pairing codes"
+
+  docker:
+    name: Docker image builds
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          load: true
+          tags: notifyjs:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Run it
+        run: |
+          docker run -d --name nj -p 7741:7741 notifyjs:ci
+          for i in $(seq 1 30); do
+            curl -sf http://127.0.0.1:7741/health > /dev/null && break
+            sleep 1
+          done
+          docker logs nj
+          curl -sf http://127.0.0.1:7741/health
+          docker rm -f nj

@@ -1,0 +1,62 @@
+{
+  "expo": {
+    "name": "NotifyJS",
+    "slug": "notifyjs",
+    "version": "0.1.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "automatic",
+    "scheme": "notifyjs",
+    "splash": {
+      "resizeMode": "contain",
+      "backgroundColor": "#0e1116"
+    },
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "dev.notifyjs.app",
+      "infoPlist": {
+        "UIBackgroundModes": [
+          "audio",
+          "remote-notification"
+        ],
+        "NSAppTransportSecurity": {
+          "NSAllowsLocalNetworking": true
+        },
+        "NSCameraUsageDescription": "NotifyJS uses the camera only to scan a pairing QR code."
+      }
+    },
+    "android": {
+      "package": "dev.notifyjs.app",
+      "permissions": [
+        "VIBRATE",
+        "WAKE_LOCK",
+        "POST_NOTIFICATIONS",
+        "INTERNET",
+        "CAMERA"
+      ],
+      "usesCleartextTraffic": true,
+      "blockedPermissions": [
+        "android.permission.RECORD_AUDIO"
+      ]
+    },
+    "plugins": [
+      "expo-secure-store",
+      "expo-notifications",
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "NotifyJS uses the camera only to scan a pairing QR code.",
+          "recordAudioAndroid": false,
+          "microphonePermission": false
+        }
+      ],
+      [
+        "expo-build-properties",
+        {
+          "android": {
+            "usesCleartextTraffic": true
+          }
+        }
+      ]
+    ]
+  }
+}

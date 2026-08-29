@@ -1,0 +1,335 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to build (e.g. v0.1.0). Produces a draft release.'
+        required: true
+
+permissions:
+  contents: write
+  packages: write
+
+env:
+  NOTIFYJS_VERSION: ${{ github.event.inputs.version || github.ref_name }}
+
+jobs:
+  # ---------------------------------------------------------------------
+  # Standalone hub executables. pkg cross-compiles every target from one
+  # Linux runner, so there is no need for a per-OS matrix of machines.
+  # ---------------------------------------------------------------------
+  binaries:
+    name: ${{ matrix.name }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: node20-linux-x64
+            name: notifyjs-linux-x64
+            format: tar.gz
+          - target: node20-linux-arm64
+            name: notifyjs-linux-arm64
+            format: tar.gz
+          - target: node20-macos-x64
+            name: notifyjs-macos-x64
+            format: tar.gz
+          - target: node20-macos-arm64
+            name: notifyjs-macos-arm64
+            format: tar.gz
+          - target: node20-win-x64
+            name: notifyjs-windows-x64
+            format: zip
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - run: npm ci
+      - run: npm run build
+
+      - name: Bundle and package
+        run: |
+          node scripts/bundle.mjs
+          node scripts/package.mjs \
+            --target ${{ matrix.target }} \
+            --name ${{ matrix.name }} \
+            --format ${{ matrix.format }}
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          path: build/artifacts/${{ matrix.name }}.${{ matrix.format }}
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------
+  # Android APK, for sideloading onto a phone.
+  # ---------------------------------------------------------------------
+  android:
+    name: Android APK
+    runs-on: ubuntu-latest
+    # Best effort: a broken native build must not hold back the hub binaries,
+    # which are what most people are downloading.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: android-actions/setup-android@v3
+
+      - run: npm ci
+
+      # The app depends on @notifyjs/protocol through `file:../protocol`, whose
+      # entry point is its build output - so the workspace must be built before
+      # the app's own install can resolve it.
+      - name: Build workspace packages
+        run: npm run build
+
+      - name: Install app dependencies
+        working-directory: packages/mobile
+        run: npm install
+
+      - name: Generate the native Android project
+        working-directory: packages/mobile
+        run: npx expo prebuild --platform android --no-install --clean
+
+      # Cleartext `ws://` is how a hub on a LAN is reached, and Android blocks
+      # it by default. Fail loudly here rather than shipping an app that
+      # silently cannot connect.
+      - name: Verify the manifest permits cleartext WebSockets
+        working-directory: packages/mobile
+        run: |
+          grep -q 'usesCleartextTraffic="true"' android/app/src/main/AndroidManifest.xml \
+            || { echo "manifest is missing usesCleartextTraffic"; exit 1; }
+          if grep -q 'RECORD_AUDIO' android/app/src/main/AndroidManifest.xml; then
+            echo "RECORD_AUDIO leaked back into the manifest"; exit 1
+          fi
+
+      # Optional real signing. Without these secrets the APK is signed with the
+      # debug key, which installs fine for sideloading but cannot be published
+      # to Play and is not upgradeable from a differently-signed build.
+      - name: Configure release signing
+        working-directory: packages/mobile/android
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          if [ -z "$ANDROID_KEYSTORE_BASE64" ]; then
+            echo "No release keystore configured; the APK will be debug-signed."
+            exit 0
+          fi
+          echo "$ANDROID_KEYSTORE_BASE64" | base64 -d > app/release.keystore
+          {
+            echo "MYAPP_UPLOAD_STORE_FILE=release.keystore"
+            echo "MYAPP_UPLOAD_KEY_ALIAS=$ANDROID_KEY_ALIAS"
+            echo "MYAPP_UPLOAD_STORE_PASSWORD=$ANDROID_KEYSTORE_PASSWORD"
+            echo "MYAPP_UPLOAD_KEY_PASSWORD=$ANDROID_KEY_PASSWORD"
+          } >> gradle.properties
+
+      - name: Assemble release APK
+        working-directory: packages/mobile/android
+        run: ./gradlew assembleRelease --no-daemon
+
+      - name: Name the APK after the release
+        run: |
+          mkdir -p build/artifacts
+          cp packages/mobile/android/app/build/outputs/apk/release/app-release.apk \
+             build/artifacts/notifyjs-android-${{ env.NOTIFYJS_VERSION }}.apk
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: notifyjs-android
+          path: build/artifacts/*.apk
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------
+  # The dashboard on its own, for anyone serving it from their own web server
+  # instead of from the hub.
+  # ---------------------------------------------------------------------
+  dashboard:
+    name: Dashboard bundle
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - run: npm ci
+      - run: npm run build
+
+      - name: Zip the dashboard
+        run: |
+          node scripts/bundle.mjs
+          mkdir -p build/artifacts
+          cd build && zip -r -q artifacts/notifyjs-dashboard.zip dashboard
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: notifyjs-dashboard
+          path: build/artifacts/notifyjs-dashboard.zip
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------
+  # Container image for running the hub as a service.
+  # ---------------------------------------------------------------------
+  container:
+    name: Container image
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest,enable=${{ github.event_name == 'push' }}
+            type=raw,value=${{ github.event.inputs.version }},enable=${{ github.event_name == 'workflow_dispatch' }}
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # ---------------------------------------------------------------------
+  # Collect everything into one GitHub Release.
+  # ---------------------------------------------------------------------
+  release:
+    name: Publish release
+    needs: [binaries, android, dashboard]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Checksums
+        working-directory: dist
+        run: |
+          ls -la
+          sha256sum * > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Write release notes
+        run: |
+          VERSION="${{ env.NOTIFYJS_VERSION }}"
+          APK=$(cd dist && ls *.apk 2>/dev/null | head -1)
+
+          # The APK job is best-effort, so the table has to render either way.
+          if [ -n "$APK" ]; then
+            APK_CELL="\`$APK\`"
+          else
+            APK_CELL="not built for this release"
+          fi
+
+          # Container registries reject uppercase in image names.
+          IMAGE=$(echo "ghcr.io/${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
+
+          cat > notes.md <<NOTES
+          ## Downloads
+
+          | Platform | File |
+          | --- | --- |
+          | Linux (x64) | \`notifyjs-linux-x64.tar.gz\` |
+          | Linux (arm64) | \`notifyjs-linux-arm64.tar.gz\` |
+          | macOS (Apple silicon) | \`notifyjs-macos-arm64.tar.gz\` |
+          | macOS (Intel) | \`notifyjs-macos-x64.tar.gz\` |
+          | Windows (x64) | \`notifyjs-windows-x64.zip\` |
+          | Android | ${APK_CELL} |
+          | Dashboard only | \`notifyjs-dashboard.zip\` |
+
+          Nothing here needs Node.js installed.
+
+          ### Run the hub
+
+          \`\`\`bash
+          tar xzf notifyjs-linux-x64.tar.gz
+          cd notifyjs
+          ./notifyjs serve --port 7741
+          \`\`\`
+
+          It prints a pairing code. Open <http://localhost:7741>, enter the
+          code, and the browser becomes a connected device. Keep the
+          \`dashboard\` directory next to the binary.
+
+          ### Container
+
+          \`\`\`bash
+          docker run -d -p 7741:7741 -v notifyjs:/data \\
+            ${IMAGE}:${VERSION#v}
+          \`\`\`
+
+          ### Android
+
+          The APK is signed with a debug key unless release signing secrets are
+          configured, so Android will warn on install. Enable "install unknown
+          apps" for your browser or file manager to sideload it.
+
+          ### macOS
+
+          The binaries are unsigned, so Gatekeeper will refuse them until you
+          clear the quarantine flag:
+
+          \`\`\`bash
+          xattr -d com.apple.quarantine ./notifyjs
+          \`\`\`
+
+          ### Verify a download
+
+          \`\`\`bash
+          sha256sum -c SHA256SUMS.txt --ignore-missing
+          \`\`\`
+
+          Read [SECURITY.md](https://github.com/${{ github.repository }}/blob/main/SECURITY.md)
+          before exposing the hub to the internet.
+          NOTES
+
+          cat notes.md
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.NOTIFYJS_VERSION }}
+          name: NotifyJS ${{ env.NOTIFYJS_VERSION }}
+          body_path: notes.md
+          files: dist/*
+          # A manual run is for rehearsing the pipeline, so it stops at a draft.
+          draft: ${{ github.event_name == 'workflow_dispatch' }}
+          fail_on_unmatched_files: true

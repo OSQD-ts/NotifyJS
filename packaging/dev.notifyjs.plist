@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  NotifyJS hub as a macOS launchd agent.
+
+    cp notifyjs /usr/local/bin/
+    cp -r dashboard /usr/local/share/notifyjs-dashboard
+    cp dev.notifyjs.plist ~/Library/LaunchAgents/
+    launchctl load -w ~/Library/LaunchAgents/dev.notifyjs.plist
+
+  Logs land in ~/Library/Logs/notifyjs.log
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+  <dict>
+    <key>Label</key>
+    <string>dev.notifyjs</string>
+
+    <key>ProgramArguments</key>
+    <array>
+      <string>/usr/local/bin/notifyjs</string>
+      <string>serve</string>
+      <string>--host</string>
+      <string>0.0.0.0</string>
+      <string>--port</string>
+      <string>7741</string>
+      <string>--data</string>
+      <string>/Users/Shared/notifyjs</string>
+    </array>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+      <key>NOTIFYJS_DASHBOARD_DIR</key>
+      <string>/usr/local/share/notifyjs-dashboard</string>
+    </dict>
+
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <dict>
+      <key>SuccessfulExit</key>
+      <false/>
+    </dict>
+
+    <key>StandardOutPath</key>
+    <string>/Users/Shared/notifyjs.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/Shared/notifyjs.log</string>
+  </dict>
+</plist>

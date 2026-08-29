@@ -1,0 +1,16 @@
+node_modules
+**/node_modules
+**/dist
+
+# Incremental build state. Copying it in makes `tsc -b` believe the (excluded)
+# dist output is already up to date, so it emits nothing and the build fails
+# later with a missing directory.
+**/*.tsbuildinfo
+
+build
+.git
+.github
+.notifyjs*
+packages/mobile
+examples
+*.md

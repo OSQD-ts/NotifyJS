@@ -1,0 +1,31 @@
+{
+  "name": "@notifyjs/core",
+  "version": "0.1.0",
+  "description": "Embed a hardened notification hub in your app: one import, one call, every device you own.",
+  "license": "MIT",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "src"
+  ],
+  "scripts": {
+    "build": "tsc -b"
+  },
+  "dependencies": {
+    "@notifyjs/protocol": "0.1.0",
+    "@notifyjs/web": "0.1.0",
+    "qrcode-generator": "^1.5.2",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/ws": "^8.5.12"
+  }
+}

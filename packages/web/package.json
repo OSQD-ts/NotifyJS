@@ -1,0 +1,19 @@
+{
+  "name": "@notifyjs/web",
+  "version": "0.1.0",
+  "description": "Self-hosted NotifyJS dashboard, served straight off the hub.",
+  "license": "MIT",
+  "type": "module",
+  "main": "./dist/app.js",
+  "files": [
+    "dist",
+    "public",
+    "src"
+  ],
+  "scripts": {
+    "build": "tsc -b && node build.mjs"
+  },
+  "dependencies": {
+    "@notifyjs/protocol": "0.1.0"
+  }
+}

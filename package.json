@@ -1,0 +1,31 @@
+{
+  "name": "notifyjs-monorepo",
+  "private": true,
+  "version": "0.1.0",
+  "description": "NotifyJS \u2014 embed a notification hub in your app, reach every device you own.",
+  "workspaces": [
+    "packages/protocol",
+    "packages/core",
+    "packages/cli",
+    "packages/web"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "npm run build -w @notifyjs/protocol && npm run build -w @notifyjs/core && npm run build -w @notifyjs/web && npm run build -w @notifyjs/cli",
+    "clean": "rm -rf packages/*/dist packages/*/*.tsbuildinfo",
+    "test": "node --test packages/core/test/*.test.js packages/cli/test/*.test.js packages/web/test/*.test.js",
+    "demo": "node examples/basic/demo.mjs",
+    "bundle": "node scripts/bundle.mjs",
+    "package": "node scripts/package.mjs",
+    "binary": "npm run build && npm run bundle && node scripts/package.mjs --target node20-linux-x64 --name notifyjs-linux-x64"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "@yao-pkg/pkg": "^6.14.2",
+    "esbuild": "^0.24.2",
+    "jsdom": "^25.0.1",
+    "typescript": "^5.5.4"
+  }
+}

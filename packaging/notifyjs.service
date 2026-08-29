@@ -1,0 +1,49 @@
+# NotifyJS hub as a systemd service.
+#
+#   sudo cp notifyjs /usr/local/bin/
+#   sudo cp -r dashboard /usr/local/share/notifyjs-dashboard
+#   sudo useradd --system --home /var/lib/notifyjs --create-home notifyjs
+#   sudo cp notifyjs.service /etc/systemd/system/
+#   sudo systemctl enable --now notifyjs
+#
+# Watch it with: journalctl -u notifyjs -f
+
+[Unit]
+Description=NotifyJS notification hub
+Documentation=https://github.com/your/notifyjs
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=notifyjs
+Group=notifyjs
+
+Environment=NOTIFYJS_DASHBOARD_DIR=/usr/local/share/notifyjs-dashboard
+ExecStart=/usr/local/bin/notifyjs serve --host 0.0.0.0 --port 7741 --data /var/lib/notifyjs
+
+Restart=on-failure
+RestartSec=5s
+
+# The hub is reachable from the internet, so give it as little of the machine
+# as it can run with.
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6
+RestrictNamespaces=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
+
+# The state directory is the only path it may write to.
+StateDirectory=notifyjs
+ReadWritePaths=/var/lib/notifyjs
+
+[Install]
+WantedBy=multi-user.target
