@@ -82,6 +82,15 @@ jobs:
       - name: Verify the generated manifest
         run: ./scripts/check-android-manifest.sh packages/mobile/android/app/src/main/AndroidManifest.xml
 
+      # Shrinks the wrapper download and gives it a realistic timeout. Run
+      # after prebuild, which regenerates the wrapper properties.
+      - name: Prepare the Gradle wrapper
+        run: ./scripts/prepare-gradle.sh packages/mobile/android/gradle/wrapper/gradle-wrapper.properties
+
+      # Caches the Gradle distribution and dependency jars between runs, so a
+      # reset connection to services.gradle.org is survivable rather than fatal.
+      - uses: gradle/actions/setup-gradle@v6
+
       # Kotlin errors in the local module only surface at compile time, and
       # nothing else in CI compiles it.
       - name: Compile the native call module

@@ -21,6 +21,9 @@ COPY tsconfig.base.json LICENSE ./
 COPY packages ./packages
 COPY scripts ./scripts
 COPY packaging ./packaging
+# The build generates every icon from these, including the dashboard favicon,
+# so the image cannot be built without them.
+COPY assets ./assets
 
 RUN npm run build && node scripts/bundle.mjs
 

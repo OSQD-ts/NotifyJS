@@ -148,9 +148,22 @@ jobs:
             echo "MYAPP_UPLOAD_KEY_PASSWORD=$ANDROID_KEY_PASSWORD"
           } >> gradle.properties
 
+      # Shrinks the wrapper download and gives it a realistic timeout. Run
+      # after prebuild, which regenerates the wrapper properties.
+      - name: Prepare the Gradle wrapper
+        run: ./scripts/prepare-gradle.sh packages/mobile/android/gradle/wrapper/gradle-wrapper.properties
+
+      # Caches the Gradle distribution and dependency jars between runs, so a
+      # reset connection to services.gradle.org is survivable rather than fatal.
+      - uses: gradle/actions/setup-gradle@v6
+
       - name: Assemble release APK
         working-directory: packages/mobile/android
-        run: ./gradlew assembleRelease --no-daemon
+        # One retry: the remaining failure mode after caching is a transient
+        # network blip, and a second attempt costs far less than a lost release.
+        run: |
+          ./gradlew assembleRelease --no-daemon \
+            || { echo "retrying once..."; ./gradlew assembleRelease --no-daemon; }
 
       # The merged manifest inside the APK is the only definitive answer about
       # what the app actually asks for.
