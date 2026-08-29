@@ -60,6 +60,7 @@ cpSync(join(root, 'packages/web/dist'), join(out, 'dashboard'), {
 // Service definitions travel with the binary so "run it as a service" is a
 // copy away rather than something the operator has to write from scratch.
 cpSync(join(root, 'packaging'), join(out, 'service'), { recursive: true });
+cpSync(join(root, 'LICENSE'), join(out, 'LICENSE'));
 
 writeFileSync(
   join(out, 'README.txt'),
@@ -83,6 +84,8 @@ Turn on TLS (recommended before exposing the port):
 
     ./notifyjs cert
     ./notifyjs serve --tls-cert .notifyjs/notifyjs-cert.pem --tls-key .notifyjs/notifyjs-key.pem
+
+Licensed under the OSQD Non-Resale License 1.0 - see LICENSE.
 
 Full docs: https://github.com/${process.env.GITHUB_REPOSITORY ?? 'your/notifyjs'}
 `,

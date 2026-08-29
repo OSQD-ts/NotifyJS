@@ -2,16 +2,18 @@
   "name": "@notifyjs/web",
   "version": "0.1.0",
   "description": "Self-hosted NotifyJS dashboard, served straight off the hub.",
-  "license": "MIT",
+  "license": "SEE LICENSE IN LICENSE",
   "type": "module",
   "main": "./dist/app.js",
   "files": [
     "dist",
     "public",
-    "src"
+    "src",
+    "LICENSE"
   ],
   "scripts": {
-    "build": "tsc -b && node build.mjs"
+    "build": "tsc -b && node build.mjs",
+    "prepack": "node -e \"require('fs').copyFileSync('../../LICENSE','LICENSE')\""
   },
   "dependencies": {
     "@notifyjs/protocol": "0.1.0"

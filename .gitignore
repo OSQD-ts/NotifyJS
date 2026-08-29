@@ -13,3 +13,6 @@ build/
 # and it drags a debug keystore along with it.
 packages/mobile/android/
 packages/mobile/ios/
+
+# Copied from the repo root by each package's `prepack`. One source of truth.
+packages/*/LICENSE

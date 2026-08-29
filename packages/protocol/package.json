@@ -2,15 +2,32 @@
   "name": "@notifyjs/protocol",
   "version": "0.1.0",
   "description": "Wire protocol, RBAC model and crypto primitives shared by every NotifyJS peer.",
-  "license": "MIT",
+  "license": "SEE LICENSE IN LICENSE",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {
-    ".": { "types": "./dist/index.d.ts", "default": "./dist/index.js" },
-    "./node": { "types": "./dist/crypto-node.d.ts", "default": "./dist/crypto-node.js" },
-    "./web": { "types": "./dist/crypto-web.d.ts", "default": "./dist/crypto-web.js" }
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./node": {
+      "types": "./dist/crypto-node.d.ts",
+      "default": "./dist/crypto-node.js"
+    },
+    "./web": {
+      "types": "./dist/crypto-web.d.ts",
+      "default": "./dist/crypto-web.js"
+    }
   },
-  "files": ["dist", "src"],
-  "scripts": { "build": "tsc -b", "watch": "tsc -b -w" }
+  "files": [
+    "dist",
+    "src",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc -b",
+    "watch": "tsc -b -w",
+    "prepack": "node -e \"require('fs').copyFileSync('../../LICENSE','LICENSE')\""
+  }
 }

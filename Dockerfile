@@ -17,7 +17,7 @@ COPY packages/cli/package.json packages/cli/
 
 RUN npm ci
 
-COPY tsconfig.base.json ./
+COPY tsconfig.base.json LICENSE ./
 COPY packages ./packages
 COPY scripts ./scripts
 COPY packaging ./packaging
@@ -35,6 +35,7 @@ WORKDIR /app
 
 COPY --from=build /app/build/notifyjs.cjs ./notifyjs.cjs
 COPY --from=build /app/build/dashboard ./dashboard
+COPY --from=build /app/LICENSE ./LICENSE
 
 # The hub cannot resolve @notifyjs/web as a module here, so point it directly.
 ENV NOTIFYJS_DASHBOARD_DIR=/app/dashboard

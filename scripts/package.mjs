@@ -55,6 +55,7 @@ if (!isWindows) chmodSync(join(staging, exeName), 0o755);
 cpSync(join(build, 'dashboard'), join(staging, 'dashboard'), { recursive: true });
 cpSync(join(build, 'service'), join(staging, 'service'), { recursive: true });
 cpSync(join(build, 'README.txt'), join(staging, 'README.txt'));
+cpSync(join(build, 'LICENSE'), join(staging, 'LICENSE'));
 
 const outDir = join(build, 'artifacts');
 mkdirSync(outDir, { recursive: true });

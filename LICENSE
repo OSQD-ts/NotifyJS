@@ -1,0 +1,102 @@
+OSQD Non-Resale License, Version 1.0
+
+Copyright (c) 2026 Michał Płatosz
+
+Permission is hereby granted, free of charge, to any person or organization
+obtaining a copy of this software and associated documentation files (the
+"Software"), to use, copy, modify, merge, publish, and distribute the Software
+and to create and distribute Derivative Works, subject to the conditions below.
+
+"Derivative Work" means any work based on the Software, including a modified
+copy, a translation, or a work that incorporates any substantial portion of it.
+
+"You" means the person or organization exercising the permissions granted here.
+
+
+1. NOTICE
+
+   You must include the above copyright notice and this entire License in all
+   copies or substantial portions of the Software and in every Derivative Work
+   you distribute, whether or not you have modified it.
+
+   You must not remove, obscure, or alter any copyright, attribution, or license
+   notice contained in the Software.
+
+
+2. NO SALE
+
+   You must not Sell the Software.
+
+   "Sell" means charging any fee, of any kind, where the Software or a Derivative
+   Work is what is being paid for. This includes, without limitation:
+
+   (a) distributing copies of the Software or a Derivative Work for a fee;
+
+   (b) offering the Software or a Derivative Work to third parties as a hosted,
+       managed, or software-as-a-service product for a fee;
+
+   (c) including the Software or a Derivative Work in any product or service you
+       charge for, where the Software forms a substantial part of the value you
+       are offering; or
+
+   (d) sublicensing or relicensing the Software for a fee.
+
+
+3. WHAT IS EXPLICITLY PERMITTED
+
+   For the avoidance of doubt, none of the following is Selling, and all of it is
+   permitted, including by a commercial business and in production:
+
+   (a) using the Software, or a Derivative Work of it, to operate, monitor, or
+       protect your own systems — including the systems of the business you work
+       for, and including systems you charge your own customers to access, so
+       long as the Software itself is not part of what they are paying for;
+
+   (b) charging for your own professional services — consulting, integration,
+       deployment, operation, or support — provided the fee is for your services
+       and not for the Software, and you supply any copy of the Software to the
+       customer under this License at no charge;
+
+   (c) modifying the Software for any purpose, internal or otherwise, and keeping
+       those modifications private;
+
+   (d) distributing the Software or a Derivative Work at no charge; and
+
+   (e) using the Software for personal, educational, academic, research, or
+       non-profit purposes of any kind.
+
+
+4. SEPARATE COMMERCIAL TERMS
+
+   If you want to do something this License does not permit, the copyright holder
+   can grant you a separate license on different terms. Ask.
+
+
+5. TERMINATION
+
+   If you breach this License, the permissions granted to you terminate
+   automatically. If the breach is curable and you cure it within 30 days of
+   becoming aware of it, your permissions are reinstated retroactively. Any
+   permissions granted to those who received the Software from you in compliance
+   with this License are unaffected by your termination.
+
+
+6. THIRD-PARTY COMPONENTS
+
+   This License covers only the Software itself. Dependencies distributed
+   alongside or installed with it remain under their own licenses.
+
+
+7. NO WARRANTY
+
+   THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+   IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+   FITNESS FOR A PARTICULAR PURPOSE, AND NONINFRINGEMENT.
+
+
+8. LIMITATION OF LIABILITY
+
+   IN NO EVENT SHALL THE AUTHOR OR COPYRIGHT HOLDER BE LIABLE FOR ANY CLAIM,
+   DAMAGES, OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT, OR
+   OTHERWISE, ARISING FROM, OUT OF, OR IN CONNECTION WITH THE SOFTWARE OR THE USE
+   OR OTHER DEALINGS IN THE SOFTWARE.

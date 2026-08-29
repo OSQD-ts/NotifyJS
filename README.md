@@ -612,4 +612,13 @@ an Apple Developer account.
 
 ## License
 
-MIT
+[OSQD Non-Resale License, Version 1.0](LICENSE) — copyright (c) 2026
+Michał Płatosz.
+
+Use it, modify it, run it in production, including at a business: operating and
+monitoring your own systems is explicitly permitted, as is charging for your own
+consulting or support around it. What you may not do is sell the software
+itself, or offer it to third parties as a paid hosted product. Distributing it
+free of charge is fine, provided the notice and this licence travel with it.
+
+That summary is not the licence; read [LICENSE](LICENSE) for the terms.
