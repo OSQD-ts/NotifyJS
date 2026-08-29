@@ -80,18 +80,7 @@ jobs:
       # patches in. If the plugin silently stops applying, calls quietly become
       # ordinary banners - so assert on the generated manifest.
       - name: Verify the generated manifest
-        working-directory: packages/mobile/android/app/src/main
-        run: |
-          grep -q 'android:showWhenLocked="true"' AndroidManifest.xml \
-            || { echo "MainActivity cannot show over the keyguard"; exit 1; }
-          grep -q 'android:turnScreenOn="true"' AndroidManifest.xml \
-            || { echo "MainActivity will not wake the screen"; exit 1; }
-          grep -q 'USE_FULL_SCREEN_INTENT' AndroidManifest.xml \
-            || { echo "full-screen intent permission is missing"; exit 1; }
-          grep -q 'usesCleartextTraffic="true"' AndroidManifest.xml \
-            || { echo "ws:// to a LAN hub would be blocked"; exit 1; }
-          grep -q 'RECORD_AUDIO' AndroidManifest.xml \
-            && { echo "RECORD_AUDIO leaked back in"; exit 1; } || true
+        run: ./scripts/check-android-manifest.sh packages/mobile/android/app/src/main/AndroidManifest.xml
 
       # Kotlin errors in the local module only surface at compile time, and
       # nothing else in CI compiles it.

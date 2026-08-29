@@ -120,17 +120,10 @@ jobs:
         working-directory: packages/mobile
         run: npx expo prebuild --platform android --no-install --clean
 
-      # Cleartext `ws://` is how a hub on a LAN is reached, and Android blocks
-      # it by default. Fail loudly here rather than shipping an app that
-      # silently cannot connect.
-      - name: Verify the manifest permits cleartext WebSockets
-        working-directory: packages/mobile
-        run: |
-          grep -q 'usesCleartextTraffic="true"' android/app/src/main/AndroidManifest.xml \
-            || { echo "manifest is missing usesCleartextTraffic"; exit 1; }
-          if grep -q 'RECORD_AUDIO' android/app/src/main/AndroidManifest.xml; then
-            echo "RECORD_AUDIO leaked back into the manifest"; exit 1
-          fi
+      # These fail silently at runtime rather than at build time, so assert on
+      # them explicitly. See the script for what each one protects.
+      - name: Verify the generated manifest
+        run: ./scripts/check-android-manifest.sh packages/mobile/android/app/src/main/AndroidManifest.xml
 
       # Optional real signing. Without these secrets the APK is signed with the
       # debug key, which installs fine for sideloading but cannot be published
@@ -158,6 +151,14 @@ jobs:
       - name: Assemble release APK
         working-directory: packages/mobile/android
         run: ./gradlew assembleRelease --no-daemon
+
+      # The merged manifest inside the APK is the only definitive answer about
+      # what the app actually asks for.
+      - name: Verify the shipped APK
+        run: |
+          ./scripts/check-android-manifest.sh \
+            packages/mobile/android/app/src/main/AndroidManifest.xml \
+            packages/mobile/android/app/build/outputs/apk/release/app-release.apk
 
       - name: Name the APK after the release
         run: |
