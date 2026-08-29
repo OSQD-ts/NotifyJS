@@ -43,9 +43,14 @@ class NotifyjsWatchService : Service() {
     }
 
     fun stop(context: Context) {
-      context.startService(
-        Intent(context, NotifyjsWatchService::class.java).setAction(ACTION_STOP),
-      )
+      // Android 8 refuses startService from a backgrounded app, and this can
+      // be reached from one - a settings change applied as the app goes away.
+      // The service stopping itself is not worth crashing over.
+      runCatching {
+        context.startService(
+          Intent(context, NotifyjsWatchService::class.java).setAction(ACTION_STOP),
+        )
+      }
     }
   }
 

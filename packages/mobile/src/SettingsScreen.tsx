@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import {
   Alert,
+  AppState,
   Platform,
   ScrollView,
   StyleSheet,
@@ -11,7 +12,12 @@ import {
   View,
 } from 'react-native';
 import { SEVERITIES, type ClientPreferences, type Severity, type SourceState } from '@osqd/notifyjs-protocol';
-import { canUseFullScreen, openFullScreenSettings } from '../modules/notifyjs-call';
+import {
+  canUseFullScreen,
+  isBatteryOptimized,
+  openBatterySettings,
+  openFullScreenSettings,
+} from '../modules/notifyjs-call';
 import { currentVersion, downloadAndInstall, findAppUpdate, type AppUpdate } from './updates';
 import { SEVERITY_COLORS, useTheme } from './theme';
 
@@ -73,9 +79,24 @@ export function SettingsScreen({
       setProgress(undefined);
     }
   };
-  // Checked once: on Android 14 the answer only changes when the user visits
-  // settings, and re-reading it on every render would be noise.
-  const [fullScreenOk] = useState(() => canUseFullScreen());
+  /**
+   * Both of these are answered by system settings screens the user leaves the
+   * app to visit, so they are re-read on every return rather than once - the
+   * whole point of the warnings is that they disappear once acted on.
+   */
+  const [permissions, setPermissions] = useState(() => ({
+    fullScreen: canUseFullScreen(),
+    batteryOptimized: isBatteryOptimized(),
+  }));
+
+  useEffect(() => {
+    const check = () =>
+      setPermissions({ fullScreen: canUseFullScreen(), batteryOptimized: isBatteryOptimized() });
+    const sub = AppState.addEventListener('change', (next) => {
+      if (next === 'active') check();
+    });
+    return () => sub.remove();
+  }, []);
 
   const Section = ({ title, children }: { title: string; children: React.ReactNode }) => (
     <View style={styles.section}>
@@ -290,13 +311,26 @@ export function SettingsScreen({
               <Switch value={prefs.keepAlive} onValueChange={(v) => onChange({ keepAlive: v })} />
             </Row>
 
-            {!fullScreenOk ? (
+            {!permissions.fullScreen ? (
               <TouchableOpacity onPress={openFullScreenSettings} style={[styles.warn, { borderColor: SEVERITY_COLORS.warning }]}>
                 <Text style={[styles.warnTitle, { color: SEVERITY_COLORS.warning }]}>
                   Full-screen alerts are off
                 </Text>
                 <Text style={[styles.rowHint, { color: t.muted }]}>
                   Calls will appear as a banner instead of taking over the screen. Tap to allow.
+                </Text>
+              </TouchableOpacity>
+            ) : null}
+
+            {permissions.batteryOptimized ? (
+              <TouchableOpacity onPress={openBatterySettings} style={[styles.warn, { borderColor: SEVERITY_COLORS.warning }]}>
+                <Text style={[styles.warnTitle, { color: SEVERITY_COLORS.warning }]}>
+                  Battery optimisation is on
+                </Text>
+                <Text style={[styles.rowHint, { color: t.muted }]}>
+                  Android may suspend this app's connection while the screen is off, so alerts
+                  arrive late or not at all. Tap, then choose NotifyJS and allow it to run
+                  unrestricted.
                 </Text>
               </TouchableOpacity>
             ) : null}

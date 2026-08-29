@@ -20,7 +20,16 @@ import androidx.core.app.Person
  * foreground service when there is no JS to speak of.
  */
 object CallNotification {
-  const val CHANNEL_ID = "notifyjs_incoming_calls"
+  /**
+   * v2 because the ringing moved out of the channel and into [CallRinger].
+   *
+   * A channel's sound is fixed the moment Android creates it, so an install
+   * that already has the old channel can never be talked out of ringing on the
+   * ringer stream - and that stream is silenced by the same switch that
+   * silences a text message. A new id is the only way to hand the sound over.
+   */
+  const val CHANNEL_ID = "notifyjs_incoming_calls_v2"
+  const val LEGACY_CHANNEL_ID = "notifyjs_incoming_calls"
   const val WATCH_CHANNEL_ID = "notifyjs_watching"
 
   /**
@@ -39,6 +48,9 @@ object CallNotification {
   const val ACTION_DECLINE = "dev.notifyjs.call.DECLINE"
   const val EXTRA_CALL_ID = "notifyjs_call_id"
 
+  /** Set when the app is being launched by Answer rather than by a tap. */
+  const val EXTRA_ANSWERED = "notifyjs_answered"
+
   /**
    * The channel must exist before the first notification and its importance
    * cannot be changed afterwards, so the ringtone is fixed here once.
@@ -47,6 +59,9 @@ object CallNotification {
     if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
     val manager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
 
+    // Silent by design: the app rings for itself through CallRinger, on the
+    // alarm stream, so that a muted phone still gets a call. Leaving a sound
+    // here as well would double it up on phones that are not muted.
     if (manager.getNotificationChannel(CHANNEL_ID) == null) {
       val calls = NotificationChannel(
         CHANNEL_ID,
@@ -55,19 +70,16 @@ object CallNotification {
       ).apply {
         description = "Alerts urgent enough to ring like a phone call."
         lockscreenVisibility = Notification.VISIBILITY_PUBLIC
-        enableVibration(true)
-        vibrationPattern = longArrayOf(0, 700, 800, 700, 1600)
-        setSound(
-          RingtoneManager.getDefaultUri(RingtoneManager.TYPE_RINGTONE),
-          AudioAttributes.Builder()
-            .setUsage(AudioAttributes.USAGE_NOTIFICATION_RINGTONE)
-            .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
-            .build(),
-        )
+        enableVibration(false)
+        setSound(null, null)
         setBypassDnd(true)
       }
       manager.createNotificationChannel(calls)
     }
+
+    // The old channel would otherwise sit in the app's notification settings
+    // ringing on its own terms, and confuse anyone who went looking.
+    runCatching { manager.deleteNotificationChannel(LEGACY_CHANNEL_ID) }
 
     // Alerts: the default notification tone, never the ringtone. Heads-up so
     // an error still gets attention, but nothing that bypasses Do Not Disturb -
@@ -162,6 +174,11 @@ object CallNotification {
       .setCategory(NotificationCompat.CATEGORY_CALL)
       .setPriority(NotificationCompat.PRIORITY_MAX)
       .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+      // Pre-Oreo there is no channel to be silent on, and CallRinger is
+      // already doing the ringing on both.
+      .setSound(null)
+      .setVibrate(null)
+      .setDefaults(0)
       .addPerson(Person.Builder().setName(from).setImportant(true).build())
       // `true` asks Android to launch the intent rather than show a heads-up
       // first - this is what takes over a locked screen.

@@ -8,28 +8,32 @@ import androidx.core.app.NotificationManagerCompat
 /**
  * Handles Answer and Decline tapped straight from the lock screen.
  *
- * Declining is handled entirely here so it works with the app closed. Answering
- * has to bring the app forward, because speaking the message is the app's job -
- * the notification only ever starts the conversation.
+ * The ringing stops here rather than in JavaScript, because JavaScript may not
+ * be running - and a phone that keeps ringing after you have declined is worse
+ * than one that never rang. What happens next is the app's business, so the
+ * action is handed to [CallEvents], which replays it if the app is still
+ * starting up.
  */
 class CallActionReceiver : BroadcastReceiver() {
   override fun onReceive(context: Context, intent: Intent) {
     val callId = intent.getStringExtra(CallNotification.EXTRA_CALL_ID) ?: return
-    NotificationManagerCompat.from(context).cancel(callId.hashCode())
+    val answered = intent.action == CallNotification.ACTION_ANSWER
 
-    if (intent.action != CallNotification.ACTION_ANSWER) {
+    CallRinger.stop()
+    NotificationManagerCompat.from(context).cancel(callId.hashCode())
+    CallEvents.emit(intent.action ?: CallNotification.ACTION_DECLINE, callId)
+
+    if (!answered) {
       // A decline is recorded by the app on its next connection; the hub also
       // moves on by itself once the ring timeout expires.
       return
     }
 
-    val launch = context.packageManager
-      .getLaunchIntentForPackage(context.packageName)
-      ?.apply {
-        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
-        putExtra(CallNotification.EXTRA_CALL_ID, callId)
-        putExtra("notifyjs_answered", true)
-      } ?: return
+    // Speaking the message is the app's job - the notification only ever
+    // starts the conversation - so answering has to bring the app forward.
+    val launch = CallNotification.launchIntent(context, callId)?.apply {
+      putExtra(CallNotification.EXTRA_ANSWERED, true)
+    } ?: return
     context.startActivity(launch)
   }
 }

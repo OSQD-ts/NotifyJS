@@ -517,7 +517,8 @@ npx expo start
 Verified on a real Android build: scan the QR code your hub prints, and pairing is done — the link carries the
 hub address and the code together. (Typing both by hand still works.) The app
 holds a WebSocket while it is running, mirrors notifications into the OS tray,
-and shows a full-screen call UI that vibrates and speaks on answer.
+and shows a full-screen call UI that rings and speaks on answer — audibly, even
+with the phone silenced.
 
 ### Several hubs at once
 
@@ -552,14 +553,33 @@ On Android the app ships a small native module (`modules/notifyjs-call`) that
 raises a real incoming call rather than a banner: a `CATEGORY_CALL` notification
 on a high-importance channel carrying a **full-screen intent**, with the
 activity marked `showWhenLocked` and `turnScreenOn`. A call lights the screen,
-takes over the keyguard, rings with the system ringtone, bypasses Do Not
-Disturb, and offers Answer and Decline — answering brings the app forward and
-speaks the message.
+takes over the keyguard, and offers Answer and Decline — both of which work
+without unlocking the phone, since the ring is stopped and the app told about
+it by a broadcast receiver rather than by JavaScript.
 
-Android 14 made full-screen alerts a user-granted permission for apps that are
-not the default dialer. The app detects this (`canUseFullScreen()`) and can send
-the user straight to the settings page; without it the call degrades to an
-ordinary high-priority notification rather than failing.
+**The ringing and the spoken message are native, and deliberately run on the
+alarm stream.** A notification channel's sound rides the ringer, which means a
+silenced phone silences the alert as thoroughly as it silences a text message —
+not what anyone means by a call. `CallRinger` plays the user's ringtone under
+`USAGE_ALARM` instead, the same stream an alarm clock uses, and vibrates under
+the same attributes; `CallSpeaker` reads the message out over `USAGE_ALARM`
+too, because a message answered on a muted phone that plays to nobody is a
+message not delivered. A wake lock is held for the length of the ring so a
+dozing device does not stutter through it, and the ring stops itself after a
+minute if nothing answers.
+
+Two permissions decide whether any of this is reached, and both are surfaced
+rather than assumed:
+
+- **Full-screen alerts.** Android 14 made these a user-granted permission for
+  apps that are not the default dialer, and *withholds them by default*. Without
+  it a call arriving on a locked phone is an ordinary notification the user
+  sleeps through. The app checks (`canUseFullScreen()`), asks once on startup,
+  and repeats the offer in Settings until it is granted.
+- **Battery optimisation.** A foreground service keeps the process alive, but an
+  app Android is still optimising has its network suspended during long idle
+  stretches — which is exactly the night-time hour an alert matters most.
+  Settings warns when the app is optimised and links to the exclusion list.
 
 ### Staying connected while the app is closed
 

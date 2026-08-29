@@ -1,40 +1,44 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { StyleSheet, Text, TouchableOpacity, Vibration, View } from 'react-native';
 import * as Speech from 'expo-speech';
 import * as Haptics from 'expo-haptics';
 import { useKeepAwake } from 'expo-keep-awake';
 import type { CallRequest } from '@osqd/notifyjs-protocol';
+import { isSupported, speakCall, stopRinging, stopSpeaking } from '../modules/notifyjs-call';
 import { SEVERITY_COLORS, useTheme } from './theme';
 
 interface Props {
   call: CallRequest;
   /** The listener's own speech settings, which win over the call's defaults. */
   speech: { enabled: boolean; rate: number; pitch: number; lang: string; repeat: number };
+  /** True when the call was answered from the notification, before this screen existed. */
+  answered?: boolean;
   onAnswer(): void;
   onDecline(): void;
   onFinished(): void;
 }
 
-/** Ring cadence: buzz, pause, buzz - repeated until answered or cancelled. */
+/** Ring cadence for platforms without the native ringer. */
 const RING_PATTERN = [0, 700, 800, 700, 1600];
 
 /**
  * The incoming-call screen.
  *
- * This is an in-app full-screen call, which works in Expo Go and in a plain
- * managed build. For a true native call UI - ringing over the lock screen the
- * way a phone call does - see the CallKit / ConnectionService notes in the
- * README; the protocol side needs no changes for it.
+ * On Android the ringing and the spoken message are native: both have to work
+ * on a phone whose ringer is off and whose JS thread the system has stopped
+ * scheduling, and neither `Vibration` nor `expo-speech` can promise that.
+ * This screen is then the visible half of a call the OS is already conducting.
+ * Elsewhere it falls back to doing both itself.
  */
-export function CallScreen({ call, speech, onAnswer, onDecline, onFinished }: Props) {
+export function CallScreen({ call, speech, answered, onAnswer, onDecline, onFinished }: Props) {
   const t = useTheme();
   const [speaking, setSpeaking] = useState(false);
   useKeepAwake();
 
-  // Ring until the user acts. The cleanup runs when the call is answered,
-  // declined, or cancelled by the hub because another device picked up.
+  // Ring until the user acts. Android is already ringing natively by the time
+  // this mounts; anywhere else the buzz is all there is.
   useEffect(() => {
-    if (speaking) return;
+    if (isSupported || speaking) return;
     Vibration.vibrate(RING_PATTERN, true);
     return () => Vibration.cancel();
   }, [speaking]);
@@ -42,12 +46,21 @@ export function CallScreen({ call, speech, onAnswer, onDecline, onFinished }: Pr
   useEffect(() => {
     return () => {
       Vibration.cancel();
+      stopRinging();
+      stopSpeaking();
       Speech.stop();
     };
   }, []);
 
+  /** Guards against answering twice - from the notification and from the screen. */
+  const started = useRef(false);
+
   const answer = () => {
+    if (started.current) return;
+    started.current = true;
+
     Vibration.cancel();
+    stopRinging();
     void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
     setSpeaking(true);
     onAnswer();
@@ -58,17 +71,27 @@ export function CallScreen({ call, speech, onAnswer, onDecline, onFinished }: Pr
       return;
     }
 
-    const repeats = Math.max(1, Math.min(speech.repeat || call.repeat || 1, 5));
-    let spoken = 0;
+    const options = {
+      lang: speech.lang || call.lang || 'en-US',
+      rate: speech.rate || call.rate || 1,
+      pitch: speech.pitch || call.pitch || 1,
+      repeat: Math.max(1, Math.min(speech.repeat || call.repeat || 1, 5)),
+    };
 
+    if (isSupported) {
+      // Resolves on failure too, so a broken speech engine still closes the
+      // call rather than stranding the screen with no way back to the feed.
+      void speakCall(call.message, options).then(onFinished, onFinished);
+      return;
+    }
+
+    let spoken = 0;
     const speakOnce = () => {
       Speech.speak(call.message, {
-        language: speech.lang || call.lang || 'en-US',
-        rate: speech.rate || call.rate || 1,
-        pitch: speech.pitch || call.pitch || 1,
-        onDone: () => (++spoken < repeats ? speakOnce() : onFinished()),
-        // A TTS failure must still close the call, or the screen would be
-        // stuck with no way back to the feed.
+        language: options.lang,
+        rate: options.rate,
+        pitch: options.pitch,
+        onDone: () => (++spoken < options.repeat ? speakOnce() : onFinished()),
         onError: onFinished,
         onStopped: onFinished,
       });
@@ -76,10 +99,24 @@ export function CallScreen({ call, speech, onAnswer, onDecline, onFinished }: Pr
     speakOnce();
   };
 
+  // Answering from the notification happens before this screen exists, so the
+  // call arrives already answered and goes straight to speaking.
+  useEffect(() => {
+    if (answered) answer();
+  }, [answered]);
+
   const decline = () => {
     Vibration.cancel();
+    stopRinging();
+    stopSpeaking();
     Speech.stop();
     onDecline();
+  };
+
+  const hangUp = () => {
+    stopSpeaking();
+    Speech.stop();
+    onFinished();
   };
 
   const accent = SEVERITY_COLORS[call.severity] ?? SEVERITY_COLORS.critical;
@@ -96,13 +133,7 @@ export function CallScreen({ call, speech, onAnswer, onDecline, onFinished }: Pr
       </View>
 
       {speaking ? (
-        <TouchableOpacity
-          onPress={() => {
-            Speech.stop();
-            onFinished();
-          }}
-          style={[styles.button, styles.wide, { backgroundColor: '#ff6b6b' }]}
-        >
+        <TouchableOpacity onPress={hangUp} style={[styles.button, styles.wide, { backgroundColor: '#ff6b6b' }]}>
           <Text style={styles.buttonText}>Hang up</Text>
         </TouchableOpacity>
       ) : (

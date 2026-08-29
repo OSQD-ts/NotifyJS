@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { AppState, StyleSheet, View } from 'react-native';
+import { Alert, AppState, Platform, StyleSheet, View } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
 import * as Linking from 'expo-linking';
 import * as Notifications from 'expo-notifications';
 import { parsePairingLink } from '@osqd/notifyjs-protocol';
 
+import { canUseFullScreen, dismissCall, openFullScreenSettings } from './modules/notifyjs-call';
 import { useSources } from './src/useSources';
 import { PairScreen } from './src/PairScreen';
 import { ScanScreen } from './src/ScanScreen';
@@ -26,7 +27,8 @@ type View_ = 'feed' | 'settings' | 'add' | 'scan';
 
 export default function App() {
   const t = useTheme();
-  const { manager, sources, feed, activeCall, prefs, loaded, savePrefs, closeCall } = useSources();
+  const { manager, sources, feed, activeCall, callAnswered, prefs, loaded, savePrefs, closeCall } =
+    useSources();
 
   const [view, setView] = useState<View_>('feed');
   const [busy, setBusy] = useState(false);
@@ -37,6 +39,26 @@ export default function App() {
   useEffect(() => {
     void Notifications.requestPermissionsAsync();
   }, []);
+
+  /**
+   * Android 14 withholds full-screen alerts from anything that is not a
+   * dialler, and without them a call arriving on a locked phone is a banner
+   * the user will sleep through. Asked here rather than left as a warning in
+   * Settings, because the person who needs it most is the one who never opens
+   * Settings. Only while it is still missing, so a granted phone never sees it.
+   */
+  useEffect(() => {
+    if (Platform.OS !== 'android' || !loaded || sources.length === 0) return;
+    if (canUseFullScreen()) return;
+    Alert.alert(
+      'Let calls take over the screen',
+      'Android needs your permission before an alert can ring over a locked phone. Without it, calls arrive as an ordinary notification.',
+      [
+        { text: 'Not now', style: 'cancel' },
+        { text: 'Allow', onPress: openFullScreenSettings },
+      ],
+    );
+  }, [loaded, sources.length === 0]);
 
   /** Adds a source, surfacing failures instead of leaving a dead screen. */
   const addSource = useCallback(
@@ -100,7 +122,13 @@ export default function App() {
         <CallScreen
           call={call}
           speech={prefs.speech}
-          onAnswer={() => manager.answerCall(sourceId, call.id)}
+          answered={callAnswered}
+          onAnswer={() => {
+            manager.answerCall(sourceId, call.id);
+            // The ring is over; leaving the notification up would let a second
+            // Answer restart a call that is already being spoken.
+            dismissCall(call.id);
+          }}
           onDecline={() => {
             manager.declineCall(sourceId, call.id);
             closeCall(activeCall);
