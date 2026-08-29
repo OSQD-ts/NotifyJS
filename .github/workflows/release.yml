@@ -56,9 +56,9 @@ jobs:
             name: notifyjs-windows-x64
             format: zip
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 20
           cache: npm
@@ -74,7 +74,7 @@ jobs:
             --name ${{ matrix.name }} \
             --format ${{ matrix.format }}
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.name }}
           path: build/artifacts/${{ matrix.name }}.${{ matrix.format }}
@@ -90,14 +90,14 @@ jobs:
     # which are what most people are downloading.
     continue-on-error: true
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 20
           cache: npm
 
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: '17'
@@ -166,7 +166,7 @@ jobs:
           cp packages/mobile/android/app/build/outputs/apk/release/app-release.apk \
              build/artifacts/notifyjs-android-${{ env.NOTIFYJS_VERSION }}.apk
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: notifyjs-android
           path: build/artifacts/*.apk
@@ -180,9 +180,9 @@ jobs:
     name: Dashboard bundle
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 20
           cache: npm
@@ -196,7 +196,7 @@ jobs:
           mkdir -p build/artifacts
           cd build && zip -r -q artifacts/notifyjs-dashboard.zip dashboard
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: notifyjs-dashboard
           path: build/artifacts/notifyjs-dashboard.zip
@@ -209,7 +209,7 @@ jobs:
     name: Container image
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: docker/setup-qemu-action@v3
       - uses: docker/setup-buildx-action@v3
 
@@ -230,6 +230,11 @@ jobs:
             type=raw,value=${{ github.event.inputs.version }},enable=${{ github.event_name == 'workflow_dispatch' }}
 
       - uses: docker/build-push-action@v6
+        env:
+          # Nothing consumes the build record, and it is the artifact that
+          # broke the release job when collected alongside the real ones.
+          DOCKER_BUILD_SUMMARY: false
+          DOCKER_BUILD_RECORD_UPLOAD: false
         with:
           context: .
           platforms: linux/amd64,linux/arm64
@@ -247,10 +252,15 @@ jobs:
     needs: [binaries, android, dashboard]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/download-artifact@v4
+      # Only this workflow's own artifacts. Without the pattern the step also
+      # picks up the `.dockerbuild` build record that docker/build-push-action
+      # uploads, which is not a plain zip and fails extraction - taking the
+      # whole release down with it after every build had already succeeded.
+      - uses: actions/download-artifact@v8
         with:
+          pattern: notifyjs-*
           path: dist
           merge-multiple: true
 
