@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <!--
+      The renderer displays titles and bodies written by whatever is sending
+      alerts. Nothing is loaded from the network and nothing is evaluated at
+      runtime, so the policy says exactly that.
+    -->
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'none'"
+    />
+    <title>NotifyJS</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div id="root"></div>
+    <script src="renderer.js"></script>
+  </body>
+</html>

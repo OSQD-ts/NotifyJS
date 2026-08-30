@@ -16,8 +16,10 @@ const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const src = join(root, 'assets');
 const mobile = join(root, 'packages/mobile/assets');
 const web = join(root, 'packages/web/public');
+const desktop = join(root, 'packages/desktop/assets');
 
 mkdirSync(mobile, { recursive: true });
+mkdirSync(desktop, { recursive: true });
 
 /** Places a glyph on a transparent canvas at a fraction of its width. */
 async function inset(svg, size, scale, background = { r: 0, g: 0, b: 0, alpha: 0 }) {
@@ -55,6 +57,13 @@ for (const [name, render] of jobs) {
   const { width, height } = await sharp(buffer).metadata();
   console.log(`  ${name.padEnd(24)} ${width}x${height}`);
 }
+
+// The desktop app needs two: a window and installer icon at the size every
+// packager wants, and a much smaller one for the tray, where the glyph is
+// drawn at menu-bar height and a downscaled 1024px bell turns to mush.
+await sharp(join(src, 'icon.svg')).resize(512, 512).png().toFile(join(desktop, 'icon.png'));
+await sharp(join(src, 'icon.svg')).resize(32, 32).png().toFile(join(desktop, 'tray.png'));
+console.log('  desktop icon.png + tray.png');
 
 // The dashboard serves its own favicon, so it gets the vector directly.
 await sharp(join(src, 'icon.svg')).resize(196, 196).png().toFile(join(web, 'favicon.png'));

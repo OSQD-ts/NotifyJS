@@ -54,6 +54,7 @@ npm install @osqd/notifyjs@next   # the rolling build from main
 | `@osqd/notifyjs-web` | Self-hosted dashboard, served by the hub itself at `http://host:7741`. |
 | `@osqd/notifyjs-cli` | `notifyjs serve` for a standalone hub, `notifyjs listen` to turn a desktop into a device. |
 | `@osqd/notifyjs-mobile` | React Native (Expo) app: notification feed plus a full-screen call screen with TTS. |
+| `@osqd/notifyjs-desktop` | Electron app: the same feed, settings and spoken calls, in the system tray. |
 
 The icon is generated from one SVG source (`assets/icon.svg`) into every size
 each platform wants — launcher, Android adaptive foreground, splash, monochrome
@@ -63,11 +64,11 @@ status-bar glyph, and the web favicon — with `npm run icons`.
 your app  ──imports──►  @osqd/notifyjs
                              │  WebSocket server on :7741
                              │
-        ┌────────────────────┼────────────────────┐
-        ▼                    ▼                    ▼
-  web dashboard        phone (Expo RN)      notifyjs listen
-  browser alerts       ringtone + TTS       desktop notifications
-  + speech synth       full-screen call     + spd-say / say
+        ┌───────────────┬────┴──────────┬───────────────┐
+        ▼               ▼               ▼               ▼
+  web dashboard  phone (Expo RN)   desktop app   notifyjs listen
+ browser alerts  ringtone + TTS    tray + feed   headless daemon
+ + speech synth full-screen call  ring + speak   + spd-say / say
 ```
 
 ## Download
@@ -519,6 +520,38 @@ hub address and the code together. (Typing both by hand still works.) The app
 holds a WebSocket while it is running, mirrors notifications into the OS tray,
 and shows a full-screen call UI that rings and speaks on answer — audibly, even
 with the phone silenced.
+
+### The desktop app
+
+`notifyjs listen` turns a machine into a device, but it is a daemon in a
+terminal. `packages/desktop` is the same client with a window: the phone app's
+merged feed, settings and call screen, built on Electron so it is the same
+TypeScript as everything else here rather than a second language to maintain.
+
+```bash
+cd packages/desktop
+npm install
+npm start          # build and run
+npm run dist       # AppImage / dmg / nsis into release/
+```
+
+Pair it by pasting a pairing link or typing a code — the same twelve characters
+the hub prints, checksum-verified before it is spent, so a typo never costs an
+attempt against the hub's lockout counter.
+
+**The connections live in the main process, not the window.** Closing the
+window hides it to the tray and changes nothing about what is delivered; an
+alerting client that stops listening when you dismiss its window is not an
+alerting client. The tray menu carries the connection count, a snooze, "start
+at login" and the only real quit.
+
+Calls behave the way they do on the phone. The window comes to the front, rings
+until it is answered or declined, and reads the message aloud on answer. Speech
+prefers the window's own engine, so the rate and pitch set in Settings are
+honoured — but a Linux desktop whose Chromium ships no voices at all (the
+common case; this was written on one) falls back to the system engine,
+`spd-say` or `say` or SAPI, because a call answered in silence is a call that
+failed.
 
 ### Several hubs at once
 

@@ -21,3 +21,7 @@ packages/*/LICENSE
 packages/mobile/assets/
 packages/web/public/favicon.png
 packages/web/public/icon.svg
+packages/desktop/assets/
+
+# electron-builder's output: installers are release artifacts, not sources.
+packages/desktop/release/
