@@ -24,7 +24,7 @@
   "dependencies": {
     "@osqd/notifyjs-protocol": "0.1.0",
     "@osqd/notifyjs-web": "0.1.0",
-    "qrcode-generator": "^1.5.2",
+    "qrcode-generator": "^2.0.4",
     "ws": "^8.18.0"
   },
   "devDependencies": {
