@@ -6,7 +6,7 @@
  * page is loaded from a file with a CSP that forbids anything else.
  */
 import { context, build } from 'esbuild';
-import { cpSync, mkdirSync, rmSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, rmSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 
@@ -59,7 +59,15 @@ const targets = [
 function copyStatic() {
   cpSync(join(root, 'src/renderer/index.html'), join(out, 'index.html'));
   cpSync(join(root, 'src/renderer/styles.css'), join(out, 'styles.css'));
-  cpSync(join(root, 'assets'), out, { recursive: true });
+
+  // Icons are rendered from the repo's single SVG source rather than checked
+  // in, so a fresh clone has none until that script has run. Saying so beats
+  // an ENOENT from cpSync three frames down.
+  const assets = join(root, 'assets');
+  if (!existsSync(assets)) {
+    throw new Error('packages/desktop/assets is missing - run `npm run icons` in the repo root first');
+  }
+  cpSync(assets, out, { recursive: true });
 }
 
 if (watch) {

@@ -9,7 +9,9 @@
     "build": "node build.mjs",
     "start": "npm run build && electron .",
     "dev": "node build.mjs --watch",
-    "dist": "npm run build && electron-builder"
+    "dist": "npm run build && electron-builder",
+    "install:local": "node scripts/install-local.mjs",
+    "uninstall:local": "node scripts/install-local.mjs --uninstall"
   },
   "dependencies": {
     "@osqd/notifyjs-protocol": "file:../protocol",
@@ -24,6 +26,8 @@
   "build": {
     "appId": "dev.notifyjs.desktop",
     "productName": "NotifyJS",
+    "executableName": "notifyjs-desktop",
+    "artifactName": "${productName}-${version}-${arch}.${ext}",
     "files": [
       "dist/**",
       "package.json"
@@ -33,9 +37,14 @@
     },
     "linux": {
       "target": [
+        "deb",
         "AppImage"
       ],
-      "category": "Utility"
+      "category": "Utility",
+      "icon": "assets/icon.png",
+      "synopsis": "Self-hosted alerts and spoken calls from your own hubs",
+      "description": "NotifyJS desktop client. Subscribes to your own NotifyJS hubs over an encrypted WebSocket, shows a merged alert feed, and rings like a phone call for anything urgent enough to be spoken aloud.",
+      "syncDesktopName": true
     },
     "mac": {
       "target": [
@@ -47,6 +56,22 @@
       "target": [
         "nsis"
       ]
+    },
+    "deb": {
+      "packageName": "notifyjs-desktop",
+      "depends": [
+        "libgtk-3-0",
+        "libnotify4",
+        "libnss3",
+        "libxss1",
+        "libxtst6",
+        "xdg-utils",
+        "libatspi2.0-0",
+        "libuuid1",
+        "libsecret-1-0"
+      ]
     }
-  }
+  },
+  "author": "OSQD <OSQD-ts@users.noreply.github.com>",
+  "homepage": "https://github.com/OSQD-ts/NotifyJS"
 }

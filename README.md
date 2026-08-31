@@ -531,9 +531,35 @@ TypeScript as everything else here rather than a second language to maintain.
 ```bash
 cd packages/desktop
 npm install
-npm start          # build and run
-npm run dist       # AppImage / dmg / nsis into release/
+npm start          # build and run from source
 ```
+
+To install it as an ordinary application - in the menu, with an icon, launched
+without a terminal:
+
+```bash
+npm run dist            # release/NotifyJS-<version>-amd64.deb + .AppImage
+npm run install:local   # put the AppImage in the menu for this user, no root
+```
+
+`install:local` writes three files under `~/.local` (the AppImage itself, a
+`.desktop` entry, and the icon) and nothing outside your home directory, so it
+needs no `sudo` and `npm run uninstall:local` takes it all back out. The
+launcher carries a **Start in the tray** action for the login-item case, where
+a window in your face is the wrong greeting.
+
+The `.deb` is the better answer if you would rather have it system-wide, and
+the one to hand to anyone else on a Debian-derived desktop:
+
+```bash
+sudo dpkg -i release/NotifyJS-0.1.0-amd64.deb
+```
+
+It installs to `/opt/NotifyJS`, registers the same menu entry, and declares its
+GTK and libnotify dependencies so apt catches a machine that is missing them.
+The executable is `notifyjs-desktop`, deliberately not `notifyjs` - that name
+belongs to the CLI, and one of them shadowing the other on `PATH` would be a
+mean surprise.
 
 Pair it by pasting a pairing link or typing a code — the same twelve characters
 the hub prints, checksum-verified before it is spent, so a typo never costs an
