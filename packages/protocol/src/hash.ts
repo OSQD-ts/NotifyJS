@@ -24,7 +24,11 @@ export function sha256Sync(data: Uint8Array): Uint8Array {
   ]);
 
   const bitLen = data.length * 8;
-  const padded = new Uint8Array((((data.length + 9) >> 6) + 1) << 6);
+  // Padding is 0x80, then zeros, then an 8-byte length: the smallest multiple
+  // of 64 that fits `length + 1 + 8`. Rounding up by one byte too many would
+  // append a whole extra block whenever `length % 64 === 55`, producing a
+  // digest that is not SHA-256 for exactly those inputs.
+  const padded = new Uint8Array((((data.length + 8) >> 6) + 1) << 6);
   padded.set(data);
   padded[data.length] = 0x80;
   new DataView(padded.buffer).setUint32(padded.length - 4, bitLen >>> 0, false);

@@ -14,6 +14,8 @@ export class PushSender {
   constructor(
     private readonly opts: PushOptions,
     private readonly log: (line: string, meta?: Record<string, unknown>) => void,
+    /** Reports the outcome, so `/metrics` can show pushes actually happening. */
+    private readonly onResult: (ok: boolean, count: number) => void = () => {},
   ) {}
 
   get enabled(): boolean {
@@ -74,7 +76,9 @@ export class PushSender {
       if (!response.ok) {
         this.log('push service rejected the request', { status: response.status, ref });
       }
+      this.onResult(response.ok, targets.length);
     } catch (err) {
+      this.onResult(false, targets.length);
       this.log('push delivery failed', {
         ref,
         error: err instanceof Error ? err.message : String(err),

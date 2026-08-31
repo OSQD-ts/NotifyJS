@@ -59,13 +59,31 @@ function createWindow(show: boolean): BrowserWindow {
   });
 
   // Alerts routinely carry links to a dashboard or a runbook. Opening them in
-  // the app would turn an alerting client into an unsandboxed browser.
+  // the app would turn an alerting client into an unsandboxed browser - and
+  // handing an arbitrary scheme to the OS is worse still, since `file:` and
+  // the handlers a machine happens to have registered are reachable that way.
   win.webContents.setWindowOpenHandler(({ url }) => {
-    void shell.openExternal(url);
+    if (isExternalWebUrl(url)) void shell.openExternal(url);
     return { action: 'deny' };
   });
 
+  // The window only ever shows its own bundled page. Anything that tries to
+  // navigate it somewhere else is a bug or an attack, never a feature.
+  win.webContents.on('will-navigate', (event, url) => {
+    if (!url.startsWith('file://')) event.preventDefault();
+  });
+
   return win;
+}
+
+/** Only ordinary web links are worth handing to the operating system. */
+function isExternalWebUrl(raw: string): boolean {
+  try {
+    const url = new URL(raw);
+    return url.protocol === 'https:' || url.protocol === 'http:';
+  } catch {
+    return false;
+  }
 }
 
 function showWindow(): void {

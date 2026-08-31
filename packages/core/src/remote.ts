@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import WebSocket from 'ws';
@@ -70,41 +70,60 @@ export class RemoteNotifier {
    * app has no credentials yet. Safe to call repeatedly; the work happens once.
    */
   connect(): Promise<void> {
-    this.ready ??= this.establish();
+    // A failed attempt must not be cached: holding on to the rejected promise
+    // would turn one unreachable moment - a hub still booting, a flapping
+    // network - into a notifier that refuses to connect for the rest of the
+    // process's life, with the original error repeated forever.
+    this.ready ??= this.establish().catch((err: unknown) => {
+      this.ready = undefined;
+      throw err;
+    });
     return this.ready;
   }
 
   private async establish(): Promise<void> {
+    // Every listener is removed on settle. `establish()` runs again after a
+    // failure or a `disconnect()`, and leaving them attached would accumulate
+    // a set of handlers per attempt on a long-lived client.
+    const offs: (() => void)[] = [];
     const settled = new Promise<void>((resolve, reject) => {
       const timer = setTimeout(
         () => reject(new Error(`timed out connecting to ${this.opts.url}`)),
         this.opts.timeoutMs ?? 15_000,
       );
-      this.client.on('ready', () => {
+      const finish = (fn: () => void) => {
         clearTimeout(timer);
-        resolve();
-      });
-      this.client.on('error', (err) => {
-        clearTimeout(timer);
-        reject(new Error(err.message));
-      });
-      this.client.on('status', (status) => {
-        if (status !== 'unpaired') return;
-        clearTimeout(timer);
-        reject(
-          new Error(
-            'this app is not paired with the hub - pass `pairingCode`, or run: notifyjs pair <code>',
-          ),
-        );
-      });
+        fn();
+      };
+
+      offs.push(this.client.on('ready', () => finish(resolve)));
+      offs.push(
+        this.client.on('error', (err) => finish(() => reject(new Error(err.message)))),
+      );
+      offs.push(
+        this.client.on('status', (status) => {
+          if (status !== 'unpaired') return;
+          finish(() =>
+            reject(
+              new Error(
+                'this app is not paired with the hub - pass `pairingCode`, or run: notifyjs pair <code>',
+              ),
+            ),
+          );
+        }),
+      );
     });
 
-    if (this.opts.pairingCode && !(await this.client.isPaired())) {
-      await this.client.pair(this.opts.pairingCode);
-    } else {
-      await this.client.connect();
+    try {
+      if (this.opts.pairingCode && !(await this.client.isPaired())) {
+        await this.client.pair(this.opts.pairingCode);
+      } else {
+        await this.client.connect();
+      }
+      await settled;
+    } finally {
+      for (const off of offs) off();
     }
-    await settled;
   }
 
   disconnect(): void {
@@ -251,6 +270,13 @@ function defaultStorage(): ClientStorage {
   const save = (data: Record<string, string>) => {
     mkdirSync(dirname(file), { recursive: true, mode: 0o700 });
     writeFileSync(file, JSON.stringify(data, null, 2), { mode: 0o600 });
+    // `mode` above only applies when the file is created; restate it so an
+    // existing file cannot keep looser permissions than it should have.
+    try {
+      chmodSync(file, 0o600);
+    } catch {
+      /* a filesystem without POSIX modes; nothing to enforce */
+    }
   };
 
   return {

@@ -12,9 +12,12 @@ on:
         description: 'Version to build (e.g. v0.1.0). Produces a draft release.'
         required: true
 
+# Least privilege by default. Only the jobs that actually publish something
+# widen this, and they do it themselves: every other job runs `npm ci`,
+# `expo prebuild` and `gradlew`, all of which execute third-party code, and
+# none of them has any business holding a token that can write to the repo.
 permissions:
-  contents: write
-  packages: write
+  contents: read
 
 # A tag builds that version; a branch push builds a rolling prerelease.
 env:
@@ -28,12 +31,45 @@ concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: true
 
+# Third-party actions are pinned to the commit they resolved to, not to a tag.
+# A tag is a mutable pointer the action's owner can move: anyone who can retag
+# can change what runs here, and this workflow holds the publishing
+# credentials. The trailing comment is the human-readable version; update both
+# together (Dependabot understands this form).
+
 jobs:
+  # ---------------------------------------------------------------------
+  # The dispatch input is the one value here a person types, and it reaches a
+  # shell, a filename and an npm publish. Checked once, up front, so every
+  # later job can treat it as a version rather than as arbitrary text.
+  # ---------------------------------------------------------------------
+  validate:
+    name: Validate the requested version
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check the version string
+        env:
+          REQUESTED: ${{ github.event.inputs.version }}
+        run: |
+          if [ -z "$REQUESTED" ]; then
+            echo "Not a manual dispatch; the version comes from the ref."
+            exit 0
+          fi
+          # A tag-shaped version and nothing else: no whitespace, no shell
+          # metacharacters, no newline that could forge a step output.
+          if ! printf '%s' "$REQUESTED" \
+            | grep -qE '^v?[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$'; then
+            echo "::error::'$REQUESTED' is not a version like v1.2.3"
+            exit 1
+          fi
+          echo "version looks well formed"
+
   # ---------------------------------------------------------------------
   # Standalone hub executables. pkg cross-compiles every target from one
   # Linux runner, so there is no need for a per-OS matrix of machines.
   # ---------------------------------------------------------------------
   binaries:
+    needs: validate
     name: ${{ matrix.name }}
     runs-on: ubuntu-latest
     strategy:
@@ -56,9 +92,9 @@ jobs:
             name: notifyjs-windows-x64
             format: zip
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
           node-version: 20
           cache: npm
@@ -66,15 +102,23 @@ jobs:
       - run: npm ci
       - run: npm run build
 
+      # These are workflow literals rather than anything a person types, but
+      # they go through the environment like everything else: "no ${{ }} inside
+      # a run block" is a rule that can be checked at a glance, where "no
+      # ${{ }} except the safe ones" is a judgement call on every edit.
       - name: Bundle and package
+        env:
+          TARGET: ${{ matrix.target }}
+          ASSET_NAME: ${{ matrix.name }}
+          FORMAT: ${{ matrix.format }}
         run: |
           node scripts/bundle.mjs
           node scripts/package.mjs \
-            --target ${{ matrix.target }} \
-            --name ${{ matrix.name }} \
-            --format ${{ matrix.format }}
+            --target "$TARGET" \
+            --name "$ASSET_NAME" \
+            --format "$FORMAT"
 
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: ${{ matrix.name }}
           path: build/artifacts/${{ matrix.name }}.${{ matrix.format }}
@@ -85,24 +129,25 @@ jobs:
   # ---------------------------------------------------------------------
   android:
     name: Android APK
+    needs: validate
     runs-on: ubuntu-latest
     # Best effort: a broken native build must not hold back the hub binaries,
     # which are what most people are downloading.
     continue-on-error: true
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
           node-version: 20
           cache: npm
 
-      - uses: actions/setup-java@v6
+      - uses: actions/setup-java@dd06d9cba3e5552c54d9f8ea23572deb30010f7c # v6
         with:
           distribution: temurin
           java-version: '17'
 
-      - uses: android-actions/setup-android@v3
+      - uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3
 
       - run: npm ci
 
@@ -112,9 +157,11 @@ jobs:
       - name: Build workspace packages
         run: npm run build
 
+      # `ci`, not `install`: this job signs and ships an APK, so the dependency
+      # tree it builds from has to be the one in the lockfile.
       - name: Install app dependencies
         working-directory: packages/mobile
-        run: npm install
+        run: npm ci
 
       - name: Generate the native Android project
         working-directory: packages/mobile
@@ -155,7 +202,7 @@ jobs:
 
       # Caches the Gradle distribution and dependency jars between runs, so a
       # reset connection to services.gradle.org is survivable rather than fatal.
-      - uses: gradle/actions/setup-gradle@v6
+      - uses: gradle/actions/setup-gradle@9c971963bec38e04b3d30dcc455b5382be2fdbfb # v6
 
       - name: Assemble release APK
         working-directory: packages/mobile/android
@@ -173,13 +220,19 @@ jobs:
             packages/mobile/android/app/src/main/AndroidManifest.xml \
             packages/mobile/android/app/build/outputs/apk/release/app-release.apk
 
+      # Passed through the environment rather than pasted into the script.
+      # `${{ }}` is substituted as text before the shell ever sees the line, so
+      # an expression carrying a quote or a semicolon becomes shell syntax; a
+      # variable reference cannot.
       - name: Name the APK after the release
+        env:
+          VERSION: ${{ env.NOTIFYJS_VERSION }}
         run: |
           mkdir -p build/artifacts
           cp packages/mobile/android/app/build/outputs/apk/release/app-release.apk \
-             build/artifacts/notifyjs-android-${{ env.NOTIFYJS_VERSION }}.apk
+             "build/artifacts/notifyjs-android-${VERSION}.apk"
 
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: notifyjs-android
           path: build/artifacts/*.apk
@@ -191,11 +244,12 @@ jobs:
   # ---------------------------------------------------------------------
   dashboard:
     name: Dashboard bundle
+    needs: validate
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
           node-version: 20
           cache: npm
@@ -209,7 +263,7 @@ jobs:
           mkdir -p build/artifacts
           cd build && zip -r -q artifacts/notifyjs-dashboard.zip dashboard
 
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: notifyjs-dashboard
           path: build/artifacts/notifyjs-dashboard.zip
@@ -220,20 +274,25 @@ jobs:
   # ---------------------------------------------------------------------
   container:
     name: Container image
+    needs: validate
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # Pushing the image to ghcr.io is the only reason this job exists.
+      packages: write
     steps:
-      - uses: actions/checkout@v7
-      - uses: docker/setup-qemu-action@v3
-      - uses: docker/setup-buildx-action@v3
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
 
-      - uses: docker/login-action@v3
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5
         with:
           images: ghcr.io/${{ github.repository }}
           tags: |
@@ -242,7 +301,7 @@ jobs:
             type=raw,value=latest,enable=${{ github.event_name == 'push' }}
             type=raw,value=${{ github.event.inputs.version }},enable=${{ github.event_name == 'workflow_dispatch' }}
 
-      - uses: docker/build-push-action@v6
+      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         env:
           # Nothing consumes the build record, and it is the artifact that
           # broke the release job when collected alongside the real ones.
@@ -267,6 +326,7 @@ jobs:
   # ---------------------------------------------------------------------
   npm:
     name: Publish to npm
+    needs: validate
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -274,9 +334,9 @@ jobs:
       # by this workflow from this commit.
       id-token: write
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
           node-version: 20
           cache: npm
@@ -288,6 +348,8 @@ jobs:
 
       - name: Decide the version to publish
         id: version
+        env:
+          RUN_NUMBER: ${{ github.run_number }}
         run: |
           BASE=$(node -p "require('./package.json').version")
           if [ "$IS_TAG" = "true" ]; then
@@ -295,19 +357,31 @@ jobs:
             TAG=latest
           else
             # Unique per run and ordered, so a later build always wins.
-            VERSION="${BASE}-main.${{ github.run_number }}"
+            VERSION="${BASE}-main.${RUN_NUMBER}"
             TAG=next
           fi
+          # A step output is parsed line by line, so a newline in $VERSION would
+          # forge additional outputs for every later step that reads them.
+          case "$VERSION" in
+            *[!0-9A-Za-z.+-]* | '')
+              echo "::error::refusing to publish a version containing '$VERSION'"
+              exit 1
+              ;;
+          esac
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "dist_tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "publishing $VERSION under the '$TAG' tag"
 
       - name: Stamp the version across the workspace
-        run: node scripts/set-version.mjs "${{ steps.version.outputs.version }}"
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: node scripts/set-version.mjs "$VERSION"
 
       - name: Publish
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          VERSION: ${{ steps.version.outputs.version }}
+          DIST_TAG: ${{ steps.version.outputs.dist_tag }}
         run: |
           if [ -z "$NODE_AUTH_TOKEN" ]; then
             echo "NPM_TOKEN is not set; skipping publish."
@@ -320,11 +394,11 @@ jobs:
             echo "::group::$name"
             # Republishing an existing version is an error, not a failure -
             # a re-run of the same workflow should be a no-op, not a red X.
-            if npm view "$name@${{ steps.version.outputs.version }}" version >/dev/null 2>&1; then
+            if npm view "$name@$VERSION" version >/dev/null 2>&1; then
               echo "already published, skipping"
             else
               npm publish --workspace "$name" \
-                --tag "${{ steps.version.outputs.dist_tag }}" \
+                --tag "$DIST_TAG" \
                 --access public \
                 --provenance
             fi
@@ -332,12 +406,15 @@ jobs:
           done
 
       - name: Summary
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          DIST_TAG: ${{ steps.version.outputs.dist_tag }}
         run: |
           {
-            echo "### Published \`${{ steps.version.outputs.version }}\` to npm"
+            echo "### Published \`$VERSION\` to npm"
             echo
             echo "Installed by default: \`npm i @osqd/notifyjs\`"
-            if [ "${{ steps.version.outputs.dist_tag }}" = "next" ]; then
+            if [ "$DIST_TAG" = "next" ]; then
               echo
               echo "This is a rolling build. \`npm i @osqd/notifyjs@next\` to get it."
             fi
@@ -348,16 +425,19 @@ jobs:
   # ---------------------------------------------------------------------
   release:
     name: Publish release
-    needs: [binaries, android, dashboard]
+    needs: [validate, binaries, android, dashboard]
     runs-on: ubuntu-latest
+    permissions:
+      # Creating the release and uploading its assets.
+      contents: write
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       # Only this workflow's own artifacts. Without the pattern the step also
       # picks up the `.dockerbuild` build record that docker/build-push-action
       # uploads, which is not a plain zip and fails extraction - taking the
       # whole release down with it after every build had already succeeded.
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           pattern: notifyjs-*
           path: dist
@@ -371,8 +451,12 @@ jobs:
           cat SHA256SUMS.txt
 
       - name: Write release notes
+        env:
+          NOTIFYJS_VERSION: ${{ env.NOTIFYJS_VERSION }}
+          REPOSITORY: ${{ github.repository }}
+          COMMIT: ${{ github.sha }}
         run: |
-          VERSION="${{ env.NOTIFYJS_VERSION }}"
+          VERSION="$NOTIFYJS_VERSION"
           APK=$(cd dist && ls *.apk 2>/dev/null | head -1)
 
           # The APK job is best-effort, so the table has to render either way.
@@ -383,12 +467,12 @@ jobs:
           fi
 
           # Container registries reject uppercase in image names.
-          IMAGE=$(echo "ghcr.io/${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
+          IMAGE=$(echo "ghcr.io/${REPOSITORY}" | tr '[:upper:]' '[:lower:]')
 
           if [ "$IS_TAG" = "true" ]; then
             HEADER="Release $VERSION"
           else
-            HEADER="Rolling build from \`${{ github.sha }}\` on $(date -u '+%Y-%m-%d %H:%M UTC'). Replaced on every push to the default branch."
+            HEADER="Rolling build from \`${COMMIT}\` on $(date -u '+%Y-%m-%d %H:%M UTC'). Replaced on every push to the default branch."
           fi
 
           cat > notes.md <<NOTES
@@ -453,7 +537,7 @@ jobs:
           sha256sum -c SHA256SUMS.txt --ignore-missing
           \`\`\`
 
-          Read [SECURITY.md](https://github.com/${{ github.repository }}/blob/main/SECURITY.md)
+          Read [SECURITY.md](https://github.com/${REPOSITORY}/blob/main/SECURITY.md)
           before exposing the hub to the internet.
           NOTES
 
@@ -461,7 +545,7 @@ jobs:
 
       - name: Publish a versioned release
         if: env.IS_TAG == 'true'
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           tag_name: ${{ env.NOTIFYJS_VERSION }}
           name: NotifyJS ${{ env.NOTIFYJS_VERSION }}
@@ -471,7 +555,7 @@ jobs:
 
       - name: Refresh the rolling build
         if: env.IS_TAG != 'true'
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
           tag_name: latest
           name: Latest build

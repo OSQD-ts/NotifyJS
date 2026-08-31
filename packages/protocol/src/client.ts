@@ -210,11 +210,19 @@ export class NotifyClient {
     this.deviceId = undefined;
     this.keys = undefined;
     this.ackedSeq = 0;
+    // The watchdog contract goes with them. A revoked device that kept its
+    // spec would keep raising "the service is down" about a hub it is no
+    // longer entitled to hear from - and would leave the key behind in
+    // storage for every source that is ever added and removed.
+    this.watchdogSpec = undefined;
+    this.disarmWatchdog();
+    this.serviceMissing = false;
     await Promise.all([
       this.opts.storage.remove(this.key('deviceId')),
       this.opts.storage.remove(this.key('publicKey')),
       this.opts.storage.remove(this.key('secretSeed')),
       this.opts.storage.remove(this.key('ackedSeq')),
+      this.opts.storage.remove(this.key('watchdog')),
     ]);
   }
 
@@ -266,11 +274,17 @@ export class NotifyClient {
     };
     socket.onclose = () => {
       this.socket = undefined;
+      // Anything still waiting on this socket will never be answered.
+      this.failPendingAdmin('the connection closed before the hub replied');
       // A closed socket is a strong hint, but not proof: reconnecting may
       // succeed immediately. Let the same deadline decide, so a blip during a
       // restart does not page anyone.
       this.armWatchdog();
       if (this.closedByUs || this.status === 'revoked') return;
+      // Reconnecting without credentials would reopen the socket, be told
+      // "unpaired" again, and close - forever, at up to one attempt a second.
+      // The UI has to supply a code before there is any point in retrying.
+      if (this.status === 'unpaired') return;
       if (!this.opts.autoReconnect) {
         this.setStatus('idle');
         return;
@@ -496,15 +510,33 @@ export class NotifyClient {
   admin<T = unknown>(op: AdminOp, args?: Record<string, unknown>): Promise<T> {
     const id = `a${++this.adminSeq}`;
     return new Promise<T>((resolve, reject) => {
-      this.adminWaiters.set(id, {
-        resolve: resolve as (v: unknown) => void,
-        reject,
-      });
-      this.send({ v: PROTOCOL_VERSION, t: 'admin', id, op, args });
-      setTimeout(() => {
+      const timer = setTimeout(() => {
         if (this.adminWaiters.delete(id)) reject(new Error(`admin ${op} timed out`));
       }, 10_000);
+      (timer as { unref?: () => void }).unref?.();
+
+      this.adminWaiters.set(id, {
+        // Cancelling the timer on the way out keeps a busy dashboard from
+        // holding thousands of pending timeouts it will never need.
+        resolve: (v) => {
+          clearTimeout(timer);
+          (resolve as (v: unknown) => void)(v);
+        },
+        reject: (e) => {
+          clearTimeout(timer);
+          reject(e);
+        },
+      });
+      this.send({ v: PROTOCOL_VERSION, t: 'admin', id, op, args });
     });
+  }
+
+  /** Fails every outstanding admin call, e.g. because the socket went away. */
+  private failPendingAdmin(reason: string): void {
+    if (this.adminWaiters.size === 0) return;
+    const waiters = [...this.adminWaiters.values()];
+    this.adminWaiters.clear();
+    for (const waiter of waiters) waiter.reject(new Error(reason));
   }
 
   /* ------------------------------------------------------------------ */

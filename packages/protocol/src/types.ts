@@ -14,6 +14,23 @@ export function severityRank(s: Severity): number {
   return i < 0 ? 0 : i;
 }
 
+export function isSeverity(value: unknown): value is Severity {
+  return typeof value === 'string' && (SEVERITIES as readonly string[]).includes(value);
+}
+
+/**
+ * Coerces caller-supplied input to a known severity.
+ *
+ * Severity is not just cosmetic: it decides which roles see an alert, whether
+ * flood control may hold it back, and whether a snooze applies. It is also
+ * rendered as a Prometheus label, so an arbitrary string would let a caller
+ * write lines into the metrics endpoint. Anything unrecognised falls back
+ * rather than travelling any further.
+ */
+export function coerceSeverity(value: unknown, fallback: Severity = 'info'): Severity {
+  return isSeverity(value) ? value : fallback;
+}
+
 /**
  * What a device is allowed to do once authenticated. `admin` implies all
  * others; everything else is granted explicitly.

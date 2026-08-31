@@ -17,9 +17,23 @@ choice in the design: the hub's persistent state contains nothing that can be
 replayed. Someone who exfiltrates `store.json` learns which devices exist and
 what they are allowed to see, but cannot authenticate as any of them.
 
-Private keys live in the platform's secure storage: the iOS Keychain or Android
-Keystore on the phone (`expo-secure-store`), `localStorage` in the browser, and
-a 0600 file in a 0700 directory for the CLI.
+Private keys live in the best storage each platform offers, which is not the
+same thing on each:
+
+| Client | Where | What that means |
+| --- | --- | --- |
+| Phone | iOS Keychain / Android Keystore (`expo-secure-store`) | Protected by the OS; no easier to extract than a saved password. |
+| CLI, desktop | A 0600 file in a 0700 directory | Readable by that user account, and by root. |
+| Browser dashboard | `localStorage` | **Not** secure storage. Any script that runs on the hub's origin can read the seed. |
+
+The browser is deliberately the weakest of the three and is called out here
+rather than glossed over. `localStorage` is the only place a page can keep a
+key across visits, and the dashboard's defence is that no third-party script
+ever runs on that origin: it is served by the hub itself under
+`default-src 'self'` with no inline scripts and no external assets, and every
+piece of hub-supplied text is rendered with `textContent`. An XSS on the
+dashboard is therefore a device compromise, which is why that CSP is not
+negotiable. Revoking the device is the remedy.
 
 ## Handshake
 
@@ -84,6 +98,14 @@ Behind NAT or a proxy, set `security.trustProxy = true` and raise
 `maxConnectionsPerIp` — otherwise every device behind one address shares a
 budget, and the limiter sees only the proxy.
 
+**Only turn `trustProxy` on when the hub cannot be reached except through that
+proxy.** It makes the client IP a value the client sends. The hub requires it
+to parse as an address, so it cannot be used to spray arbitrary keys into the
+ban store, but a peer that can reach the port directly can still name a
+different address on every connection and walk past both the per-IP limits and
+any ban. Bind the hub to the loopback interface, or firewall the port to the
+proxy, whenever this is set.
+
 ## Cross-origin requests
 
 `allowedOrigins` defaults to `same-origin`: a browser `Origin` is accepted only
@@ -132,6 +154,12 @@ it cannot reveal what an alert said or who received it. Set `metricsToken` to
 require `Authorization: Bearer <token>`, or `metrics: false` to remove the
 endpoint.
 
+The token is compared in constant time. An endpoint an attacker can poll in a
+loop is exactly where a `!==` on a secret becomes a way to recover it one
+character at a time, and severities are validated against the known set before
+they are rendered, so nothing a caller supplies can write a line into the
+output.
+
 ## Push wake-ups
 
 Push is **off by default**, and turning it on is a deliberate trade against
@@ -155,8 +183,69 @@ the ten-minute window a code is live — race you to use it.
 Served with `default-src 'self'`, no inline scripts, no external assets, and
 `frame-ancestors 'none'`. All notification text is rendered with
 `textContent`, never `innerHTML`. Static paths are normalised and confined to
-the asset root. Device-supplied names are stripped of control characters before
-they reach a terminal or a log.
+the asset root.
+
+Text that reaches a terminal is stripped of control characters first — device
+names and channels at the hub, and notification titles and bodies at the CLI
+client, which is where they are actually printed. Alert bodies routinely carry
+stack traces and whatever a monitored service logged, and a raw escape sequence
+in one of them can repaint an operator's screen or hide a line they needed to
+see.
+
+## Updates
+
+Both self-updating clients verify what they are about to install against the
+`SHA256SUMS.txt` published with the release, using one shared parser, and refuse
+to continue on a mismatch or a missing entry. This is the difference between an
+updater and a remote code execution primitive, so it is not optional and not
+best-effort: the CLI declines to replace its binary, and the phone deletes the
+downloaded APK rather than passing it to the Android installer.
+
+The phone's install is additionally gated by Android itself, which will not
+replace an installed app with one signed by a different key, and by the user
+confirming the system install prompt. Neither of those says *which* build of
+ours arrived, which is what the checksum is for.
+
+## Pairing from a link
+
+A `notifyjs://pair?...` link is a proposal, not an instruction. Anything on a
+phone can fire that scheme — a web page, another app — and a hub the device
+joined silently could ring it, take over a locked screen and speak through it.
+The app names the host and asks before joining. Scanning a QR code is already a
+deliberate act; following a link is not.
+
+Each source is a separate identity with its own keypair under its own storage
+namespace, so a hub added this way learns nothing about any other hub the
+device is paired with.
+
+## Running it as a service
+
+The unit files under `packaging/` are part of the security model, not
+convenience wrappers.
+
+The systemd unit drops every capability (the hub listens above port 1024, so it
+needs none), confines writes to its state directory, filters syscalls to
+`@system-service` minus `@privileged` and `@resources`, and sets `UMask=0077`.
+
+The launchd agent keeps its state and its log under the user's own `~/Library`.
+An earlier version used `/Users/Shared`, which is mode 1777: every account on
+the machine could read the store, and — because a first run prints an admin
+pairing code to stdout — could read that code out of the log and pair itself as
+an administrator. If you installed that version, move the data directory and
+delete the old log.
+
+## Supply chain
+
+Third-party GitHub Actions are pinned to commit SHAs rather than tags, since a
+tag is a pointer its owner can move and these workflows hold the npm and
+container publishing credentials. The container base image is pinned by digest,
+and `npm ci --ignore-scripts` builds it, so no dependency's lifecycle script
+runs during an image build. Dependabot keeps all of it current.
+
+Release jobs run with `contents: read`; only the two jobs that publish are
+granted more, and only what they publish with. No workflow interpolates a
+`${{ }}` expression into a shell command — values are passed through the
+environment instead, so a version string cannot become shell syntax.
 
 ## Not covered
 

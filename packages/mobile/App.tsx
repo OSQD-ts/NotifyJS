@@ -25,6 +25,15 @@ Notifications.setNotificationHandler({
 
 type View_ = 'feed' | 'settings' | 'add' | 'scan';
 
+/** The part of a hub address worth putting in front of someone. */
+function hostOf(url: string): string {
+  try {
+    return new URL(url).host || url;
+  } catch {
+    return url;
+  }
+}
+
 export default function App() {
   const t = useTheme();
   const { manager, sources, feed, activeCall, callAnswered, prefs, loaded, savePrefs, closeCall } =
@@ -84,6 +93,13 @@ export default function App() {
   /**
    * A notifyjs:// link opens the app straight into adding that hub. Handled
    * here rather than in a screen so it works whichever screen is showing.
+   *
+   * The link is *proposed*, never acted on by itself. Anything on the phone
+   * can fire this scheme - a web page, another app - and a hub that pairs
+   * itself in silence can ring the device, take over a locked screen and
+   * speak whatever it likes through it. Scanning a QR code is a deliberate
+   * act; following a link is not, so this one asks first and names the host
+   * the user would be joining.
    */
   const handledLinks = useRef(new Set<string>());
 
@@ -97,7 +113,20 @@ export default function App() {
       handledLinks.current.add(url);
 
       const link = parsePairingLink(url);
-      if (link) void addSource({ url: link.hub, code: link.code });
+      if (!link) return;
+
+      Alert.alert(
+        'Join this hub?',
+        `${hostOf(link.hub)} wants to send notifications and calls to this device. ` +
+          'Only continue if you recognise it.',
+        [
+          { text: 'Cancel', style: 'cancel' },
+          {
+            text: 'Join',
+            onPress: () => void addSource({ url: link.hub, code: link.code }),
+          },
+        ],
+      );
     };
     void Linking.getInitialURL().then(handle);
     const sub = Linking.addEventListener('url', (e) => handle(e.url));

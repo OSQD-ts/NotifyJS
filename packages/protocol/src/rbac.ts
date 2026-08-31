@@ -1,5 +1,5 @@
 import type { Capability, Role, Severity, Targeting } from './types.js';
-import { severityRank } from './types.js';
+import { CAPABILITIES, SEVERITIES, severityRank } from './types.js';
 
 /**
  * Channel patterns support `*` as a wildcard over any run of characters, and a
@@ -7,8 +7,13 @@ import { severityRank } from './types.js';
  * the way you would say it out loud: everything except the debug channels.
  */
 export function channelMatches(patterns: string[], channel: string): boolean {
+  // A role can be edited over the wire, so a malformed `channels` must read as
+  // "matches nothing" rather than throw inside the delivery loop.
+  if (!Array.isArray(patterns)) return false;
+
   let allowed = false;
   for (const pattern of patterns) {
+    if (typeof pattern !== 'string') continue;
     const negated = pattern.startsWith('!');
     const body = negated ? pattern.slice(1) : pattern;
     if (!globMatch(body, channel)) continue;
@@ -18,20 +23,47 @@ export function channelMatches(patterns: string[], channel: string): boolean {
   return allowed;
 }
 
+/**
+ * Matches `*` against any run of characters, iteratively.
+ *
+ * Deliberately not a compiled regular expression: `a*a*a*a*b` translates to
+ * `.*.*.*.*` and backtracks exponentially, so a role with a handful of
+ * wildcards would let a single notification pin the event loop. This walks
+ * each string once, remembering the last `*` to fall back to.
+ */
 function globMatch(pattern: string, value: string): boolean {
-  const rx = new RegExp(
-    '^' + pattern.split('*').map(escapeRegExp).join('.*') + '$',
-    'i',
-  );
-  return rx.test(value);
-}
+  const p = pattern.toLowerCase();
+  const v = value.toLowerCase();
 
-function escapeRegExp(s: string): string {
-  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  let pi = 0;
+  let vi = 0;
+  let star = -1;
+  let mark = 0;
+
+  while (vi < v.length) {
+    if (pi < p.length && (p[pi] === v[vi] || p[pi] === '*')) {
+      if (p[pi] === '*') {
+        star = pi++;
+        mark = vi;
+      } else {
+        pi++;
+        vi++;
+      }
+    } else if (star >= 0) {
+      // Backtrack to the most recent `*` and let it swallow one more character.
+      pi = star + 1;
+      vi = ++mark;
+    } else {
+      return false;
+    }
+  }
+  while (p[pi] === '*') pi++;
+  return pi === p.length;
 }
 
 /** `admin` is a superset; every other capability is checked literally. */
 export function hasCapability(role: Role, cap: Capability): boolean {
+  if (!role || !Array.isArray(role.capabilities)) return false;
   return role.capabilities.includes('admin') || role.capabilities.includes(cap);
 }
 
@@ -71,6 +103,67 @@ export function inQuietHours(q: { start: number; end: number }, now: Date): bool
   const h = now.getHours() + now.getMinutes() / 60;
   // A window like 22->7 wraps past midnight, so the test flips to an OR.
   return q.start <= q.end ? h >= q.start && h < q.end : h >= q.start || h < q.end;
+}
+
+/**
+ * Normalises a role that arrived over the wire.
+ *
+ * `roles.upsert` is reachable from any device holding `roles.manage`, and the
+ * result is consulted on every single delivery. An unvalidated role is
+ * therefore both a crash (a non-array `channels` throws inside the fan-out
+ * loop, taking every later notification with it) and a privilege escalation
+ * (`capabilities: ['admin']` would promote the caller past the capability
+ * they actually hold). Unknown capabilities are dropped rather than rejected,
+ * so an older hub tolerates a newer dashboard.
+ */
+export function sanitizeRole(input: unknown, allowAdmin: boolean): Role {
+  const raw = (input ?? {}) as Partial<Role>;
+
+  const name = typeof raw.name === 'string' ? raw.name.trim().slice(0, 64) : '';
+  if (!name) throw new Error('a role needs a name');
+  // `__proto__` as a key would mutate the prototype of the role map rather
+  // than adding an entry to it.
+  if (name === '__proto__' || name === 'constructor' || name === 'prototype') {
+    throw new Error(`"${name}" cannot be used as a role name`);
+  }
+
+  const channels = Array.isArray(raw.channels)
+    ? raw.channels.filter((c): c is string => typeof c === 'string').slice(0, 100)
+    : [];
+  if (channels.length === 0) throw new Error('a role needs at least one channel pattern');
+
+  const capabilities = Array.isArray(raw.capabilities)
+    ? raw.capabilities.filter(
+        (c): c is Capability =>
+          (CAPABILITIES as readonly string[]).includes(c as string) &&
+          (allowAdmin || c !== 'admin'),
+      )
+    : [];
+
+  const minSeverity =
+    typeof raw.minSeverity === 'string' && (SEVERITIES as readonly string[]).includes(raw.minSeverity)
+      ? raw.minSeverity
+      : 'info';
+
+  const role: Role = {
+    name,
+    channels,
+    minSeverity,
+    capabilities: [...new Set(capabilities)],
+  };
+
+  if (typeof raw.description === 'string') role.description = raw.description.slice(0, 200);
+  if (typeof raw.maxDevices === 'number' && Number.isFinite(raw.maxDevices)) {
+    role.maxDevices = Math.max(0, Math.floor(raw.maxDevices));
+  }
+
+  const q = raw.quietHours;
+  if (q && typeof q.start === 'number' && typeof q.end === 'number') {
+    const hour = (h: number) => Math.min(24, Math.max(0, Number.isFinite(h) ? h : 0));
+    role.quietHours = { start: hour(q.start), end: hour(q.end) };
+  }
+
+  return role;
 }
 
 /** Roles shipped out of the box; `roles.upsert` can override any of them. */

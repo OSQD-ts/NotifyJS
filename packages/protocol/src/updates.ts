@@ -102,6 +102,9 @@ export async function checkForUpdate(options: CheckOptions): Promise<UpdateCheck
   } = options;
 
   const current = currentVersion.replace(/^v/, '');
+  if (!options.endpoint && !isValidRepository(repository)) {
+    return { current, available: false };
+  }
 
   try {
     const response = await fetchImpl(`${endpoint}?per_page=20`, {
@@ -185,4 +188,42 @@ function toReleaseInfo(r: GithubRelease): ReleaseInfo {
  */
 export function findAsset(release: ReleaseInfo, pattern: RegExp): ReleaseAsset | undefined {
   return release.assets.find((a) => pattern.test(a.name));
+}
+
+/**
+ * `owner/repo`, and nothing that would reshape the API URL it is spliced into.
+ *
+ * This value decides which release feed a self-updating binary trusts, so a
+ * slash or a query string too many is the difference between checking a repo
+ * and checking whatever an attacker put at the other end of the path.
+ */
+const REPOSITORY = /^[A-Za-z0-9._-]{1,100}\/[A-Za-z0-9._-]{1,100}$/;
+
+export function isValidRepository(repository: string): boolean {
+  return REPOSITORY.test(repository) && !repository.includes('..');
+}
+
+/** The asset every release publishes its digests in. */
+export const CHECKSUM_ASSET = 'SHA256SUMS.txt';
+
+/**
+ * Finds one file's expected SHA-256 in a `sha256sum` listing.
+ *
+ * Parsed field by field rather than matched with `endsWith`, so a release that
+ * also ships `sdk-notifyjs-linux-x64.tar.gz` cannot answer for
+ * `notifyjs-linux-x64.tar.gz`. `sha256sum` writes the name with a leading `*`
+ * in binary mode, which is stripped.
+ *
+ * Shared so the CLI and the phone verify downloads the same way: an updater
+ * that skips this is not an updater, it is a remote code execution primitive.
+ */
+export function findChecksum(listing: string, name: string): string | undefined {
+  for (const raw of listing.split('\n')) {
+    const [digest, ...rest] = raw.trim().split(/\s+/);
+    if (!digest || rest.length === 0) continue;
+    if (rest.join(' ').replace(/^\*/, '') !== name) continue;
+    const normalized = digest.toLowerCase();
+    return /^[0-9a-f]{64}$/.test(normalized) ? normalized : undefined;
+  }
+  return undefined;
 }

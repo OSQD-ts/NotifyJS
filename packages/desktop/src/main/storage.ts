@@ -1,4 +1,4 @@
-import { mkdirSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
+import { chmodSync, mkdirSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
 import { dirname } from 'node:path';
 import type { ClientStorage } from '@osqd/notifyjs-protocol';
 
@@ -26,6 +26,9 @@ export function fileStorage(path: string): ClientStorage {
   const save = (data: Record<string, string>): void => {
     mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
     writeFileSync(path, JSON.stringify(data, null, 2), { mode: 0o600 });
+    // `mode` above only applies when the file is created; a file that already
+    // existed keeps whatever permissions it had.
+    tighten(path);
   };
 
   return {
@@ -43,4 +46,13 @@ export function fileStorage(path: string): ClientStorage {
       save(data);
     },
   };
+}
+
+/** Restates 0600 on an existing file; a no-op where modes are meaningless. */
+function tighten(path: string): void {
+  try {
+    chmodSync(path, 0o600);
+  } catch {
+    /* a filesystem without POSIX modes, or a file we do not own */
+  }
 }

@@ -52,9 +52,9 @@ export class Metrics {
     this.bans += 1;
   }
 
-  pushed(ok: boolean): void {
-    if (ok) this.pushSent += 1;
-    else this.pushFailed += 1;
+  pushed(ok: boolean, count = 1): void {
+    if (ok) this.pushSent += count;
+    else this.pushFailed += count;
   }
 
   stalled(): void {

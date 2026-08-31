@@ -83,6 +83,15 @@ export class Guard {
     this.unauthenticated = Math.max(0, this.unauthenticated - 1);
   }
 
+  /**
+   * Releases a session's slot.
+   *
+   * `wasAuthenticated` must mean "this session was counted by `promote()`",
+   * not "this session looks ready right now". A hub-initiated close marks the
+   * session closed before the socket's close event arrives, so reading the
+   * state here would decrement the unauthenticated counter a second time and
+   * let the hub-wide handshake cap drift open under normal operation.
+   */
   release(ip: string, wasAuthenticated: boolean): void {
     const state = this.ips.get(ip);
     if (state) state.concurrent = Math.max(0, state.concurrent - 1);

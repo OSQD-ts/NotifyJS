@@ -39,6 +39,22 @@ function readTail<T>(file: string, limit: number): T[] {
   }
 }
 
+/**
+ * Own-property lookup for the store's string-keyed maps.
+ *
+ * These are plain JSON objects indexed by names that arrive over the wire, so
+ * a plain `map[key]` answers `"constructor"` and `"__proto__"` with something
+ * inherited from `Object.prototype` - a truthy value that is not a record.
+ */
+function own<T>(map: Record<string, T>, key: string): T | undefined {
+  return Object.prototype.hasOwnProperty.call(map, key) ? map[key] : undefined;
+}
+
+/** Keys that would mutate a plain object's prototype rather than its contents. */
+function unsafeKey(key: string): boolean {
+  return key === '__proto__' || key === 'constructor' || key === 'prototype';
+}
+
 function countLines(file: string): number {
   if (!existsSync(file)) return 0;
   try {
@@ -47,6 +63,9 @@ function countLines(file: string): number {
     return 0;
   }
 }
+
+/** Ceiling on retained ban records. See `Store.putBan`. */
+const MAX_BANS = 10_000;
 
 export interface BanRecord {
   ip: string;
@@ -162,10 +181,15 @@ export class Store {
     if (!existsSync(this.file)) return fresh();
     try {
       const parsed = JSON.parse(readFileSync(this.file, 'utf8')) as StoreData;
+      if (!parsed || typeof parsed !== 'object') throw new Error('not a store document');
+      const merged = { ...fresh(), ...parsed };
       // Roles ship with the library and may gain new defaults between
-      // versions; merge them in without clobbering operator edits.
-      for (const role of defaultRoles()) parsed.roles[role.name] ??= role;
-      return { ...fresh(), ...parsed };
+      // versions; merge them in without clobbering operator edits. Guarded
+      // because an older or partial document may have no `roles` at all, and
+      // losing an operator's devices over a missing key is not a fair trade.
+      if (!merged.roles || typeof merged.roles !== 'object') merged.roles = {};
+      for (const role of defaultRoles()) merged.roles[role.name] ??= role;
+      return merged;
     } catch {
       // A truncated store must not stop the app that embedded us from booting.
       const backup = `${this.file}.corrupt-${Date.now()}`;
@@ -270,7 +294,7 @@ export class Store {
   /* ----------------------------- devices ----------------------------- */
 
   device(id: string): Device | undefined {
-    return this.data.devices[id];
+    return own(this.data.devices, id);
   }
 
   devices(): Device[] {
@@ -306,7 +330,7 @@ export class Store {
   /* ------------------------------ roles ------------------------------ */
 
   role(name: string): Role | undefined {
-    return this.data.roles[name];
+    return own(this.data.roles, name);
   }
 
   roles(): Role[] {
@@ -314,6 +338,7 @@ export class Store {
   }
 
   putRole(r: Role): void {
+    if (unsafeKey(r.name)) throw new Error(`"${r.name}" cannot be used as a role name`);
     this.data.roles[r.name] = r;
     this.markDirty();
   }
@@ -329,27 +354,46 @@ export class Store {
 
   /** Codes are keyed by hash, so the plaintext is never at rest anywhere. */
   putCode(code: PairingCode): void {
+    // Minting is the natural moment to clear out codes that are spent or past
+    // their expiry, so they do not accumulate in the store between listings.
+    this.pruneCodes();
     this.data.codes[code.hash] = code;
     this.markDirty();
   }
 
-  takeCode(normalized: string): PairingCode | undefined {
+  /**
+   * Claims one use of a code, atomically with respect to the event loop.
+   *
+   * Redemption spans an `await` (verifying the device's signature), so the
+   * decrement has to happen before that gap rather than after it - otherwise
+   * two sockets presenting the same single-use code both see `usesLeft: 1`
+   * and both pair. The record is returned by value so a caller cannot undo
+   * the decrement by mutating it.
+   */
+  reserveCode(normalized: string): PairingCode | undefined {
     const hash = pairingCodeHash(normalized);
-    const found = this.data.codes[hash];
+    const found = own(this.data.codes, hash);
     if (!found) return undefined;
     if (found.expiresAt < Date.now() || found.usesLeft <= 0) {
       delete this.data.codes[hash];
       this.markDirty();
       return undefined;
     }
-    return found;
+
+    const claimed = { ...found };
+    // Decremented in place rather than deleted, so a rejection further along
+    // has something to give the use back to. A code at zero is already
+    // unreachable - the check above refuses it - and `pruneCodes` clears it.
+    found.usesLeft -= 1;
+    this.markDirty();
+    return claimed;
   }
 
-  consumeCode(hash: string): void {
-    const code = this.data.codes[hash];
-    if (!code) return;
-    code.usesLeft -= 1;
-    if (code.usesLeft <= 0) delete this.data.codes[hash];
+  /** Hands a reserved use back after the redemption failed for other reasons. */
+  releaseCode(hash: string): void {
+    const existing = own(this.data.codes, hash);
+    if (!existing) return;
+    existing.usesLeft += 1;
     this.markDirty();
   }
 
@@ -359,7 +403,7 @@ export class Store {
   }
 
   revokeCode(hash: string): boolean {
-    if (!this.data.codes[hash]) return false;
+    if (!own(this.data.codes, hash)) return false;
     delete this.data.codes[hash];
     this.markDirty();
     return true;
@@ -380,10 +424,20 @@ export class Store {
   /* ------------------------------- bans ------------------------------ */
 
   ban(ip: string): BanRecord | undefined {
-    return this.data.bans[ip];
+    return own(this.data.bans, ip);
   }
 
   putBan(record: BanRecord): void {
+    // Behind a proxy the client IP comes from a header, so the number of
+    // distinct "IPs" is whatever an attacker cares to send. Evicting the
+    // stalest records keeps a store file from growing without limit.
+    if (!this.data.bans[record.ip] && Object.keys(this.data.bans).length >= MAX_BANS) {
+      const oldest = Object.values(this.data.bans)
+        .filter((b) => b.until < Date.now())
+        .sort((a, b) => a.lastFailureAt - b.lastFailureAt)[0];
+      if (oldest) delete this.data.bans[oldest.ip];
+      else return; // Every slot is an active ban; keeping those matters more.
+    }
     this.data.bans[record.ip] = record;
     this.markDirty();
   }
@@ -402,7 +456,7 @@ export class Store {
   /* --------------------------- policies ------------------------------ */
 
   policy(name: string): EscalationPolicy | undefined {
-    return this.data.policies?.[name];
+    return this.data.policies ? own(this.data.policies, name) : undefined;
   }
 
   policies(): EscalationPolicy[] {
@@ -410,6 +464,7 @@ export class Store {
   }
 
   putPolicy(policy: EscalationPolicy): void {
+    if (unsafeKey(policy.name)) throw new Error(`"${policy.name}" cannot be used as a policy name`);
     this.data.policies ??= {};
     this.data.policies[policy.name] = policy;
     this.markDirty();
@@ -429,6 +484,7 @@ export class Store {
   }
 
   putHeartbeat(beat: Heartbeat): void {
+    if (unsafeKey(beat.name)) throw new Error(`"${beat.name}" cannot be used as a heartbeat name`);
     this.data.heartbeats ??= {};
     this.data.heartbeats[beat.name] = beat;
     this.markDirty();
@@ -452,8 +508,14 @@ export class Store {
     this.scheduleDrain();
   }
 
+  /**
+   * A copy: the cache is the hub's replay buffer, and a caller that spliced
+   * or reordered it would silently change what every reconnecting device is
+   * told it missed. The notifications themselves are shared by reference so
+   * `resolve()` can still mark them, which `touchHistory()` then persists.
+   */
   history(): Notification[] {
-    return this.historyCache;
+    return [...this.historyCache];
   }
 
   /**
@@ -463,6 +525,10 @@ export class Store {
    * the cache - which is bounded by the retention limit.
    */
   touchHistory(): void {
+    // The cache already contains everything still queued for append. Writing
+    // it out and then draining the queue would append those lines a second
+    // time, so the queue is dropped rather than flushed.
+    this.historyPending.length = 0;
     this.compact(this.historyFile, this.historyCache);
     this.historyLines = this.historyCache.length;
   }

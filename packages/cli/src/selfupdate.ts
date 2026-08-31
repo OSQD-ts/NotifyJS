@@ -14,7 +14,15 @@ import { dirname, join } from 'node:path';
 import { pipeline } from 'node:stream/promises';
 import { Readable } from 'node:stream';
 import { execFile } from 'node:child_process';
-import { checkForUpdate, findAsset, type ReleaseInfo, type UpdateCheck } from '@osqd/notifyjs-protocol';
+import {
+  CHECKSUM_ASSET,
+  checkForUpdate,
+  findAsset,
+  findChecksum,
+  isValidRepository,
+  type ReleaseInfo,
+  type UpdateCheck,
+} from '@osqd/notifyjs-protocol';
 
 /** Matches this machine to the asset built for it. */
 export function assetPattern(): RegExp {
@@ -31,6 +39,10 @@ export interface UpdateOptions {
 }
 
 export async function check(options: UpdateOptions): Promise<UpdateCheck> {
+  // This decides which release feed a binary that replaces itself will trust.
+  if (!isValidRepository(options.repository)) {
+    throw new Error(`"${options.repository}" is not an owner/repo pair`);
+  }
   return checkForUpdate({
     repository: options.repository,
     currentVersion: options.currentVersion,
@@ -118,15 +130,31 @@ function assertWritable(target: string): void {
   }
 }
 
+/** Nothing this project ships comes close; the cap is a runaway guard. */
+const MAX_DOWNLOAD_BYTES = 512 * 1024 * 1024;
+
 async function download(url: string, to: string): Promise<void> {
   const response = await fetch(url, {
     headers: { accept: 'application/octet-stream' },
     redirect: 'follow',
+    // An update check must not be able to hang a hub's startup indefinitely.
+    signal: AbortSignal.timeout(10 * 60_000),
   });
   if (!response.ok || !response.body) {
     throw new Error(`download failed: HTTP ${response.status}`);
   }
-  await pipeline(Readable.fromWeb(response.body as never), createWriteStream(to));
+
+  let written = 0;
+  const counted = async function* () {
+    for await (const chunk of Readable.fromWeb(response.body as never)) {
+      written += (chunk as Buffer).length;
+      if (written > MAX_DOWNLOAD_BYTES) {
+        throw new Error('download is implausibly large; refusing to continue');
+      }
+      yield chunk as Buffer;
+    }
+  };
+  await pipeline(counted(), createWriteStream(to));
 }
 
 /**
@@ -137,12 +165,15 @@ async function download(url: string, to: string): Promise<void> {
  * replace the binary.
  */
 async function verifyChecksum(release: ReleaseInfo, name: string, path: string): Promise<void> {
-  const sums = release.assets.find((a) => a.name === 'SHA256SUMS.txt');
+  const sums = release.assets.find((a) => a.name === CHECKSUM_ASSET);
   if (!sums) throw new Error(`release ${release.tag} publishes no checksums; refusing to update`);
 
-  const listing = await (await fetch(sums.url, { redirect: 'follow' })).text();
-  const line = listing.split('\n').find((l) => l.trim().endsWith(name));
-  const expected = line?.trim().split(/\s+/)[0];
+  const response = await fetch(sums.url, { redirect: 'follow' });
+  if (!response.ok) {
+    throw new Error(`could not read checksums for ${release.tag}: HTTP ${response.status}`);
+  }
+
+  const expected = findChecksum(await response.text(), name);
   if (!expected) throw new Error(`no checksum published for ${name}; refusing to update`);
 
   const actual = createHash('sha256').update(await readFile(path)).digest('hex');

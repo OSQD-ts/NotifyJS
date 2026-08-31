@@ -212,11 +212,31 @@ export class CallOrchestrator {
     return call.steps.flatMap((step) => step.targets);
   }
 
-  /** The device finished speaking the message and hung up. */
+  /**
+   * The device finished speaking the message and hung up.
+   *
+   * Only the device that answered may end a call. Without that check any
+   * device that was merely rung - and so learned the call id - could retire a
+   * call that is still ringing somebody else: the orchestrator would forget
+   * it, the real answer would be ignored, and the caller would be told the
+   * page went unanswered.
+   */
   ended(callId: string, deviceId: string): void {
     const call = this.active.get(callId);
     if (!call) return;
+    if (call.answeredBy?.deviceId !== deviceId) return;
+    this.clearTimer(call);
     this.emit({ type: 'ended', callId, deviceId });
+    // Answered calls have already settled; this only releases the record.
+    this.settle(call, {
+      callId,
+      outcome: 'answered',
+      deviceId,
+      deviceName: call.answeredBy.deviceName,
+      answeredAt: call.answeredAt,
+      endedAt: Date.now(),
+      attempted: call.attempted,
+    });
     this.active.delete(callId);
   }
 

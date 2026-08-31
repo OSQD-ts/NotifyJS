@@ -36,6 +36,15 @@ export class FloodControl {
   constructor(
     private readonly opts: FloodOptions,
     private readonly onSummary: (summary: FloodSummary) => void,
+    /**
+     * Ceiling on concurrently tracked keys.
+     *
+     * The default key includes the notification title, so a caller emitting
+     * distinct titles opens a window - and holds a timer - for each one. The
+     * cap bounds that at the cost of not coalescing the overflow, which is
+     * the safe direction to fail: an alert too many beats an alert lost.
+     */
+    private readonly maxWindows = 5_000,
   ) {}
 
   /**
@@ -50,7 +59,7 @@ export class FloodControl {
     const existing = this.windows.get(key);
 
     if (!existing) {
-      this.open(key, n);
+      if (this.windows.size < this.maxWindows) this.open(key, n);
       return false;
     }
 

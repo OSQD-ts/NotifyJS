@@ -10,7 +10,7 @@
 
 [Unit]
 Description=NotifyJS notification hub
-Documentation=https://github.com/your/notifyjs
+Documentation=https://github.com/OSQD-ts/NotifyJS
 After=network-online.target
 Wants=network-online.target
 
@@ -34,15 +34,43 @@ ProtectSystem=strict
 ProtectHome=true
 ProtectKernelTunables=true
 ProtectKernelModules=true
+ProtectKernelLogs=true
 ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
 RestrictAddressFamilies=AF_INET AF_INET6
 RestrictNamespaces=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+RemoveIPC=true
 LockPersonality=true
 MemoryDenyWriteExecute=true
 SystemCallArchitectures=native
 
+# It listens on 7741, which is above 1024, so it needs no capability at all to
+# do its job. Dropping the whole bounding set means a future bug cannot regain
+# one even if the binary were replaced.
+CapabilityBoundingSet=
+AmbientCapabilities=
+
+# Only the calls an ordinary network service makes. `@privileged` and
+# `@resources` cover the ones that would matter if the process were taken over.
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+SystemCallErrorNumber=EPERM
+
+# The hub has no business reading other processes, and no device to open.
+ProtectProc=invisible
+ProcSubset=pid
+DevicePolicy=closed
+
+# The store holds device public keys and alert history. It is created 0600 in a
+# 0700 directory, and this makes that the default for anything else written.
+UMask=0077
+
 # The state directory is the only path it may write to.
 StateDirectory=notifyjs
+StateDirectoryMode=0700
 ReadWritePaths=/var/lib/notifyjs
 
 [Install]

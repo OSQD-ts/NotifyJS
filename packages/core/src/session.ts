@@ -22,6 +22,13 @@ export class Session {
   readonly pending = new Set<string>();
   /** Set once the peer has been dropped for refusing to drain its socket. */
   stalled = false;
+  /**
+   * Whether `Guard.promote()` has already accounted for this session.
+   *
+   * Tracked explicitly rather than inferred from `state`, which a close can
+   * change before the socket's close event runs.
+   */
+  promoted = false;
 
   constructor(
     id: string,

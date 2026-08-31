@@ -20,6 +20,9 @@ import {
   isPairingCodeValid,
   normalizePairingCode,
   pairingCodeHash,
+  coerceSeverity,
+  sanitizeRole,
+  timingSafeEqual,
   toBase64Url,
   type AuditEvent,
   type CallRequest,
@@ -181,7 +184,9 @@ export class Notifier extends EventEmitter<NotifierEvents> {
       this.audit(`call.${e.type}`, { detail: { callId: e.callId } });
     });
     this.flood = new FloodControl(this.opts.flood, (summary) => this.releaseSummary(summary));
-    this.push = new PushSender(this.opts.push, this.opts.logger);
+    this.push = new PushSender(this.opts.push, this.opts.logger, (ok, count) =>
+      this.metrics.pushed(ok, count),
+    );
 
     this.watchdog = new Watchdog(
       (event) => this.onHeartbeatMissed(event),
@@ -419,7 +424,19 @@ export class Notifier extends EventEmitter<NotifierEvents> {
     };
 
     this.http = this.opts.tls
-      ? (createHttpsServer(this.opts.tls, handler) as unknown as ReturnType<typeof createHttpServer>)
+      ? (createHttpsServer(
+          {
+            // A floor, not a ceiling: the caller's own options win, so an
+            // operator can still require 1.3. Stated because the alternative
+            // is inheriting whatever the process default happens to be, and a
+            // hub that quietly accepts TLS 1.0 is worse than one with no TLS,
+            // which at least does not claim to be protected.
+            minVersion: 'TLSv1.2',
+            honorCipherOrder: true,
+            ...this.opts.tls,
+          },
+          handler,
+        ) as unknown as ReturnType<typeof createHttpServer>)
       : createHttpServer(handler);
 
     // `noServer` keeps the upgrade in our hands, so an abusive peer is rejected
@@ -659,15 +676,21 @@ export class Notifier extends EventEmitter<NotifierEvents> {
     if (!role) throw new Error(`unknown role: ${roleName}`);
 
     const code = encodePairingCode(nodeCrypto.randomBytes(7));
-    const expiresAt = Date.now() + (input.ttlMs ?? 10 * 60_000);
+    // `pair.create` is reachable over the wire, so its arguments are bounded
+    // here rather than trusted. A code's whole safety argument rests on it
+    // being short-lived and nearly single-use.
+    const ttlMs = clampNumber(input.ttlMs, 1_000, MAX_CODE_TTL_MS, 10 * 60_000);
+    const expiresAt = Date.now() + ttlMs;
     this.store.putCode({
       hash: pairingCodeHash(code),
       role: roleName,
       createdAt: Date.now(),
       expiresAt,
-      usesLeft: input.uses ?? 1,
-      allowIps: input.allowIps,
-      label: input.label,
+      usesLeft: clampNumber(input.uses, 1, MAX_CODE_USES, 1),
+      allowIps: Array.isArray(input.allowIps)
+        ? input.allowIps.filter((ip) => typeof ip === 'string').slice(0, 50)
+        : undefined,
+      label: typeof input.label === 'string' ? input.label.slice(0, 64) : undefined,
     });
     this.audit('pair.created', { detail: { role: roleName, expiresAt } });
 
@@ -823,10 +846,17 @@ export class Notifier extends EventEmitter<NotifierEvents> {
       }
       // Counts only, never alert content - but still worth a token when the
       // port is public.
+      //
+      // Compared in constant time: `!==` on a secret returns as soon as two
+      // characters differ, and that timing difference is enough to recover the
+      // token one character at a time from an endpoint an attacker can poll.
       const token = this.opts.metricsToken;
-      if (token && req.headers.authorization !== `Bearer ${token}`) {
-        res.writeHead(401, { 'www-authenticate': 'Bearer' }).end();
-        return;
+      if (token) {
+        const offered = req.headers.authorization;
+        if (typeof offered !== 'string' || !timingSafeEqual(offered, `Bearer ${token}`)) {
+          res.writeHead(401, { 'www-authenticate': 'Bearer' }).end();
+          return;
+        }
       }
       res.writeHead(200, { 'content-type': 'text/plain; version=0.0.4; charset=utf-8' });
       res.end(this.renderMetrics());
@@ -924,7 +954,11 @@ export class Notifier extends EventEmitter<NotifierEvents> {
     if (this.opts.security.trustProxy) {
       const fwd = req.headers['x-forwarded-for'];
       const first = Array.isArray(fwd) ? fwd[0] : fwd?.split(',')[0];
-      if (first) return normalizeIp(first);
+      // Only an actual address is honoured. The header is client-supplied, so
+      // an unvalidated value lets a peer invent a new identity per request and
+      // walk straight past the per-IP rate limit and every ban ever issued.
+      const candidate = first ? normalizeIp(first) : undefined;
+      if (candidate && isIpAddress(candidate)) return candidate;
     }
     return normalizeIp(req.socket.remoteAddress ?? undefined);
   }
@@ -976,9 +1010,8 @@ export class Notifier extends EventEmitter<NotifierEvents> {
   private closeSession(session: Session): void {
     if (!this.sessions.delete(session.id)) return;
     session.clearHandshakeTimer();
-    const wasReady = session.state === 'ready';
     session.state = 'closed';
-    this.guard.release(session.ip, wasReady);
+    this.guard.release(session.ip, session.promoted);
 
     if (session.stalled) {
       this.metrics.stalled();
@@ -1046,7 +1079,7 @@ export class Notifier extends EventEmitter<NotifierEvents> {
         this.calls.ended(msg.callId, session.deviceId!);
         return;
       case 'admin':
-        return this.handleAdmin(session, msg);
+        return await this.handleAdmin(session, msg);
       case 'push.register':
         return this.handlePushRegister(session, msg);
       case 'snooze':
@@ -1092,18 +1125,32 @@ export class Notifier extends EventEmitter<NotifierEvents> {
     if (typeof msg.publicKey !== 'string' || msg.publicKey.length !== 43) return fail('bad_key');
 
     const normalized = normalizePairingCode(msg.code);
-    const record = this.store.takeCode(normalized);
+    // Reserved, not just read: signature verification below is asynchronous,
+    // and two sockets redeeming the same single-use code would otherwise both
+    // pass this check before either consumed it, enrolling two devices.
+    const record = this.store.reserveCode(normalized);
     if (!record) return fail('unknown_code');
-    if (record.allowIps && !record.allowIps.includes(session.ip)) return fail('ip_not_allowed');
+
+    // Anything that rejects the attempt from here on has to hand the use back,
+    // or a mistyped IP allowlist would silently burn the operator's code.
+    const release = () => this.store.releaseCode(record.hash);
+    const rejectAndRelease = (reason: string) => {
+      release();
+      return fail(reason);
+    };
+
+    if (record.allowIps && !record.allowIps.includes(session.ip)) {
+      return rejectAndRelease('ip_not_allowed');
+    }
 
     const role = this.store.role(record.role);
-    if (!role) return fail('unknown_role');
+    if (!role) return rejectAndRelease('unknown_role');
 
     if (role.maxDevices !== undefined) {
       const count = this.store
         .devices()
         .filter((d) => d.role === role.name && d.status === 'active').length;
-      if (count >= role.maxDevices) return fail('role_full');
+      if (count >= role.maxDevices) return rejectAndRelease('role_full');
     }
 
     // The signature binds the public key to *this* connection's nonce, so a
@@ -1118,10 +1165,10 @@ export class Notifier extends EventEmitter<NotifierEvents> {
       String(msg.platform ?? ''),
     ]);
     if (!(await nodeCrypto.verify(msg.publicKey, transcript, String(msg.sig ?? '')))) {
-      return fail('bad_signature');
+      return rejectAndRelease('bad_signature');
     }
 
-    if (this.store.deviceByPublicKey(msg.publicKey)) return fail('key_in_use');
+    if (this.store.deviceByPublicKey(msg.publicKey)) return rejectAndRelease('key_in_use');
 
     const device: Device = {
       id: randomId(12),
@@ -1139,7 +1186,6 @@ export class Notifier extends EventEmitter<NotifierEvents> {
       ackedSeq: this.store.seq,
     };
     this.store.putDevice(device);
-    this.store.consumeCode(record.hash);
     this.guard.succeed(session.ip);
 
     this.audit('pair.success', {
@@ -1219,7 +1265,10 @@ export class Notifier extends EventEmitter<NotifierEvents> {
     session.state = 'ready';
     session.device = device;
     session.role = role;
-    this.guard.promote();
+    if (!session.promoted) {
+      session.promoted = true;
+      this.guard.promote();
+    }
 
     let set = this.byDevice.get(device.id);
     if (!set) {
@@ -1327,9 +1376,15 @@ export class Notifier extends EventEmitter<NotifierEvents> {
         this.ackWaiters.delete(id);
       }
     }
-    if (typeof msg.seq === 'number' && msg.seq > session.device.ackedSeq) {
-      const updated = this.store.updateDevice(session.device.id, { ackedSeq: msg.seq });
-      if (updated) session.device = updated;
+    // Clamped to what the hub has actually issued: a device that reported a
+    // cursor from the future - a bug, a bad clock, a hostile client - would
+    // silently opt itself out of every replay from then on.
+    if (Number.isFinite(msg.seq) && (msg.seq as number) > session.device.ackedSeq) {
+      const seq = Math.min(msg.seq as number, this.store.seq);
+      if (seq > session.device.ackedSeq) {
+        const updated = this.store.updateDevice(session.device.id, { ackedSeq: seq });
+        if (updated) session.device = updated;
+      }
     }
   }
 
@@ -1383,7 +1438,10 @@ export class Notifier extends EventEmitter<NotifierEvents> {
 
   /* ------------------------------ admin ------------------------------ */
 
-  private handleAdmin(session: Session, msg: Extract<ClientMessage, { t: 'admin' }>): void {
+  private async handleAdmin(
+    session: Session,
+    msg: Extract<ClientMessage, { t: 'admin' }>,
+  ): Promise<void> {
     const reply = (ok: boolean, data?: unknown, error?: string) =>
       session.send({ v: PROTOCOL_VERSION, t: 'admin.result', id: msg.id, ok, data, error });
 
@@ -1420,18 +1478,22 @@ export class Notifier extends EventEmitter<NotifierEvents> {
         case 'roles.list':
           return reply(true, { roles: this.roles() });
         case 'roles.upsert':
-          this.upsertRole(args as Role);
+          // A device holding `roles.manage` but not `admin` must not be able
+          // to mint itself an admin role and escalate.
+          this.upsertRole(sanitizeRole(args, hasCapability(role, 'admin')));
           return reply(true, { roles: this.roles() });
         case 'roles.delete':
           return reply(true, { deleted: this.deleteRole(String(args.name)) });
         case 'notify.send':
-          void this.notify(args as NotifyInput);
+          void this.notify(args as NotifyInput).catch(() => {});
           return reply(true, {});
         case 'call.place':
-          void this.call(args as CallInput);
+          void this.call(args as CallInput).catch(() => {});
           return reply(true, {});
         case 'notify.resolve':
-          return reply(true, { resolved: this.resolve(args as { id?: string; key?: string }) });
+          // Awaited: replying with the promise itself serialises to `{}`, so
+          // every caller was told nothing had been resolved.
+          return reply(true, { resolved: await this.resolve(args as { id?: string; key?: string }) });
         case 'heartbeats.list':
           return reply(true, { heartbeats: this.heartbeats() });
         case 'heartbeat.expect':
@@ -1472,9 +1534,12 @@ export class Notifier extends EventEmitter<NotifierEvents> {
       id: randomId(10),
       seq: this.store.nextSeq(),
       ts: Date.now(),
-      channel: input.channel ?? 'default',
-      severity: input.severity ?? 'info',
-      title: String(input.title).slice(0, 200),
+      channel: sanitizeChannel(input.channel),
+      // An unrecognised severity would sort as `debug`, bypass the
+      // `alwaysDeliver` list, and be written verbatim into a Prometheus label
+      // at `/metrics`.
+      severity: coerceSeverity(input.severity, 'info'),
+      title: String(input.title ?? '').slice(0, 200),
       body: input.body ? String(input.body).slice(0, 4000) : undefined,
       tags: input.tags?.slice(0, 20),
       data: input.data,
@@ -1491,10 +1556,10 @@ export class Notifier extends EventEmitter<NotifierEvents> {
       id: randomId(10),
       seq: this.store.nextSeq(),
       ts: Date.now(),
-      channel: input.channel ?? 'default',
-      severity: input.severity ?? 'critical',
-      from: input.from ?? this.opts.name,
-      message: String(input.message).slice(0, 2000),
+      channel: sanitizeChannel(input.channel),
+      severity: coerceSeverity(input.severity, 'critical'),
+      from: sanitizeName(input.from) || this.opts.name,
+      message: String(input.message ?? '').slice(0, 2000),
       lang: input.lang,
       rate: input.rate,
       pitch: input.pitch,
@@ -1637,6 +1702,16 @@ const NOTIFYJS_VERSION = process.env.NOTIFYJS_VERSION ?? '0.1.0';
 
 const MAX_ACK_RETRIES = 20;
 
+/** A pairing code is meant to be redeemed now, not next week. */
+const MAX_CODE_TTL_MS = 7 * 24 * 60 * 60_000;
+const MAX_CODE_USES = 100;
+
+function clampNumber(value: unknown, min: number, max: number, fallback: number): number {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.min(max, Math.max(min, Math.floor(n)));
+}
+
 /** A snooze is a nap, not an off switch. */
 const MAX_SNOOZE_MS = 24 * 60 * 60_000;
 
@@ -1694,6 +1769,33 @@ function matchesTargeting(to: Targeting, deviceId: string, role: string): boolea
 
 function withSeverity(input: NotifyInput | string, severity: Severity): NotifyInput {
   return typeof input === 'string' ? { title: input, severity } : { ...input, severity };
+}
+
+/**
+ * Channels name a routing key, and one arrives with every notification.
+ *
+ * Only control characters and length are corrected: a channel is matched
+ * against role globs an operator wrote by hand, so quietly rewriting the
+ * printable characters would stop a role from matching the channel it was
+ * configured for.
+ */
+function sanitizeChannel(value: unknown): string {
+  if (typeof value !== 'string') return 'default';
+  let out = '';
+  for (const ch of value) {
+    const code = ch.codePointAt(0) ?? 0;
+    if (code < 0x20 || code === 0x7f) continue;
+    out += ch;
+  }
+  return out.trim().slice(0, 64) || 'default';
+}
+
+/** IPv4 or IPv6 literal, for deciding whether a proxy header is believable. */
+function isIpAddress(value: string): boolean {
+  if (/^\d{1,3}(\.\d{1,3}){3}$/.test(value)) {
+    return value.split('.').every((part) => Number(part) <= 255);
+  }
+  return /^[0-9a-fA-F:]{2,45}$/.test(value) && value.includes(':');
 }
 
 /**

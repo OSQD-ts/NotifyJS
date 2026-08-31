@@ -2,12 +2,25 @@
 <!--
   NotifyJS hub as a macOS launchd agent.
 
+  launchd does not expand `~` or `$HOME` in a plist, so the paths below carry a
+  __HOME__ placeholder that the install line substitutes:
+
     cp notifyjs /usr/local/bin/
     cp -r dashboard /usr/local/share/notifyjs-dashboard
-    cp dev.notifyjs.plist ~/Library/LaunchAgents/
+    sed "s|__HOME__|$HOME|g" dev.notifyjs.plist > ~/Library/LaunchAgents/dev.notifyjs.plist
     launchctl load -w ~/Library/LaunchAgents/dev.notifyjs.plist
 
   Logs land in ~/Library/Logs/notifyjs.log
+
+  Both paths are deliberately inside the user's own Library rather than
+  /Users/Shared. That directory is mode 1777 - readable and writable by every
+  account on the machine - and this agent puts two things it should not:
+
+    - the hub's store, which lists every paired device;
+    - its stdout, which on a first run contains a live *admin* pairing code.
+
+  A local user who can read that log can pair themselves as an administrator of
+  the hub for as long as the code is valid.
 -->
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -24,7 +37,7 @@
       <string>--port</string>
       <string>7741</string>
       <string>--data</string>
-      <string>/Users/Shared/notifyjs</string>
+      <string>__HOME__/Library/Application Support/notifyjs</string>
     </array>
 
     <key>EnvironmentVariables</key>
@@ -41,9 +54,14 @@
       <false/>
     </dict>
 
+    <!-- 0077: the log carries pairing codes on a first run, so it should be
+         readable by this account and nothing else. -->
+    <key>Umask</key>
+    <integer>63</integer>
+
     <key>StandardOutPath</key>
-    <string>/Users/Shared/notifyjs.log</string>
+    <string>__HOME__/Library/Logs/notifyjs.log</string>
     <key>StandardErrorPath</key>
-    <string>/Users/Shared/notifyjs.log</string>
+    <string>__HOME__/Library/Logs/notifyjs.log</string>
   </dict>
 </plist>

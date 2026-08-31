@@ -33,7 +33,12 @@ export async function generateSelfSigned(
 
   // A phone connects by IP, so the address has to be in the SAN list or the
   // handshake fails no matter how the certificate is trusted.
-  const hosts = [...new Set(['localhost', hostname(), ...localAddresses(), ...extraHosts])];
+  // Each name is spliced into an openssl config file, where a newline would
+  // start a new directive and a `#` would comment the rest of the line out.
+  // Only things that can actually be a SAN entry get through.
+  const hosts = [
+    ...new Set(['localhost', hostname(), ...localAddresses(), ...extraHosts]),
+  ].filter(isValidHost);
   const san = hosts
     .map((host, i) => (isIp(host) ? `IP.${i} = ${host}` : `DNS.${i} = ${host}`))
     .join('\n');
@@ -114,5 +119,13 @@ function localAddresses(): string[] {
 }
 
 function isIp(value: string): boolean {
-  return /^\d{1,3}(\.\d{1,3}){3}$/.test(value);
+  return (
+    /^\d{1,3}(\.\d{1,3}){3}$/.test(value) &&
+    value.split('.').every((part) => Number(part) <= 255)
+  );
+}
+
+/** A hostname or IP literal, and nothing that could be an openssl directive. */
+function isValidHost(value: string): boolean {
+  return value.length > 0 && value.length <= 253 && /^[A-Za-z0-9.:_-]+$/.test(value);
 }

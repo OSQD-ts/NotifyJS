@@ -55,8 +55,8 @@ try {
  * is not an error - it just falls through to the terminal renderer.
  */
 export async function desktopNotify(n: Notification): Promise<boolean> {
-  const title = `${n.severity.toUpperCase()}: ${n.title}`;
-  const body = n.body ?? n.channel;
+  const title = safeText(`${String(n.severity).toUpperCase()}: ${n.title}`);
+  const body = safeText(n.body ?? n.channel);
 
   if (platform() === 'darwin') {
     return run('osascript', [
@@ -93,12 +93,16 @@ function quote(value: string): string {
  */
 export async function speakCall(call: CallRequest): Promise<boolean> {
   const repeats = Math.max(1, Math.min(call.repeat ?? 1, 5));
-  const candidates: [string, string[]][] = pickVoices(call.message);
+  // The message is passed as an argument to whichever engine is installed, and
+  // a leading dash would be read as an option rather than as words. Stripping
+  // it keeps a hub from choosing the flags a local command runs with.
+  const message = safeText(String(call.message ?? '')).replace(/^[-\s]+/, '') || 'alert';
+  const candidates: [string, string[]][] = pickVoices(message);
 
   for (const [cmd, args] of candidates) {
     let spoke = false;
     for (let i = 0; i < repeats; i++) {
-      spoke = await run(cmd, args, { NOTIFYJS_MESSAGE: call.message });
+      spoke = await run(cmd, args, { NOTIFYJS_MESSAGE: message });
       if (!spoke) break;
     }
     if (spoke) return true;
@@ -125,18 +129,45 @@ function pickVoices(message: string): [string, string[]][] {
     ];
   }
   return [
-    ['spd-say', ['--wait', message]],
+    ['spd-say', ['--wait', '--', message]],
     ['espeak-ng', [message]],
     ['espeak', [message]],
   ];
 }
 
+/**
+ * Strips control characters from text the hub sent us.
+ *
+ * Titles and bodies carry stack traces and whatever a monitored service
+ * logged, and this is printed straight to an operator's terminal. A raw escape
+ * sequence in there can move the cursor, repaint earlier lines, or - on some
+ * terminals - stuff characters into the input buffer. Newlines are kept in
+ * bodies, which are indented rather than printed flat.
+ */
+function safeText(value: string, keepNewlines = false): string {
+  let out = '';
+  for (const ch of value) {
+    const code = ch.codePointAt(0) ?? 0;
+    if (keepNewlines && ch === '\n') {
+      out += ch;
+      continue;
+    }
+    if (code < 0x20 || code === 0x7f) continue;
+    out += ch;
+  }
+  return out;
+}
+
 /** Terminal fallback, and the primary view when running in the foreground. */
 export function printNotification(n: Notification): void {
   const time = new Date(n.ts).toLocaleTimeString();
-  const tag = color(n.severity, n.severity.toUpperCase().padEnd(8));
-  process.stdout.write(`${dim(time)} ${tag} ${dim('[' + n.channel + ']')} ${n.title}\n`);
-  if (n.body) process.stdout.write(`         ${n.body.replace(/\n/g, '\n         ')}\n`);
+  const tag = color(n.severity, String(n.severity).toUpperCase().padEnd(8));
+  const channel = safeText(String(n.channel));
+  process.stdout.write(`${dim(time)} ${tag} ${dim('[' + channel + ']')} ${safeText(n.title)}\n`);
+  if (n.body) {
+    const body = safeText(n.body, true).replace(/\n/g, '\n         ');
+    process.stdout.write(`         ${body}\n`);
+  }
 }
 
 const CODES: Record<Severity, string> = {

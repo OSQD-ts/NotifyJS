@@ -157,6 +157,10 @@ export class SourceManager {
       code = parsed.code;
     }
     if (!url) throw new Error('a hub address is required');
+    // A scanned link is already checked; a typed address is not. Both end up
+    // in `createSocket`, so the same rule applies to each: this app talks to
+    // hubs over WebSocket and to nothing else.
+    if (!isHubUrl(url)) throw new Error('a hub address must start with ws:// or wss://');
 
     // Two subscriptions to the same hub would be two devices competing for the
     // same alerts, which is never what someone means by "add".
@@ -401,6 +405,16 @@ function sameHub(a: string, b: string): boolean {
     return ua.host === ub.host;
   } catch {
     return a === b;
+  }
+}
+
+/** The only addresses a source may be created for. */
+function isHubUrl(value: string): boolean {
+  try {
+    const protocol = new URL(value).protocol;
+    return protocol === 'ws:' || protocol === 'wss:';
+  } catch {
+    return false;
   }
 }
 
