@@ -23,7 +23,7 @@
     "icons": "node scripts/render-icons.mjs"
   },
   "devDependencies": {
-    "@types/node": "^20.14.0",
+    "@types/node": "^26.4.0",
     "@yao-pkg/pkg": "~6.14.2",
     "esbuild": "^0.28.2",
     "jsdom": "^25.0.1",
