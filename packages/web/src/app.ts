@@ -105,9 +105,9 @@ function wireSettings(): void {
 
   $('settings-toggle').addEventListener('click', () => {
     renderSettings();
-    $('settings').hidden = false;
+    openDrawer('settings');
   });
-  $('settings-close').addEventListener('click', () => ($('settings').hidden = true));
+  $('settings-close').addEventListener('click', () => closeDrawer('settings'));
 
   $('pref-name').addEventListener('change', (e) =>
     savePreferences({ deviceName: (e.target as HTMLInputElement).value }),
@@ -283,7 +283,7 @@ function openCall(call: CallRequest): void {
   // immediately rather than waiting its turn behind the feed.
   announce(`Incoming alert from ${call.from}. ${call.message}`);
   $<HTMLButtonElement>('call-answer').focus();
-  if (prefs.sound) ringer.start();
+  if (prefs.sound) ringer.start(call.ringSeconds);
 }
 
 function closeCall(): void {
@@ -297,24 +297,77 @@ function closeCall(): void {
   focusBeforeCall = null;
 }
 
+/* ---------------------------------------------------------------- */
+/* Overlays                                                          */
+/* ---------------------------------------------------------------- */
+
 /**
- * Keeps focus inside the call while it is up, and lets Escape decline.
- * Without this, tabbing wanders into the feed behind an overlay that is
+ * Everything focusable inside an element, in tab order.
+ *
+ * `offsetParent` is null for anything display:none or inside a hidden
+ * ancestor, which is how a control that is present but not shown - the answer
+ * button after a call is picked up - stays out of the rotation.
+ */
+function focusableWithin(root: HTMLElement): HTMLElement[] {
+  const selector =
+    'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])';
+  return [...root.querySelectorAll<HTMLElement>(selector)].filter(
+    (el) => !el.hasAttribute('disabled') && el.offsetParent !== null,
+  );
+}
+
+/** The element focus came from, so closing an overlay can give it back. */
+let focusBeforeOverlay: HTMLElement | null = null;
+
+/**
+ * Opens a drawer.
+ *
+ * The drawers are `width: min(380px, 100%)`, so on a narrow window they cover
+ * the page completely - the same situation the call screen is in, and it needs
+ * the same handling. Without moving focus in, a keyboard user opens Settings
+ * and their focus is still on the button behind it; without the trap below,
+ * tabbing walks invisibly through the feed underneath.
+ */
+function openDrawer(id: 'settings' | 'devices'): void {
+  focusBeforeOverlay = document.activeElement as HTMLElement | null;
+  $(id).hidden = false;
+  focusableWithin($(id))[0]?.focus();
+}
+
+function closeDrawer(id: 'settings' | 'devices'): void {
+  $(id).hidden = true;
+  focusBeforeOverlay?.focus();
+  focusBeforeOverlay = null;
+}
+
+/** The overlay currently on top, if any. A call always outranks a drawer. */
+function activeOverlay(): { root: HTMLElement; escape: () => void } | undefined {
+  if (activeCall && !$('call').hidden) {
+    return { root: $('call'), escape: () => $<HTMLButtonElement>('call-decline').click() };
+  }
+  for (const id of ['settings', 'devices'] as const) {
+    if (!$(id).hidden) return { root: $(id), escape: () => closeDrawer(id) };
+  }
+  return undefined;
+}
+
+/**
+ * Keeps focus inside whichever overlay is up, and lets Escape dismiss it.
+ * Without this, tabbing wanders into the feed behind something that is
  * visually covering the whole screen.
  */
 document.addEventListener('keydown', (e) => {
-  if (!activeCall || $('call').hidden) return;
+  const overlay = activeOverlay();
+  if (!overlay) return;
 
   if (e.key === 'Escape') {
     e.preventDefault();
-    $<HTMLButtonElement>('call-decline').click();
+    overlay.escape();
     return;
   }
   if (e.key !== 'Tab') return;
 
-  const focusable = [...$('call').querySelectorAll<HTMLButtonElement>('button')].filter(
-    (b) => !b.hidden,
-  );
+  const focusable = focusableWithin(overlay.root);
   if (focusable.length === 0) return;
 
   const first = focusable[0]!;
@@ -365,7 +418,7 @@ function canManage(): boolean {
 
 async function refreshDevices(): Promise<void> {
   if (!canManage()) return;
-  const data = await client.admin<{ devices: Device[]; online: string[] }>('devices.list');
+  const data = await client.admin('devices.list');
   const online = new Set(data.online);
   $('device-list').replaceChildren(
     ...data.devices.map((device) => {
@@ -404,7 +457,7 @@ async function refreshDevices(): Promise<void> {
 }
 
 async function refreshRoles(): Promise<void> {
-  const data = await client.admin<{ roles: { name: string }[] }>('roles.list');
+  const data = await client.admin('roles.list');
   const select = $<HTMLSelectElement>('code-role');
   select.replaceChildren(
     ...data.roles.map((role) => {
@@ -417,35 +470,40 @@ async function refreshRoles(): Promise<void> {
   select.value = 'viewer';
 }
 
-$('devices-toggle').addEventListener('click', async () => {
-  $('devices').hidden = false;
-  await Promise.all([refreshDevices(), refreshRoles()]);
+$('devices-toggle').addEventListener('click', () => {
+  openDrawer('devices');
+  // Not awaited from the handler: a rejected admin call in an async listener
+  // has nobody to catch it, and an unhandled rejection is a worse outcome than
+  // a drawer that opens with yesterday's list and a message saying why.
+  void Promise.all([refreshDevices(), refreshRoles()]).catch((err: unknown) => {
+    announce(`Could not load devices: ${err instanceof Error ? err.message : String(err)}`);
+  });
 });
 
-$('devices-close').addEventListener('click', () => {
-  $('devices').hidden = true;
+$('devices-close').addEventListener('click', () => closeDrawer('devices'));
+
+$('new-code').addEventListener('click', () => {
+  void mintCode().catch((err: unknown) => {
+    // An async click handler that rejects has nobody to catch it. Minting can
+    // fail for ordinary reasons - a role that was deleted, a lapsed
+    // capability - and the person pressing the button should be told.
+    announce(`Could not create a code: ${err instanceof Error ? err.message : String(err)}`);
+  });
 });
 
-$('new-code').addEventListener('click', async () => {
+async function mintCode(): Promise<void> {
   const role = $<HTMLSelectElement>('code-role').value || 'viewer';
-  const issued = await client.admin<{
-    code: string;
-    qr?: { svg: string };
-  }>('pair.create', { role });
+  const issued = await client.admin('pair.create', { role });
 
   $('code-value').textContent = issued.code;
 
+  // A data: URL rather than innerHTML: the page never parses hub-supplied
+  // markup, and `img-src 'self' data:` already permits this under the CSP.
   const qr = $<HTMLImageElement>('code-qr');
-  if (issued.qr) {
-    // A data: URL rather than innerHTML: the page never parses hub-supplied
-    // markup, and `img-src 'self' data:` already permits this under the CSP.
-    qr.src = qrDataUrl(issued.qr.svg);
-    qr.hidden = false;
-  } else {
-    qr.hidden = true;
-  }
+  qr.src = qrDataUrl(issued.qr.svg);
+  qr.hidden = false;
   $('new-code-out').hidden = false;
-});
+}
 
 /* ---------------------------------------------------------------- */
 /* Wiring                                                            */
@@ -577,9 +635,14 @@ let loadedVersion: string | undefined;
 
 async function checkHubVersion(): Promise<void> {
   try {
-    const info = (await (await fetch('./hub.json', { cache: 'no-store' })).json()) as {
-      version?: string;
-    };
+    // Bounded: this runs on a timer, and a request that hangs rather than
+    // fails never settles - so a wedged hub would leave one pending request
+    // per poll accumulating for as long as the tab stays open.
+    const response = await fetch('./hub.json', {
+      cache: 'no-store',
+      signal: AbortSignal.timeout(10_000),
+    });
+    const info = (await response.json()) as { version?: string };
     if (!info.version) return;
 
     if (loadedVersion === undefined) {

@@ -82,7 +82,21 @@ export interface Device {
   model?: string;
   status: DeviceStatus;
   createdAt: number;
+  /**
+   * When the hub last heard anything at all from this device, including the
+   * automatic reply to a liveness ping. This is "is it still there".
+   */
   lastSeenAt?: number;
+  /**
+   * When this device last did something deliberate - acknowledged an alert,
+   * answered a call, snoozed, resynced on being opened.
+   *
+   * Kept apart from `lastSeenAt` because a device answers pings whether or not
+   * anybody is holding it, and the two questions have different answers: a
+   * tablet on a shelf is every bit as *present* as the phone in a pocket, and
+   * a call should still reach the pocket first.
+   */
+  lastActiveAt?: number;
   lastIp?: string;
   /** Delivery cursor: the last event sequence this device acknowledged. */
   ackedSeq: number;
@@ -164,6 +178,43 @@ export interface EscalationPolicy {
   steps: EscalationStep[];
   /** Run the whole ladder again this many extra times before giving up. */
   repeat?: number;
+}
+
+/**
+ * A check-in the hub expects, as declared by whoever registered it.
+ *
+ * Lives here rather than beside the watchdog that enforces it because the hub
+ * hands these straight back over `admin`, and the CLI and phone both read
+ * them - which makes it a wire type like `EscalationPolicy`, not an
+ * implementation detail of the hub.
+ */
+export interface HeartbeatSpec {
+  /** How often a check-in is expected. Accepts `'24h'` or milliseconds. */
+  every: number | string;
+  /** Extra time allowed before the miss is treated as real. */
+  grace?: number | string;
+  /** Severity of the alert raised when a check-in does not arrive. */
+  severity?: Severity;
+  channel?: string;
+  /** Human-readable description used in the alert body. */
+  description?: string;
+  /** Alert again on every missed interval, not just the first. */
+  repeat?: boolean;
+}
+
+/** A registered check-in, with the durations resolved and its current state. */
+export interface Heartbeat {
+  name: string;
+  every: number;
+  grace: number;
+  severity: Severity;
+  channel: string;
+  description?: string;
+  repeat: boolean;
+  lastSeenAt: number;
+  /** True while the hub is alerting about this one. */
+  missing: boolean;
+  createdAt: number;
 }
 
 export interface CallRequest {

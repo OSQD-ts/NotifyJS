@@ -14,7 +14,8 @@
   },
   "scripts": {
     "build": "npm run icons && npm run build -w @osqd/notifyjs-protocol && npm run build -w @osqd/notifyjs && npm run build -w @osqd/notifyjs-web && npm run build -w @osqd/notifyjs-cli",
-    "clean": "rm -rf packages/*/dist packages/*/*.tsbuildinfo packages/mobile/assets packages/web/public/icon.svg packages/web/public/favicon.png",
+    "clean": "rm -rf packages/*/dist packages/*/*.tsbuildinfo build packages/desktop/release packages/desktop/assets packages/mobile/assets packages/web/public/icon.svg packages/web/public/favicon.png packages/*/LICENSE",
+    "clean:native": "rm -rf packages/mobile/android packages/mobile/ios",
     "test": "node --test packages/core/test/*.test.js packages/cli/test/*.test.js packages/web/test/*.test.js",
     "demo": "node examples/basic/demo.mjs",
     "bundle": "node scripts/bundle.mjs",

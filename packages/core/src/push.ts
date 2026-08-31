@@ -1,6 +1,19 @@
 import type { Device, Notification, CallRequest } from '@osqd/notifyjs-protocol';
 import type { PushOptions } from './options.js';
 
+/** Expo rejects a request carrying more than this many messages. */
+const MAX_BATCH = 100;
+
+/**
+ * One entry of Expo's response array, in the shape this code depends on.
+ * Everything else in a ticket is Expo's business.
+ */
+interface PushTicket {
+  status?: string;
+  message?: string;
+  details?: { error?: string };
+}
+
 /**
  * Wake-up pushes for devices whose socket is closed.
  *
@@ -16,6 +29,14 @@ export class PushSender {
     private readonly log: (line: string, meta?: Record<string, unknown>) => void,
     /** Reports the outcome, so `/metrics` can show pushes actually happening. */
     private readonly onResult: (ok: boolean, count: number) => void = () => {},
+    /**
+     * A device Expo says it can no longer reach.
+     *
+     * An uninstalled app leaves a token behind that will never deliver again.
+     * Without telling anyone, the hub keeps sending to it on every alert
+     * forever - so the one party that can retire it is told.
+     */
+    private readonly onUnreachable: (deviceId: string) => void = () => {},
   ) {}
 
   get enabled(): boolean {
@@ -62,6 +83,25 @@ export class PushSender {
     const targets = devices.filter((d) => d.pushToken && d.status === 'active');
     if (!this.opts.enabled || targets.length === 0) return;
 
+    // Expo refuses a request carrying more than 100 messages, so a single
+    // oversized batch does not deliver *fewer* pushes - it delivers none. A
+    // hub with a hundred-and-one phones would silently stop pushing entirely.
+    const batches: Device[][] = [];
+    for (let i = 0; i < targets.length; i += MAX_BATCH) {
+      batches.push(targets.slice(i, i + MAX_BATCH));
+    }
+
+    // Sent in parallel: these are wake-ups for an alert that has already been
+    // delivered to everyone connected, and serialising them would put the
+    // slowest batch in front of every later one.
+    await Promise.all(batches.map((batch) => this.postBatch(batch, build, ref)));
+  }
+
+  private async postBatch(
+    batch: Device[],
+    build: (device: Device) => Record<string, unknown>,
+    ref: string,
+  ): Promise<void> {
     try {
       // A push service being slow must never hold up delivery to the devices
       // that are actually connected, so this is bounded and never awaited by
@@ -69,20 +109,67 @@ export class PushSender {
       const response = await fetch(this.opts.endpoint, {
         method: 'POST',
         headers: { 'content-type': 'application/json', accept: 'application/json' },
-        body: JSON.stringify(targets.map(build)),
+        body: JSON.stringify(batch.map(build)),
         signal: AbortSignal.timeout(10_000),
       });
 
       if (!response.ok) {
         this.log('push service rejected the request', { status: response.status, ref });
+        this.onResult(false, batch.length);
+        return;
       }
-      this.onResult(response.ok, targets.length);
+
+      this.onResult(true, batch.length);
+      await this.reapUnreachable(response, batch, ref);
     } catch (err) {
-      this.onResult(false, targets.length);
+      this.onResult(false, batch.length);
       this.log('push delivery failed', {
         ref,
         error: err instanceof Error ? err.message : String(err),
       });
     }
+  }
+
+  /**
+   * Reads the per-message tickets back.
+   *
+   * A 200 from Expo means the batch was accepted, not that every message in it
+   * was deliverable: tokens for an app that has been uninstalled come back as
+   * `DeviceNotRegistered`. Ignoring that leaves the hub pushing to a dead token
+   * on every alert for the life of the device record.
+   */
+  private async reapUnreachable(
+    response: Response,
+    batch: Device[],
+    ref: string,
+  ): Promise<void> {
+    let tickets: PushTicket[] = [];
+    try {
+      const payload = (await response.json()) as { data?: PushTicket[] };
+      tickets = Array.isArray(payload?.data) ? payload.data : [];
+    } catch {
+      // A body we cannot read is not worth failing an accepted batch over.
+      return;
+    }
+
+    // Expo returns one ticket per message, in the order they were sent.
+    tickets.forEach((ticket, i) => {
+      if (ticket?.status !== 'error') return;
+      const device = batch[i];
+      if (!device) return;
+      if (ticket.details?.error === 'DeviceNotRegistered') {
+        this.log('clearing a push token the service can no longer reach', {
+          ref,
+          device: device.id,
+        });
+        this.onUnreachable(device.id);
+        return;
+      }
+      this.log('push was rejected for one device', {
+        ref,
+        device: device.id,
+        error: ticket.details?.error ?? ticket.message,
+      });
+    });
   }
 }

@@ -7,7 +7,8 @@ import type { ClientStorage } from '@osqd/notifyjs-protocol';
  * hub, so it should be no easier to extract than a saved password.
  */
 export function secureStorage(): ClientStorage {
-  // SecureStore keys must be alphanumeric plus ._-, so dots become underscores.
+  // SecureStore keys are limited to alphanumerics plus `.`, `_` and `-`;
+  // anything else in a key becomes an underscore.
   const safe = (key: string) => key.replace(/[^A-Za-z0-9._-]/g, '_');
 
   return {
@@ -27,22 +28,4 @@ export function secureStorage(): ClientStorage {
       await SecureStore.deleteItemAsync(safe(key));
     },
   };
-}
-
-/** Non-secret preferences (hub URL, device name) that survive a reinstall. */
-export const PREF_KEYS = {
-  url: 'notifyjs_pref_url',
-  name: 'notifyjs_pref_name',
-} as const;
-
-export async function getPref(key: string): Promise<string | null> {
-  try {
-    return await SecureStore.getItemAsync(key);
-  } catch {
-    return null;
-  }
-}
-
-export async function setPref(key: string, value: string): Promise<void> {
-  await SecureStore.setItemAsync(key, value);
 }

@@ -9,7 +9,12 @@ import { Notifier, RemoteNotifier, Watchdog, parseDuration, formatDuration } fro
 import { NotifyClient, memoryStorage } from '@osqd/notifyjs-protocol';
 import { nodeCrypto } from '@osqd/notifyjs-protocol/node';
 
-const PORT = 7881;
+/**
+ * Chosen by the OS, not by this file. Fixed ports made the suite fail in
+ * bursts whenever a port was still held from an earlier run - every test in
+ * the file at once, for a reason that had nothing to do with the code.
+ */
+let PORT = 0;
 let hub;
 let storeDir;
 
@@ -52,7 +57,7 @@ function once(client, event, timeout = 6000) {
 before(async () => {
   storeDir = mkdtempSync(join(tmpdir(), 'notifyjs-res-'));
   hub = new Notifier({
-    port: PORT,
+    port: 0,
     storeDir,
     dashboard: false,
     logger: false,
@@ -67,6 +72,7 @@ before(async () => {
     },
   });
   await hub.start();
+  PORT = Number(new URL(hub.url).port);
 });
 
 after(async () => {
@@ -158,12 +164,12 @@ test('an unknown check-in name is reported rather than silently ignored', () => 
 
 test('heartbeats survive a hub restart', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'notifyjs-hb-'));
-  const first = new Notifier({ port: 7882, storeDir: dir, dashboard: false, logger: false });
+  const first = new Notifier({ port: 0, storeDir: dir, dashboard: false, logger: false });
   await first.start();
   first.expect('backup', { every: '24h', grace: '1h' });
   await first.stop();
 
-  const second = new Notifier({ port: 7882, storeDir: dir, dashboard: false, logger: false });
+  const second = new Notifier({ port: 0, storeDir: dir, dashboard: false, logger: false });
   await second.start();
   const restored = second.heartbeats();
   assert.equal(restored.length, 1);
@@ -342,11 +348,11 @@ test('a snoozed device is quiet, except for critical alerts', async () => {
 
 test('metrics render as Prometheus text and leak no alert content', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'notifyjs-metrics-'));
-  const m = new Notifier({ port: 7883, storeDir: dir, dashboard: false, logger: false });
+  const m = new Notifier({ port: 0, storeDir: dir, dashboard: false, logger: false });
   await m.start();
   await m.error({ title: 'super-secret-database-password-leak', channel: 'db' });
 
-  const res = await fetch('http://127.0.0.1:7883/metrics');
+  const res = await fetch(`${metricsBase(m)}/metrics`);
   const text = await res.text();
 
   assert.equal(res.status, 200);
@@ -363,7 +369,7 @@ test('metrics render as Prometheus text and leak no alert content', async () => 
 test('a metrics token is enforced when one is set', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'notifyjs-mtok-'));
   const m = new Notifier({
-    port: 7884,
+    port: 0,
     storeDir: dir,
     dashboard: false,
     logger: false,
@@ -371,8 +377,9 @@ test('a metrics token is enforced when one is set', async () => {
   });
   await m.start();
 
-  assert.equal((await fetch('http://127.0.0.1:7884/metrics')).status, 401);
-  const ok = await fetch('http://127.0.0.1:7884/metrics', {
+  const base = metricsBase(m);
+  assert.equal((await fetch(`${base}/metrics`)).status, 401);
+  const ok = await fetch(`${base}/metrics`, {
     headers: { authorization: 'Bearer sekret' },
   });
   assert.equal(ok.status, 200);
@@ -380,3 +387,8 @@ test('a metrics token is enforced when one is set', async () => {
   await m.stop();
   rmSync(dir, { recursive: true, force: true });
 });
+
+/** A hub's HTTP base, with the loopback literal fetch is happy to resolve. */
+function metricsBase(hub) {
+  return hub.dashboardUrl.replace('localhost', '127.0.0.1');
+}

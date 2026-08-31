@@ -16,7 +16,12 @@ import {
 } from '@osqd/notifyjs-protocol';
 import { nodeCrypto } from '@osqd/notifyjs-protocol/node';
 
-const PORT = 7861;
+/**
+ * Chosen by the OS, not by this file. Fixed ports made the suite fail in
+ * bursts whenever a port was still held from an earlier run - every test in
+ * the file at once, for a reason that had nothing to do with the code.
+ */
+let PORT = 0;
 let hub;
 let storeDir;
 
@@ -45,7 +50,7 @@ function once(client, event, timeout = 5000) {
 before(async () => {
   storeDir = mkdtempSync(join(tmpdir(), 'notifyjs-feat-'));
   hub = new Notifier({
-    port: PORT,
+    port: 0,
     storeDir,
     dashboard: false,
     logger: false,
@@ -59,6 +64,7 @@ before(async () => {
     },
   });
   await hub.start();
+  PORT = Number(new URL(hub.url).port);
 });
 
 after(async () => {
@@ -250,7 +256,9 @@ test('a client signs against the hub clock, not its own', async () => {
   const SKEW = 60 * 60_000;
   const captured = [];
 
-  const server = new (await import('ws')).WebSocketServer({ port: 7864 });
+  const server = new (await import('ws')).WebSocketServer({ port: 0 });
+  await new Promise((r) => server.once('listening', r));
+  const fakePort = server.address().port;
   server.on('connection', (ws) => {
     ws.on('message', (raw) => captured.push(JSON.parse(raw.toString())));
     ws.send(
@@ -273,7 +281,7 @@ test('a client signs against the hub clock, not its own', async () => {
   await storage.set('notifyjs.secretSeed', keys.secretSeed);
 
   const client = new NotifyClient({
-    url: 'ws://127.0.0.1:7864',
+    url: `ws://127.0.0.1:${fakePort}`,
     crypto: nodeCrypto,
     storage,
     createSocket: (url) => new WebSocket(url),
@@ -342,21 +350,27 @@ test('an offline device with a push token is woken; an online one is not', async
       res.end('{"data":[]}');
     });
   });
-  await new Promise((r) => pushServer.listen(7862, '127.0.0.1', r));
+  await new Promise((r) => pushServer.listen(0, '127.0.0.1', r));
+  const pushPort = pushServer.address().port;
 
   const dir = mkdtempSync(join(tmpdir(), 'notifyjs-push-'));
   const pushHub = new Notifier({
-    port: 7863,
+    port: 0,
     storeDir: dir,
     dashboard: false,
     logger: false,
-    push: { enabled: true, endpoint: 'http://127.0.0.1:7862/send', includeBody: true },
+    push: {
+      enabled: true,
+      endpoint: `http://127.0.0.1:${pushPort}/send`,
+      includeBody: true,
+    },
     security: { connectionBurst: 500, connectionRefillPerSec: 100, maxConnectionsPerIp: 200 },
   });
   await pushHub.start();
+  const pushHubPort = Number(new URL(pushHub.url).port);
 
   const client = new NotifyClient({
-    url: 'ws://127.0.0.1:7863',
+    url: `ws://127.0.0.1:${pushHubPort}`,
     crypto: nodeCrypto,
     storage: memoryStorage(),
     createSocket: (url) => new WebSocket(url),

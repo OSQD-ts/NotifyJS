@@ -120,7 +120,10 @@ export interface DeviceWatchdogOptions {
 }
 
 export interface NotifierOptions {
-  /** Port for the WebSocket hub and the dashboard. */
+  /**
+   * Port for the WebSocket hub and the dashboard. `0` takes any free port,
+   * which `url`, `publicUrl` and the `listening` event then report back.
+   */
   port?: number;
   host?: string;
   /** Shown to devices during pairing so the user knows what they joined. */
@@ -158,6 +161,15 @@ export interface NotifierOptions {
    * check-ins that are expected more often than once a minute.
    */
   heartbeatTickMs?: number;
+  /**
+   * How often the hub checks that each connected device is still reachable,
+   * and how often it sends proof of life when `deviceWatchdog` is on.
+   *
+   * A socket can be dead without being closed, and nothing else notices: TCP
+   * takes many minutes, and on a quiet connection may never. Until then the hub
+   * counts that device as reached and an escalating call rings it.
+   */
+  livenessIntervalMs?: number;
   /** Serve Prometheus counters at `/metrics`. */
   metrics?: boolean;
   /** Require `Authorization: Bearer <token>` on `/metrics`. */
@@ -215,6 +227,12 @@ export function resolveOptions(o: NotifierOptions = {}): ResolvedOptions {
     defaultRingSeconds: o.defaultRingSeconds ?? 30,
     replayLimit: o.replayLimit ?? 50,
     heartbeatTickMs: o.heartbeatTickMs ?? 5_000,
+    // Matches the device watchdog's own cadence, so a hub with both on sends
+    // one frame and one ping on the same tick rather than two timers' worth.
+    livenessIntervalMs: Math.max(
+      1_000,
+      o.livenessIntervalMs ?? o.deviceWatchdog?.intervalMs ?? 30_000,
+    ),
     metrics: o.metrics ?? true,
     metricsToken: o.metricsToken,
     publicUrl: o.publicUrl,

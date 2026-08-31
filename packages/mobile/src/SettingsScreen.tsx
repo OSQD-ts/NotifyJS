@@ -98,23 +98,6 @@ export function SettingsScreen({
     return () => sub.remove();
   }, []);
 
-  const Section = ({ title, children }: { title: string; children: React.ReactNode }) => (
-    <View style={styles.section}>
-      <Text style={[styles.sectionTitle, { color: t.muted }]}>{title.toUpperCase()}</Text>
-      <View style={[styles.card, { backgroundColor: t.surface, borderColor: t.border }]}>{children}</View>
-    </View>
-  );
-
-  const Row = ({ label, hint, children }: { label: string; hint?: string; children: React.ReactNode }) => (
-    <View style={[styles.row, { borderColor: t.border }]}>
-      <View style={styles.rowText}>
-        <Text style={[styles.rowLabel, { color: t.text }]}>{label}</Text>
-        {hint ? <Text style={[styles.rowHint, { color: t.muted }]}>{hint}</Text> : null}
-      </View>
-      {children}
-    </View>
-  );
-
   return (
     <View style={[styles.root, { backgroundColor: t.bg }]}>
       <View style={[styles.header, { backgroundColor: t.surface, borderColor: t.border }]}>
@@ -125,7 +108,7 @@ export function SettingsScreen({
       </View>
 
       <ScrollView contentContainerStyle={styles.body}>
-        <Section title={`Sources (${sources.length})`}>
+        <Section theme={t} title={`Sources (${sources.length})`}>
           {sources.length === 0 ? (
             <Text style={[styles.empty, { color: t.muted }]}>
               Not connected to anything yet. Add a hub to start receiving alerts.
@@ -179,8 +162,8 @@ export function SettingsScreen({
           </TouchableOpacity>
         </Section>
 
-        <Section title="This device">
-          <Row label="Name" hint="How this device appears in each hub's device list">
+        <Section theme={t} title="This device">
+          <Row theme={t} label="Name" hint="How this device appears in each hub's device list">
             <View />
           </Row>
           <TextInput
@@ -193,8 +176,9 @@ export function SettingsScreen({
           />
         </Section>
 
-        <Section title="Alerts">
+        <Section theme={t} title="Alerts">
           <Row
+            theme={t}
             label="Show at least"
             hint="Narrows what you see. It can never show more than your role allows."
           >
@@ -223,22 +207,22 @@ export function SettingsScreen({
             })}
           </View>
 
-          <Row label="Sound">
+          <Row theme={t} label="Sound">
             <Switch value={prefs.sound} onValueChange={(v) => onChange({ sound: v })} />
           </Row>
-          <Row label="Vibrate">
+          <Row theme={t} label="Vibrate">
             <Switch value={prefs.vibrate} onValueChange={(v) => onChange({ vibrate: v })} />
           </Row>
         </Section>
 
-        <Section title="Calls">
-          <Row label="Speak the message" hint="Read the alert aloud when you answer">
+        <Section theme={t} title="Calls">
+          <Row theme={t} label="Speak the message" hint="Read the alert aloud when you answer">
             <Switch
               value={prefs.speech.enabled}
               onValueChange={(v) => onChange({ speech: { ...prefs.speech, enabled: v } })}
             />
           </Row>
-          <Row label="Speed" hint={`${prefs.speech.rate.toFixed(1)}x`}>
+          <Row theme={t} label="Speed" hint={`${prefs.speech.rate.toFixed(1)}x`}>
             <View style={styles.stepper}>
               <Stepper
                 onPress={() => onChange({ speech: { ...prefs.speech, rate: prefs.speech.rate - 0.1 } })}
@@ -252,7 +236,7 @@ export function SettingsScreen({
               />
             </View>
           </Row>
-          <Row label="Repeat" hint={`${prefs.speech.repeat}x`}>
+          <Row theme={t} label="Repeat" hint={`${prefs.speech.repeat}x`}>
             <View style={styles.stepper}>
               <Stepper
                 onPress={() => onChange({ speech: { ...prefs.speech, repeat: prefs.speech.repeat - 1 } })}
@@ -268,8 +252,8 @@ export function SettingsScreen({
           </Row>
         </Section>
 
-        <Section title="About">
-          <Row label="Version" hint={`NotifyJS ${currentVersion()}`}>
+        <Section theme={t} title="About">
+          <Row theme={t} label="Version" hint={`NotifyJS ${currentVersion()}`}>
             <View />
           </Row>
 
@@ -303,8 +287,9 @@ export function SettingsScreen({
         </Section>
 
         {Platform.OS === 'android' ? (
-          <Section title="Background">
+          <Section theme={t} title="Background">
             <Row
+              theme={t}
               label="Stay connected"
               hint="Keeps alerts arriving when the app is closed. Shows a permanent notification, which is what Android charges for the privilege."
             >
@@ -337,6 +322,56 @@ export function SettingsScreen({
           </Section>
         ) : null}
       </ScrollView>
+    </View>
+  );
+}
+
+/**
+ * Defined at module scope, not inside the screen.
+ *
+ * A component declared in a render body is a new function identity on every
+ * render, so React treats it as a different component type and remounts its
+ * whole subtree. That destroyed the device-name `TextInput` on every keystroke
+ * - `onChangeText` set state, the screen re-rendered, and the field it had
+ * just been typed into was replaced by a fresh one, dismissing the keyboard.
+ */
+function Section({
+  title,
+  theme,
+  children,
+}: {
+  title: string;
+  theme: ReturnType<typeof useTheme>;
+  children: React.ReactNode;
+}) {
+  return (
+    <View style={styles.section}>
+      <Text style={[styles.sectionTitle, { color: theme.muted }]}>{title.toUpperCase()}</Text>
+      <View style={[styles.card, { backgroundColor: theme.surface, borderColor: theme.border }]}>
+        {children}
+      </View>
+    </View>
+  );
+}
+
+function Row({
+  label,
+  hint,
+  theme,
+  children,
+}: {
+  label: string;
+  hint?: string;
+  theme: ReturnType<typeof useTheme>;
+  children: React.ReactNode;
+}) {
+  return (
+    <View style={[styles.row, { borderColor: theme.border }]}>
+      <View style={styles.rowText}>
+        <Text style={[styles.rowLabel, { color: theme.text }]}>{label}</Text>
+        {hint ? <Text style={[styles.rowHint, { color: theme.muted }]}>{hint}</Text> : null}
+      </View>
+      {children}
     </View>
   );
 }

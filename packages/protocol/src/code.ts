@@ -39,6 +39,30 @@ function group(raw: string): string {
 }
 
 /**
+ * Formats a pairing code as somebody types it: uppercased, stripped of
+ * anything that is not a code character, capped at the code's length, and
+ * grouped for reading.
+ *
+ * Lives beside `encodePairingCode` because it mirrors that function's output.
+ * The dashboard, the phone and the desktop app each had their own identical
+ * copy, all hardcoding the length rather than using `PAIRING_CODE_LENGTH` -
+ * which meant a change to how a code is shaped would have to be made in four
+ * places and would be silently wrong in whichever one was missed.
+ *
+ * Deliberately not `normalizePairingCode`: that maps O to 0 and I to 1 for
+ * comparison, which is the right answer for redeeming a code and the wrong one
+ * for a text field, where a character has to stay as typed until the field is
+ * left. Grouping is presentation; normalising is meaning.
+ */
+export function formatPairingCode(raw: string): string {
+  return raw
+    .toUpperCase()
+    .replace(/[^0-9A-Z]/g, '')
+    .slice(0, PAIRING_CODE_LENGTH)
+    .replace(/(.{4})(?=.)/g, '$1-');
+}
+
+/**
  * Accepts whatever the user actually typed — lowercase, spaces, missing or
  * extra dashes, and the letters Crockford maps onto digits.
  */

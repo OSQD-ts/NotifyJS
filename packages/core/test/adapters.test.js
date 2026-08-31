@@ -29,7 +29,7 @@ function sink() {
 before(async () => {
   storeDir = mkdtempSync(join(tmpdir(), 'notifyjs-adp-'));
   hub = new Notifier({
-    port: 7891,
+    port: 0,
     storeDir,
     dashboard: false,
     logger: false,
@@ -93,7 +93,7 @@ test('a session stops writing once its peer stops draining', async () => {
 test('a real device that never reads is disconnected by the hub', async () => {
   let socket;
   const client = new NotifyClient({
-    url: 'ws://127.0.0.1:7891',
+    url: `ws://127.0.0.1:${Number(new URL(hub.url).port)}`,
     crypto: nodeCrypto,
     storage: memoryStorage(),
     createSocket: (url) => {

@@ -8,5 +8,11 @@
     "lib": ["ES2022", "DOM", "DOM.Iterable"],
     "types": []
   },
-  "include": ["src/**/*.ts"]
+  "include": ["src/**/*.ts"],
+  // Declared so `tsc -b` knows this project is out of date when the protocol's
+  // types change. Without it the dashboard was rebuilt only when its own
+  // sources moved: a protocol change that broke this code compiled clean and
+  // the monorepo build reported success, in the one package that is not
+  // covered by a typecheck anywhere else.
+  "references": [{ "path": "../protocol" }]
 }

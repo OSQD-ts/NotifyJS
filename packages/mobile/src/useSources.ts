@@ -23,6 +23,7 @@ import {
   stopWatching,
 } from '../modules/notifyjs-call';
 import { nobleCrypto } from './crypto';
+import { getPushToken } from './push';
 import { secureStorage } from './storage';
 
 const PREFS_KEY = 'notifyjs_preferences';
@@ -194,6 +195,53 @@ export function useSources() {
     if (shouldWatch) startWatching('NotifyJS');
     else if (loaded) stopWatching();
   }, [loaded, shouldWatch]);
+
+  /**
+   * Hands each hub a wake-up token for this phone.
+   *
+   * Without this the whole push path is inert: the hub filters its wake-ups to
+   * devices that have registered a token, and no device ever had. The feature
+   * shipped complete on both sides of the wire and unconnected in the middle,
+   * so a phone whose app had been swiped away simply heard nothing.
+   *
+   * Registered per source, because each subscription is a separate identity
+   * with its own device record on its own hub. Re-registered whenever a source
+   * comes back to ready, since Expo rotates tokens and a hub only keeps the
+   * most recent one it was told about.
+   */
+  const registeredRef = useRef(new Set<string>());
+  const readyIds = sources
+    .filter((s) => s.status === 'ready')
+    .map((s) => s.id)
+    .sort()
+    .join(',');
+
+  useEffect(() => {
+    const ready = new Set(readyIds ? readyIds.split(',') : []);
+    // A source that dropped should register again when it returns.
+    for (const id of registeredRef.current) {
+      if (!ready.has(id)) registeredRef.current.delete(id);
+    }
+
+    const pending = [...ready].filter((id) => !registeredRef.current.has(id));
+    if (pending.length === 0) return;
+
+    let cancelled = false;
+    void (async () => {
+      // Resolves to undefined on a simulator, or when the user declined
+      // notification permission - both ordinary outcomes, not failures.
+      const token = await getPushToken();
+      if (cancelled || !token) return;
+      for (const id of pending) {
+        registeredRef.current.add(id);
+        manager.registerPush(id, token);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [manager, readyIds]);
 
   const savePrefs = useCallback(
     async (patch: Partial<ClientPreferences>) => {

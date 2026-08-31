@@ -156,10 +156,19 @@ jobs:
           # since a packaged build cannot resolve @osqd/notifyjs-web as a module.
           curl -sf http://127.0.0.1:7799/health > /dev/null
           curl -sf http://127.0.0.1:7799/ > /dev/null
-          curl -sf http://127.0.0.1:7799/app.js > /dev/null
+          curl -sf http://127.0.0.1:7799/app.js -o /tmp/app.js
+
+          # Serving the file is not the same as the browser being able to run
+          # it. A stale import rewrite once shipped an app.js that 200s here and
+          # throws on load, because its specifier is one no browser can resolve.
+          if grep -nE "^(import|export)[^'\"]*from ['\"][^./]" /tmp/app.js; then
+            echo "dashboard has a bare import specifier; it will not load" >&2
+            exit 1
+          fi
+
           grep -qE '[0-9A-Z]{4}-[0-9A-Z]{4}-[0-9A-Z]{4}' serve.log
 
-          echo "packaged binary serves the dashboard and issues pairing codes"
+          echo "packaged binary serves a loadable dashboard and issues pairing codes"
 
   desktop:
     name: Desktop app packages

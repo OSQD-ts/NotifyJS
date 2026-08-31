@@ -147,23 +147,19 @@ class NotifyjsCallModule : Module() {
      * stretches - which is exactly the night-time hour an alert matters most.
      */
     Function("isBatteryOptimized") {
+      // Doze, and this API, arrived in API 23 - which is this module's floor,
+      // so the only question left is whether the service is there at all.
       val power = context.getSystemService(Context.POWER_SERVICE) as? PowerManager
-      if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M || power == null) {
-        false
-      } else {
-        power.isIgnoringBatteryOptimizations(context.packageName).not()
-      }
+      power?.isIgnoringBatteryOptimizations(context.packageName)?.not() ?: false
     }
 
     Function("openBatterySettings") {
-      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-        // The direct request dialog needs REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
-        // which Play treats as a policy matter; the settings list asks the user
-        // the same question without it.
-        val intent = Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)
-          .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-        runCatching { context.startActivity(intent) }
-      }
+      // The direct request dialog needs REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+      // which Play treats as a policy matter; the settings list asks the user
+      // the same question without it.
+      val intent = Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)
+        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+      runCatching { context.startActivity(intent) }
       Unit
     }
 

@@ -131,8 +131,29 @@ export async function downloadAndInstall(
   });
 }
 
+/**
+ * How long any single update request may hang before it is given up on.
+ *
+ * `AbortController` with a timer rather than `AbortSignal.timeout`, which is
+ * not present on every React Native runtime this ships to.
+ */
+const UPDATE_REQUEST_TIMEOUT_MS = 60_000;
+
+async function fetchWithTimeout(url: string): Promise<Response> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), UPDATE_REQUEST_TIMEOUT_MS);
+  try {
+    return await fetch(url, { signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 async function fetchExpectedDigest(update: AppUpdate): Promise<string> {
-  const response = await fetch(update.checksumUrl);
+  // Bounded like the CLI's equivalent. This is the step that decides whether an
+  // APK is safe to install, and a connection that stalls rather than fails
+  // leaves the update screen spinning with no way forward.
+  const response = await fetchWithTimeout(update.checksumUrl);
   if (!response.ok) {
     throw new Error(`could not read the release checksums (HTTP ${response.status})`);
   }

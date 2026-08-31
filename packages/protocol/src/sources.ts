@@ -292,23 +292,31 @@ export class SourceManager {
     this.wire(source, client);
 
     if (pairingCode) {
+      let settle: (() => void) | undefined;
       const ready = new Promise<void>((resolve, reject) => {
         const timer = setTimeout(() => reject(new Error('the hub did not respond')), 20_000);
-        const offReady = client.on('ready', () => {
+        const offReady = client.on('ready', () => resolve());
+        const offError = client.on('error', (e) => reject(new Error(e.message)));
+        settle = () => {
           clearTimeout(timer);
           offReady();
           offError();
-          resolve();
-        });
-        const offError = client.on('error', (e) => {
-          clearTimeout(timer);
-          offReady();
-          offError();
-          reject(new Error(e.message));
-        });
+        };
       });
-      await client.pair(pairingCode);
-      await ready;
+      // Attached before anything can throw. `client.pair()` rejects for
+      // ordinary reasons - a hub that moved, a socket refused - and the
+      // 20-second timer above would then reject a promise nobody was left
+      // awaiting, surfacing as an unhandled rejection well after the caller
+      // had already been told what went wrong.
+      ready.catch(() => {});
+      try {
+        await client.pair(pairingCode);
+        await ready;
+      } finally {
+        // The timer and both listeners go either way, so a failed pairing does
+        // not leave a handler attached to a client that is about to be dropped.
+        settle?.();
+      }
     } else {
       await client.connect();
     }

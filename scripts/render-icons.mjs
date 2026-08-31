@@ -8,7 +8,7 @@
  *   node scripts/render-icons.mjs
  */
 import sharp from 'sharp';
-import { mkdirSync } from 'node:fs';
+import { copyFileSync, mkdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 
@@ -71,6 +71,5 @@ console.log('  desktop icon.png + tray.png');
 
 // The dashboard serves its own favicon, so it gets the vector directly.
 await sharp(join(src, 'icon.svg')).resize(196, 196).png().toFile(join(web, 'favicon.png'));
-const { copyFileSync } = await import('node:fs');
 copyFileSync(join(src, 'icon.svg'), join(web, 'icon.svg'));
 console.log('  dashboard favicon.png + icon.svg');

@@ -1,4 +1,9 @@
-import { SEVERITIES, isPairingCodeValid, parsePairingLink } from '@osqd/notifyjs-protocol';
+import {
+  SEVERITIES,
+  formatPairingCode,
+  isPairingCodeValid,
+  parsePairingLink,
+} from '@osqd/notifyjs-protocol';
 import type { AppState, FeedEntry, Severity, SourceState } from '../shared.js';
 import { button, el, toggle } from './dom.js';
 
@@ -66,7 +71,7 @@ export function feedScreen(state: AppState, actions: Actions, filter: Severity |
 
   const visible = state.feed.filter((e) => filter === 'all' || e.notification.severity === filter);
 
-  const list = el('ul', { class: 'feed' });
+  const list = el('ul', { id: 'feed-list', class: 'feed' });
   if (visible.length === 0) {
     list.append(
       el('li', {
@@ -131,17 +136,11 @@ function feedItem(entry: FeedEntry): HTMLElement {
 
 /* -------------------------------- pair ------------------------------ */
 
-/** Formats a pairing code as it is typed: XXXX-XXXX-XXXX. */
-export function formatCode(raw: string): string {
-  return raw
-    .toUpperCase()
-    .replace(/[^0-9A-Z]/g, '')
-    .slice(0, 12)
-    .replace(/(.{4})(?=.)/g, '$1-');
-}
-
 export function pairScreen(state: AppState, actions: Actions): HTMLElement {
   const codeInput = el('input', {
+    // Identified so a re-render can hand focus and half-typed text back; see
+    // `preserveLiveState` in index.ts.
+    id: 'pair-code',
     class: 'field code',
     placeholder: 'XXXX-XXXX-XXXX',
     maxlength: 14,
@@ -149,6 +148,7 @@ export function pairScreen(state: AppState, actions: Actions): HTMLElement {
     'aria-label': 'Pairing code',
   });
   const urlInput = el('input', {
+    id: 'pair-url',
     class: 'field',
     placeholder: 'ws://192.168.1.10:7741',
     spellcheck: 'false',
@@ -167,10 +167,10 @@ export function pairScreen(state: AppState, actions: Actions): HTMLElement {
     const link = parsePairingLink(codeInput.value.trim());
     if (link) {
       urlInput.value = link.hub;
-      codeInput.value = formatCode(link.code);
+      codeInput.value = formatPairingCode(link.code);
       return;
     }
-    codeInput.value = formatCode(codeInput.value);
+    codeInput.value = formatPairingCode(codeInput.value);
   });
   codeInput.addEventListener('keydown', (e) => {
     if ((e as KeyboardEvent).key === 'Enter') void pair();
@@ -245,7 +245,12 @@ export function settingsScreen(state: AppState, actions: Actions): HTMLElement {
       button('+', inc, { 'aria-label': 'increase' }),
     );
 
-  const nameField = el('input', { class: 'field', value: prefs.deviceName, 'aria-label': 'Device name' });
+  const nameField = el('input', {
+    id: 'pref-name',
+    class: 'field',
+    value: prefs.deviceName,
+    'aria-label': 'Device name',
+  });
   nameField.addEventListener('change', () => actions.savePrefs({ deviceName: nameField.value }));
 
   return el(
@@ -259,7 +264,7 @@ export function settingsScreen(state: AppState, actions: Actions): HTMLElement {
     ),
     el(
       'div',
-      { class: 'scroll' },
+      { id: 'settings-scroll', class: 'scroll' },
       section(
         `Sources (${state.sources.length})`,
         state.sources.length === 0

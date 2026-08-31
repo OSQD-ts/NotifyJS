@@ -10,7 +10,7 @@ import {
   TouchableOpacity,
   View,
 } from 'react-native';
-import { isPairingCodeValid } from '@osqd/notifyjs-protocol';
+import { formatPairingCode, isPairingCodeValid } from '@osqd/notifyjs-protocol';
 import { useTheme } from './theme';
 
 interface Props {
@@ -22,15 +22,6 @@ interface Props {
   busy: boolean;
   /** Present only when there is already a source to go back to. */
   onCancel?(): void;
-}
-
-/** Formats as the user types: XXXX-XXXX-XXXX. */
-function format(raw: string): string {
-  return raw
-    .toUpperCase()
-    .replace(/[^0-9A-Z]/g, '')
-    .slice(0, 12)
-    .replace(/(.{4})(?=.)/g, '$1-');
 }
 
 export function PairScreen({ onPair, onScan, hubUrl, onChangeHub, error, busy, onCancel }: Props) {
@@ -73,7 +64,7 @@ export function PairScreen({ onPair, onScan, hubUrl, onChangeHub, error, busy, o
 
         <TextInput
           value={code}
-          onChangeText={(v) => setCode(format(v))}
+          onChangeText={(v) => setCode(formatPairingCode(v))}
           placeholder="XXXX-XXXX-XXXX"
           placeholderTextColor={t.muted}
           autoCapitalize="characters"

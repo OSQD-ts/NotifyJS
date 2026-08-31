@@ -15,7 +15,12 @@ import {
 } from '@osqd/notifyjs-protocol';
 import { nodeCrypto } from '@osqd/notifyjs-protocol/node';
 
-const PORT = 7854;
+/**
+ * Chosen by the OS, not by this file. Fixed ports made the suite fail in
+ * bursts whenever a port was still held from an earlier run - every test in
+ * the file at once, for a reason that had nothing to do with the code.
+ */
+let PORT = 0;
 let hub;
 let storeDir;
 
@@ -65,7 +70,7 @@ function raw(port = PORT) {
 before(async () => {
   storeDir = mkdtempSync(join(tmpdir(), 'notifyjs-sec-'));
   hub = new Notifier({
-    port: PORT,
+    port: 0,
     storeDir,
     dashboard: false,
     logger: false,
@@ -82,6 +87,7 @@ before(async () => {
     },
   });
   await hub.start();
+  PORT = Number(new URL(hub.url).port);
 });
 
 after(async () => {
@@ -258,7 +264,7 @@ test('a revoked device cannot authenticate again', async () => {
 test('guessing pairing codes gets the source banned', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'notifyjs-ban-'));
   const strict = new Notifier({
-    port: 7855,
+    port: 0,
     storeDir: dir,
     dashboard: false,
     logger: false,
@@ -272,13 +278,14 @@ test('guessing pairing codes gets the source banned', async () => {
     },
   });
   await strict.start();
+  const strictPort = Number(new URL(strict.url).port);
 
   const bans = [];
   strict.on('banned', (b) => bans.push(b));
 
   // Each guess is a well-formed but wrong code, so it reaches the lookup.
   for (let i = 0; i < 3; i++) {
-    const c = raw(7855);
+    const c = raw(strictPort);
     await c.next();
     c.send({
       v: PROTOCOL_VERSION,
@@ -296,7 +303,7 @@ test('guessing pairing codes gets the source banned', async () => {
   assert.ok(bans[0].until > Date.now(), 'ban is in the future');
 
   // Further attempts are now refused at the TCP upgrade, before any protocol.
-  const blocked = new WebSocket('ws://127.0.0.1:7855');
+  const blocked = new WebSocket(`ws://127.0.0.1:${strictPort}`);
   const outcome = await new Promise((resolve) => {
     blocked.on('unexpected-response', (_req, res) => resolve(res.statusCode));
     blocked.on('error', () => resolve('error'));

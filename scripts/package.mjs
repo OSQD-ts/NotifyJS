@@ -41,8 +41,27 @@ mkdirSync(staging, { recursive: true });
 const run = (cmd, args, cwd = root) =>
   execFileSync(cmd, args, { cwd, stdio: 'inherit' });
 
-run('npx', [
-  'pkg',
+/**
+ * The packager from this repo's own devDependencies, by path.
+ *
+ * `npx pkg` resolves the local binary when it is installed and otherwise
+ * downloads whatever is published as `pkg` - a different, deprecated package
+ * from the pinned `@yao-pkg/pkg` this project builds with. That is not a
+ * fallback worth having on the step that produces a released executable.
+ */
+// `isWindows` is the *target* platform; the shim's name depends on the host
+// this script is running on, which is a different question when cross-building.
+const packager = join(
+  root,
+  'node_modules',
+  '.bin',
+  process.platform === 'win32' ? 'pkg.cmd' : 'pkg',
+);
+if (!existsSync(packager)) {
+  throw new Error('the packager is not installed - run `npm ci` at the repo root first');
+}
+
+run(packager, [
   join(build, 'notifyjs.cjs'),
   '--targets',
   values.target,

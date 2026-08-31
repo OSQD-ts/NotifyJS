@@ -8,8 +8,9 @@
 export class Ringer {
   private ctx: AudioContext | undefined;
   private timer: ReturnType<typeof setInterval> | undefined;
+  private deadline: ReturnType<typeof setTimeout> | undefined;
 
-  start(): void {
+  start(ringSeconds?: number): void {
     if (this.timer) return;
     // Constructed lazily: an AudioContext made before the window is shown
     // starts suspended on some platforms and never recovers on its own.
@@ -24,11 +25,15 @@ export class Ringer {
     };
     ring();
     this.timer = setInterval(ring, 2000);
+
+    this.deadline = setTimeout(() => this.stop(), maxRingMs(ringSeconds));
   }
 
   stop(): void {
     if (this.timer) clearInterval(this.timer);
     this.timer = undefined;
+    if (this.deadline) clearTimeout(this.deadline);
+    this.deadline = undefined;
   }
 
   private tone(at: number, duration: number): void {
@@ -88,4 +93,25 @@ export async function speak(
 
 export function stopSpeaking(): void {
   globalThis.speechSynthesis?.cancel();
+}
+
+  /**
+   * A ring nobody stops has to stop itself.
+   *
+   * Every normal ending arrives from somewhere else - the user answering, or
+   * the hub sending `call.cancel` when the rung times out. A hub that dies
+   * mid-call sends neither, and the ring then continues for as long as the
+   * page is open. The Android ringer has always had this backstop; these did
+   * not.
+   *
+   * Bounded by the call's own ring duration plus a margin, so it can only ever
+   * fire after the hub should already have spoken - never cutting a long
+   * escalation rung short.
+   */
+export function maxRingMs(ringSeconds?: number): number {
+  const requested = Number(ringSeconds);
+  const seconds = Number.isFinite(requested) && requested > 0 ? requested : 60;
+  // Clamped so neither a missing value nor a hostile one leaves the speaker on
+  // for the rest of the day.
+  return Math.min(Math.max(seconds + 15, 30), 15 * 60) * 1000;
 }

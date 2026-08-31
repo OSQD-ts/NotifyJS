@@ -23,13 +23,34 @@ export class Guard {
   private ips = new Map<string, IpState>();
   private unauthenticated = 0;
   private sweeper: NodeJS.Timeout | undefined;
+  /**
+   * Built once rather than scanned per connection. These lists are an
+   * operator's allow/deny rules and can run to thousands of entries; walking
+   * them on every TCP upgrade puts an attacker's own connection rate in charge
+   * of how much work the hub does before it has rejected them.
+   */
+  private readonly denyIps: ReadonlySet<string>;
+  private readonly allowIps: ReadonlySet<string> | undefined;
 
   constructor(
     private readonly sec: SecurityOptions,
     private readonly store: Store,
   ) {
-    // Without this, a scan across a /16 would leave 65k IpState entries
-    // resident forever — a slow memory leak driven by unauthenticated traffic.
+    this.denyIps = new Set(sec.denyIps ?? []);
+    this.allowIps = sec.allowIps ? new Set(sec.allowIps) : undefined;
+    this.start();
+  }
+
+  /**
+   * Arms the sweeper. Idempotent, and safe to call again after `stop()`.
+   *
+   * Separate from the constructor because a hub can be stopped and started
+   * again: armed only at construction, the sweeper stayed dead after the first
+   * restart, and a scan across a /16 would leave 65k IpState entries resident
+   * forever - the slow memory leak this exists to prevent.
+   */
+  start(): void {
+    if (this.sweeper) return;
     this.sweeper = setInterval(() => this.sweep(), 60_000);
     this.sweeper.unref?.();
   }
@@ -41,10 +62,10 @@ export class Guard {
 
   /** Called on TCP upgrade, before a WebSocket session exists. */
   admit(ip: string): Allowance | Rejection {
-    if (this.sec.denyIps?.includes(ip)) {
+    if (this.denyIps.has(ip)) {
       return { ok: false, reason: 'denied', retryAfter: 3600 };
     }
-    if (this.sec.allowIps && !this.sec.allowIps.includes(ip)) {
+    if (this.allowIps && !this.allowIps.has(ip)) {
       return { ok: false, reason: 'denied', retryAfter: 3600 };
     }
 
