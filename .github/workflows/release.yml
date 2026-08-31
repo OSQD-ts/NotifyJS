@@ -65,12 +65,19 @@ jobs:
           echo "version looks well formed"
 
   # ---------------------------------------------------------------------
-  # Standalone hub executables. pkg cross-compiles every target from one
-  # Linux runner, so there is no need for a per-OS matrix of machines.
+  # SERVER. Standalone hub executables - the process an app publishes to and
+  # the clients subscribe to. pkg cross-compiles every target from one Linux
+  # runner, so there is no need for a per-OS matrix of machines.
+  #
+  # These asset names are load-bearing. A hub that updates itself matches them
+  # with `notifyjs-<os>-<arch>.(tar.gz|zip)` (packages/cli/src/selfupdate.ts),
+  # so renaming one silently strands every binary already installed. That is
+  # why the split between servers and clients lives in the release notes and
+  # in the client names, and leaves these alone.
   # ---------------------------------------------------------------------
   binaries:
     needs: validate
-    name: ${{ matrix.name }}
+    name: Server binary ${{ matrix.name }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -125,10 +132,103 @@ jobs:
           if-no-files-found: error
 
   # ---------------------------------------------------------------------
-  # Android APK, for sideloading onto a phone.
+  # CLIENT. The desktop app, as a real installer for each platform.
+  #
+  # This is the one job that has to pay for a per-OS matrix of machines: a
+  # .dmg needs macOS to build the disk image, and an NSIS installer needs
+  # Windows. Only Linux could have been cross-built, and keeping it in the
+  # same matrix costs nothing.
+  # ---------------------------------------------------------------------
+  desktop:
+    needs: validate
+    name: Desktop client (${{ matrix.os }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: linux
+            runner: ubuntu-latest
+            script: dist:linux
+          - os: macos
+            runner: macos-latest
+            script: dist:mac
+          - os: windows
+            runner: windows-latest
+            script: dist:win
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 20
+          cache: npm
+
+      - run: npm ci
+
+      # Two things the desktop build cannot start without. It depends on
+      # @osqd/notifyjs-protocol through `file:../protocol`, whose entry point is
+      # that package's build output; and its icons are rendered from
+      # assets/icon.svg rather than checked in, which is the single PNG
+      # electron-builder turns into .icns, .ico and the Linux icon set.
+      - name: Build workspace packages
+        run: npm run build
+
+      # `ci`, not `install`: this job produces an installer people run, so the
+      # dependency tree behind it has to be the one in the lockfile.
+      - name: Install desktop dependencies
+        working-directory: packages/desktop
+        run: npm ci
+
+      # packages/desktop is private, so set-version.mjs never touches it - but
+      # its version is what the app reports to a hub and shows in its settings.
+      # Only for a tag: `latest` is not a version electron-builder, or any of
+      # the three installer formats, will accept, so a rolling build keeps
+      # whatever the manifest says.
+      - name: Stamp the release version
+        if: env.IS_TAG == 'true'
+        shell: bash
+        env:
+          VERSION: ${{ env.NOTIFYJS_VERSION }}
+        run: |
+          node -e '
+            const fs = require("fs");
+            const path = "packages/desktop/package.json";
+            const json = JSON.parse(fs.readFileSync(path, "utf8"));
+            json.version = process.env.VERSION.replace(/^v/, "");
+            fs.writeFileSync(path, JSON.stringify(json, null, 2) + "\n");
+            console.log("desktop is now " + json.version);
+          '
+
+      # These builds are unsigned. Left to itself electron-builder signs with
+      # whatever certificate happens to be in the runner's keychain, which
+      # produces a build nobody else can reproduce.
+      - name: Build the installers
+        working-directory: packages/desktop
+        shell: bash
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+          SCRIPT: ${{ matrix.script }}
+        run: npm run "$SCRIPT"
+
+      # Named extensions rather than the whole directory: electron-builder also
+      # writes builder-debug.yml and .blockmap sidecars, which are build
+      # detritus rather than anything to publish.
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: notifyjs-desktop-${{ matrix.os }}
+          path: |
+            packages/desktop/release/*.AppImage
+            packages/desktop/release/*.deb
+            packages/desktop/release/*.dmg
+            packages/desktop/release/*.exe
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------
+  # CLIENT. Android APK, for sideloading onto a phone.
   # ---------------------------------------------------------------------
   android:
-    name: Android APK
+    name: Android client (APK)
     needs: validate
     runs-on: ubuntu-latest
     # Best effort: a broken native build must not hold back the hub binaries,
@@ -239,8 +339,8 @@ jobs:
           if-no-files-found: error
 
   # ---------------------------------------------------------------------
-  # The dashboard on its own, for anyone serving it from their own web server
-  # instead of from the hub.
+  # SERVER. The dashboard on its own, for anyone serving it from their own web
+  # server instead of from the hub.
   # ---------------------------------------------------------------------
   dashboard:
     name: Dashboard bundle
@@ -425,7 +525,7 @@ jobs:
   # ---------------------------------------------------------------------
   release:
     name: Publish release
-    needs: [validate, binaries, android, dashboard]
+    needs: [validate, binaries, desktop, android, dashboard]
     runs-on: ubuntu-latest
     permissions:
       # Creating the release and uploading its assets.
@@ -478,7 +578,84 @@ jobs:
           cat > notes.md <<NOTES
           $HEADER
 
-          ## Downloads
+          Two kinds of download here, and a working setup needs one of each.
+          A **client** is what alerts you: the app on the machine or phone in
+          front of you. A **server** is the hub your own code publishes to,
+          and the thing every client subscribes to. They do not have to be on
+          the same machine, and one hub happily feeds every client you own.
+
+          ## Clients
+
+          | Platform | File |
+          | --- | --- |
+          | Windows (x64) | \`notifyjs-desktop-windows-x64-setup.exe\` |
+          | macOS (Apple silicon) | \`notifyjs-desktop-macos-arm64.dmg\` |
+          | macOS (Intel) | \`notifyjs-desktop-macos-x64.dmg\` |
+          | Linux (x64) | \`notifyjs-desktop-linux-x86_64.AppImage\`, \`notifyjs-desktop-linux-amd64.deb\` |
+          | Linux (arm64) | \`notifyjs-desktop-linux-arm64.AppImage\`, \`notifyjs-desktop-linux-arm64.deb\` |
+          | Android (phone) | ${APK_CELL} |
+
+          Install it, open it, and pair by pasting the hub's pairing link or
+          typing the twelve-character code it printed.
+
+          The desktop app lives in the tray. Closing the window hides it and
+          changes nothing about what is delivered — an alerting client that
+          stops listening when you dismiss its window is not an alerting
+          client — and the tray menu carries the connection count, a snooze,
+          and the only real quit. **Start at login** is in Settings, next to
+          **start hidden**, which is the setting you want if it is going to
+          launch itself every morning.
+
+          ### Windows
+
+          Run the \`.exe\`. It installs for the current user, so it never asks
+          for an administrator, and you can change the install directory on
+          the way through. Uninstall from Settings → Apps like anything else.
+
+          ### macOS
+
+          Open the \`.dmg\` and drag NotifyJS into Applications. The app is
+          unsigned, so Gatekeeper blocks the first launch: right-click it and
+          choose **Open**, or clear the flag yourself.
+
+          \`\`\`bash
+          xattr -dr com.apple.quarantine /Applications/NotifyJS.app
+          \`\`\`
+
+          ### Linux
+
+          The AppImage is the whole install — it carries its own Electron:
+
+          \`\`\`bash
+          chmod +x notifyjs-desktop-linux-x86_64.AppImage
+          ./notifyjs-desktop-linux-x86_64.AppImage
+          \`\`\`
+
+          The \`.deb\` is the better answer if you would rather have it
+          system-wide and in the menu. It installs to \`/opt/NotifyJS\` and
+          declares its GTK and libnotify dependencies, so apt catches a machine
+          that is missing them:
+
+          \`\`\`bash
+          sudo dpkg -i notifyjs-desktop-linux-amd64.deb
+          \`\`\`
+
+          The executable is \`notifyjs-desktop\`, deliberately not
+          \`notifyjs\` — that name belongs to the hub CLI below, and one of
+          them shadowing the other on \`PATH\` would be a mean surprise.
+
+          ### Android
+
+          Download the \`.apk\` straight onto the phone and open it. Android
+          will warn about an unknown source; allow it for your browser or file
+          manager once. The APK is signed with a debug key unless release
+          signing secrets are configured.
+
+          After pairing, grant **notifications** and, when prompted, **full-screen
+          alerts** — the second is what lets an incoming call take over a locked
+          screen rather than appearing as a banner.
+
+          ## Servers
 
           | Platform | File |
           | --- | --- |
@@ -487,7 +664,7 @@ jobs:
           | macOS (Apple silicon) | \`notifyjs-macos-arm64.tar.gz\` |
           | macOS (Intel) | \`notifyjs-macos-x64.tar.gz\` |
           | Windows (x64) | \`notifyjs-windows-x64.zip\` |
-          | Android (phone) | ${APK_CELL} |
+          | Container | \`${IMAGE}\` |
           | Dashboard only | \`notifyjs-dashboard.zip\` |
 
           Nothing here needs Node.js installed.
@@ -501,7 +678,8 @@ jobs:
           \`\`\`
 
           It prints a pairing code. Open <http://localhost:7741>, enter the
-          code, and the browser becomes a connected device. Keep the
+          code, and the browser becomes a connected device — the quickest way
+          to check the hub works before installing anything else. Keep the
           \`dashboard\` directory next to the binary.
 
           ### Container
@@ -511,27 +689,16 @@ jobs:
             ${IMAGE}:${VERSION#v}
           \`\`\`
 
-          ### Android
-
-          Download the \`.apk\` straight onto the phone and open it. Android
-          will warn about an unknown source; allow it for your browser or file
-          manager once. The APK is signed with a debug key unless release
-          signing secrets are configured.
-
-          After pairing, grant **notifications** and, when prompted, **full-screen
-          alerts** — the second is what lets an incoming call take over a locked
-          screen rather than appearing as a banner.
-
           ### macOS
 
-          The binaries are unsigned, so Gatekeeper will refuse them until you
-          clear the quarantine flag:
+          The hub binaries are unsigned too, so clear the quarantine flag
+          before running one:
 
           \`\`\`bash
           xattr -d com.apple.quarantine ./notifyjs
           \`\`\`
 
-          ### Verify a download
+          ## Verify a download
 
           \`\`\`bash
           sha256sum -c SHA256SUMS.txt --ignore-missing

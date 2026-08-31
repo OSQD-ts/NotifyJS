@@ -58,10 +58,14 @@ for (const [name, render] of jobs) {
   console.log(`  ${name.padEnd(24)} ${width}x${height}`);
 }
 
-// The desktop app needs two: a window and installer icon at the size every
-// packager wants, and a much smaller one for the tray, where the glyph is
-// drawn at menu-bar height and a downscaled 1024px bell turns to mush.
-await sharp(join(src, 'icon.svg')).resize(512, 512).png().toFile(join(desktop, 'icon.png'));
+// The desktop app needs two: a window and installer icon, and a much smaller
+// one for the tray, where the glyph is drawn at menu-bar height and a
+// downscaled 1024px bell turns to mush.
+//
+// 1024 rather than 512 because electron-builder renders .icns and .ico from
+// this one file, and the largest slot in both is 1024. Give it 512 and macOS
+// upscales the icon for retina Finder and the Dock.
+await sharp(join(src, 'icon.svg')).resize(1024, 1024).png().toFile(join(desktop, 'icon.png'));
 await sharp(join(src, 'icon.svg')).resize(32, 32).png().toFile(join(desktop, 'tray.png'));
 console.log('  desktop icon.png + tray.png');
 

@@ -106,17 +106,77 @@ export function inQuietHours(q: { start: number; end: number }, now: Date): bool
 }
 
 /**
+ * Capabilities that confer authority over the hub, rather than a place in its
+ * fan-out. These are the ones a device may hand out only if it already holds
+ * them - otherwise least privilege is decorative, because each of them
+ * composes back into `admin` in a move or two: `devices.manage` mints pairing
+ * codes, `roles.manage` writes the role those codes point at.
+ *
+ * The rest (`notify.receive`, `notify.ack`, `call.receive`) only decide
+ * whether a device is on the receiving end of something. Which alerts it then
+ * sees is a question of channel patterns and severity, which is the operator's
+ * to answer when they write the role - so requiring the granter to hold them
+ * too would stop a device-manager from issuing an ordinary viewer code
+ * without buying anybody any safety.
+ */
+export const PRIVILEGED_CAPABILITIES = [
+  'notify.send',
+  'call.place',
+  'devices.manage',
+  'roles.manage',
+  'audit.read',
+  'admin',
+] as const satisfies readonly Capability[];
+
+export function isPrivileged(cap: Capability): boolean {
+  return (PRIVILEGED_CAPABILITIES as readonly string[]).includes(cap);
+}
+
+/**
+ * The privileged capabilities in `wanted` that `actor` does not itself hold.
+ *
+ * Empty means the grant is safe. `admin` is the defined superset, so a holder
+ * of it is never blocked.
+ */
+export function escalatingCapabilities(
+  actor: Role,
+  wanted: readonly Capability[] | undefined,
+): Capability[] {
+  if (hasCapability(actor, 'admin')) return [];
+  return (wanted ?? []).filter((cap) => isPrivileged(cap) && !hasCapability(actor, cap));
+}
+
+/**
+ * Whether a caller holding `granting` may hand out capability `cap`.
+ *
+ * `true`/`false` are the historical shorthand for "admin is allowed" and
+ * "everything but admin is allowed"; passing the caller's own capability list
+ * is the real form - see `sanitizeRole`.
+ */
+function mayGrant(granting: boolean | readonly Capability[], cap: Capability): boolean {
+  if (typeof granting === 'boolean') return granting || cap !== 'admin';
+  if (granting.includes('admin')) return true;
+  return !isPrivileged(cap) || granting.includes(cap);
+}
+
+/**
  * Normalises a role that arrived over the wire.
  *
  * `roles.upsert` is reachable from any device holding `roles.manage`, and the
  * result is consulted on every single delivery. An unvalidated role is
  * therefore both a crash (a non-array `channels` throws inside the fan-out
- * loop, taking every later notification with it) and a privilege escalation
- * (`capabilities: ['admin']` would promote the caller past the capability
- * they actually hold). Unknown capabilities are dropped rather than rejected,
- * so an older hub tolerates a newer dashboard.
+ * loop, taking every later notification with it) and a privilege escalation.
+ *
+ * `granting` is what the caller may hand out, and should be the caller's own
+ * capability list: a role may never mint a *privileged* capability its author
+ * does not itself hold. Blocking only `admin` was not enough, because the
+ * capabilities below it compose back into admin - a role carrying
+ * `devices.manage` can mint an admin pairing code, and one carrying
+ * `roles.manage` can write that role in the first place. Unknown capabilities
+ * are dropped rather than rejected, so an older hub tolerates a newer
+ * dashboard.
  */
-export function sanitizeRole(input: unknown, allowAdmin: boolean): Role {
+export function sanitizeRole(input: unknown, granting: boolean | readonly Capability[]): Role {
   const raw = (input ?? {}) as Partial<Role>;
 
   const name = typeof raw.name === 'string' ? raw.name.trim().slice(0, 64) : '';
@@ -136,7 +196,7 @@ export function sanitizeRole(input: unknown, allowAdmin: boolean): Role {
     ? raw.capabilities.filter(
         (c): c is Capability =>
           (CAPABILITIES as readonly string[]).includes(c as string) &&
-          (allowAdmin || c !== 'admin'),
+          mayGrant(granting, c as Capability),
       )
     : [];
 

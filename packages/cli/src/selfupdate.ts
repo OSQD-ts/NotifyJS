@@ -10,7 +10,7 @@ import {
 } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { pipeline } from 'node:stream/promises';
 import { Readable } from 'node:stream';
 import { execFile } from 'node:child_process';
@@ -81,6 +81,14 @@ export async function apply(
 
   // Refuse rather than fail obscurely partway through.
   assertWritable(target);
+
+  // The name comes from the release feed and is about to be joined onto a
+  // path. A pattern anchored only at the end would happily match one carrying
+  // `../`, and the download is written before its checksum is checked - so a
+  // feed that could name its assets freely could write outside the temp dir.
+  if (asset.name !== basename(asset.name)) {
+    throw new Error(`release ${release.tag} names an asset with a path in it; refusing to update`);
+  }
 
   const work = mkdtempSync(join(tmpdir(), 'notifyjs-update-'));
   try {

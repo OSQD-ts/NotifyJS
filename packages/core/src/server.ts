@@ -16,6 +16,7 @@ import {
   canDeliver,
   canonical,
   encodePairingCode,
+  escalatingCapabilities,
   hasCapability,
   isPairingCodeValid,
   normalizePairingCode,
@@ -1072,10 +1073,15 @@ export class Notifier extends EventEmitter<NotifierEvents> {
       case 'sync':
         return this.handleSync(session, msg);
       case 'call.reply':
+        // Answering, declining and hanging up all steer a live call, so they
+        // are gated on the capability that makes a device part of one. A
+        // device that never rings has no business deciding how a page ends.
+        if (!this.canAnswerCalls(session)) return;
         if (msg.outcome === 'answered') this.calls.answer(msg.callId, session.deviceId!);
         else this.calls.decline(msg.callId, session.deviceId!);
         return;
       case 'call.ended':
+        if (!this.canAnswerCalls(session)) return;
         this.calls.ended(msg.callId, session.deviceId!);
         return;
       case 'admin':
@@ -1466,10 +1472,12 @@ export class Notifier extends EventEmitter<NotifierEvents> {
             device: this.renameDevice(String(args.deviceId), String(args.name)),
           });
         case 'devices.setRole':
+          this.assertMayGrantRole(session, role, String(args.role));
           return reply(true, {
             device: this.setDeviceRole(String(args.deviceId), String(args.role)),
           });
         case 'pair.create':
+          this.assertMayGrantRole(session, role, String(args.role ?? 'viewer'));
           return reply(true, this.createPairingCode(args));
         case 'pair.list':
           return reply(true, { codes: this.pairingCodes() });
@@ -1478,9 +1486,11 @@ export class Notifier extends EventEmitter<NotifierEvents> {
         case 'roles.list':
           return reply(true, { roles: this.roles() });
         case 'roles.upsert':
-          // A device holding `roles.manage` but not `admin` must not be able
-          // to mint itself an admin role and escalate.
-          this.upsertRole(sanitizeRole(args, hasCapability(role, 'admin')));
+          // A role may only carry the privileged capabilities its author
+          // already holds. Blocking `admin` alone was not enough:
+          // `devices.manage` mints pairing codes and `roles.manage` writes the
+          // role they point at, so either one composes back into admin.
+          this.upsertRole(sanitizeRole(args, role.capabilities));
           return reply(true, { roles: this.roles() });
         case 'roles.delete':
           return reply(true, { deleted: this.deleteRole(String(args.name)) });
@@ -1516,8 +1526,13 @@ export class Notifier extends EventEmitter<NotifierEvents> {
         case 'audit.tail':
           return reply(true, { events: this.auditLog(Number(args.limit) || 100) });
         case 'history':
+          // Filtered through the caller's role, exactly as `replay()` is. The
+          // capability only says "this device receives notifications"; which
+          // notifications is still decided by its channel patterns, its
+          // minimum severity and the alert's own targeting. Reading the log
+          // must not be a way around the filter that governs delivery.
           return reply(true, {
-            notifications: this.store.history().slice(-(Number(args.limit) || 100)),
+            notifications: this.visibleHistory(session).slice(-(Number(args.limit) || 100)),
           });
         default:
           return reply(false, undefined, 'unknown op');
@@ -1525,6 +1540,61 @@ export class Notifier extends EventEmitter<NotifierEvents> {
     } catch (err) {
       return reply(false, undefined, err instanceof Error ? err.message : 'failed');
     }
+  }
+
+  /**
+   * Refuses to hand out a role carrying capabilities the caller lacks.
+   *
+   * Least privilege is only least privilege if it cannot be widened from
+   * inside. Without this, `devices.manage` is `admin`: mint a pairing code for
+   * the admin role, or point your own device at it, and the capability you
+   * were not given is one frame away. Only the privileged capabilities are
+   * held back, so onboarding an ordinary viewer still works - see
+   * `PRIVILEGED_CAPABILITIES`.
+   */
+  private assertMayGrantRole(session: Session, actor: Role, roleName: string): void {
+    const target = this.store.role(roleName);
+    // An unknown role is not this check's business; the operation itself
+    // reports it, and rejecting here would answer a typo with "forbidden".
+    if (!target) return;
+    const missing = escalatingCapabilities(actor, target.capabilities);
+    if (missing.length === 0) return;
+
+    this.audit('admin.denied', {
+      deviceId: session.deviceId,
+      detail: { op: 'grant', role: roleName, missing },
+    });
+    throw new Error(
+      `cannot grant "${roleName}": it carries ${missing.join(', ')}, which this device does not hold`,
+    );
+  }
+
+  /** Whether this session is entitled to steer a call it is part of. */
+  private canAnswerCalls(session: Session): boolean {
+    return Boolean(session.role && session.deviceId && hasCapability(session.role, 'call.receive'));
+  }
+
+  /**
+   * The stored history, narrowed to what this device was entitled to receive.
+   *
+   * Deliberately `canDeliver` rather than `allowed()`: the extra rule that one
+   * adds is the snooze, and a snooze means "stop buzzing me", not "hide the
+   * incident log from me until it lifts".
+   */
+  private visibleHistory(session: Session): Notification[] {
+    const role = session.role;
+    const device = session.device;
+    if (!role || !device) return [];
+    return this.store.history().filter((n) =>
+      canDeliver({
+        role,
+        deviceId: device.id,
+        channel: n.channel,
+        severity: n.severity,
+        to: n.to,
+        isCall: false,
+      }),
+    );
   }
 
   /* ---------------------------- delivery ----------------------------- */

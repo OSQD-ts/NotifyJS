@@ -110,7 +110,11 @@ proxy, whenever this is set.
 
 `allowedOrigins` defaults to `same-origin`: a browser `Origin` is accepted only
 when its host matches the request's `Host`, which is what the hub's own
-dashboard always sends. Without this, any page you happened to visit could open
+dashboard always sends. Note the limit of comparing the two headers: a name an
+attacker controls, rebound to the hub's address, satisfies both. That buys
+them an unauthenticated socket and nothing more — the handshake still needs a
+device key — but it is not the same as "only your own pages can connect". Pass
+an explicit list when that distinction matters. Without this, any page you happened to visit could open
 a WebSocket to a hub on your network — it could not authenticate, but it could
 probe and consume connection budget. Non-browser clients send no `Origin` and
 are unaffected; they still have to authenticate. Set `'*'` to disable the
@@ -123,6 +127,29 @@ changing a role takes effect immediately for connected devices. Every
 privileged operation maps to a least-privilege capability; a `viewer` cannot
 enumerate devices, and only `roles.manage` can rewrite a role. Revocation
 disconnects live sessions and makes the device's key permanently useless.
+
+Reading is filtered the same way as delivery. `history` returns only what the
+calling device's role would have been delivered — its channel patterns, its
+minimum severity, and the alert's own targeting all still apply. Otherwise the
+capability that puts a device on the receiving end of one channel would be a
+way to read every other.
+
+**No device can hand out authority it does not hold.** These capabilities —
+`notify.send`, `call.place`, `devices.manage`, `roles.manage`, `audit.read`,
+`admin` — may only be granted by a device that already has them, whether the
+grant is a new pairing code, a role change, or a rewritten role. Blocking
+`admin` alone was not enough: each of the others composes back into it in a
+move or two, since `devices.manage` mints pairing codes and `roles.manage`
+writes the role they point at. The receiving-side capabilities
+(`notify.receive`, `notify.ack`, `call.receive`) stay freely grantable, so
+issuing an ordinary viewer code does not require admin — the rule that makes
+delegation safe must not be the reason an operator hands out admin instead.
+
+What `roles.manage` *is* allowed to do is widen its own role's channel
+patterns and lower its minimum severity. That is inherent in the capability
+rather than a gap in it — editing roles is what it is for — but it means
+`roles.manage` should be read as "can see everything, eventually". Grant it
+accordingly.
 
 ## The device watchdog
 

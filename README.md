@@ -78,12 +78,40 @@ installed. Every push to the default branch refreshes a **Latest build**
 prerelease, so there is always something current to download; tagged versions
 (`v0.2.0`) get their own permanent release.
 
+Releases come in two halves, and a working setup needs one of each. A
+**client** is what alerts you: the app on the machine or phone in front of
+you. A **server** is the hub your own code publishes to, and the thing every
+client subscribes to. One hub feeds every client you own, and they do not have
+to be on the same machine.
+
+### Clients
+
+| Platform | File |
+| --- | --- |
+| Windows | `notifyjs-desktop-windows-x64-setup.exe` |
+| macOS | `notifyjs-desktop-macos-arm64.dmg`, `notifyjs-desktop-macos-x64.dmg` |
+| Linux | `notifyjs-desktop-linux-x86_64.AppImage`, `notifyjs-desktop-linux-amd64.deb` (also `arm64`) |
+| Android | `notifyjs-android-*.apk` (sideload) |
+
+Install, launch, and pair by pasting the hub's pairing link or typing the code
+it printed. The desktop app is a tray app: closing the window hides it and
+changes nothing about what is delivered. **Start at login** and **start
+hidden** are both in Settings — see [the desktop app](#the-desktop-app) for
+what it does once it is running.
+
+The Windows installer is per-user, so it never asks for an administrator. The
+macOS `.dmg` is unsigned, so the first launch has to be right-click → **Open**,
+or `xattr -dr com.apple.quarantine /Applications/NotifyJS.app`. On Linux the
+AppImage needs only `chmod +x`; the `.deb` installs to `/opt/NotifyJS` with a
+menu entry and pulls in its GTK and libnotify dependencies.
+
+### Servers
+
 | Platform | File |
 | --- | --- |
 | Linux | `notifyjs-linux-x64.tar.gz`, `notifyjs-linux-arm64.tar.gz` |
 | macOS | `notifyjs-macos-arm64.tar.gz`, `notifyjs-macos-x64.tar.gz` |
 | Windows | `notifyjs-windows-x64.zip` |
-| Android | `notifyjs-android-*.apk` (sideload) |
 | Container | `ghcr.io/<owner>/notifyjs` |
 
 ```bash
@@ -538,9 +566,15 @@ To install it as an ordinary application - in the menu, with an icon, launched
 without a terminal:
 
 ```bash
-npm run dist            # release/NotifyJS-<version>-amd64.deb + .AppImage
+npm run dist            # release/notifyjs-desktop-linux-{x86_64.AppImage,amd64.deb}
 npm run install:local   # put the AppImage in the menu for this user, no root
 ```
+
+`dist` builds for the machine you are on. `dist:linux`, `dist:mac` and
+`dist:win` are what the release workflow runs, and each builds every
+architecture that platform ships — a `.dmg` has to be built on macOS and an
+NSIS installer on Windows, so there is no cross-compiling the other two from
+here.
 
 `install:local` writes three files under `~/.local` (the AppImage itself, a
 `.desktop` entry, and the icon) and nothing outside your home directory, so it
@@ -552,7 +586,7 @@ The `.deb` is the better answer if you would rather have it system-wide, and
 the one to hand to anyone else on a Debian-derived desktop:
 
 ```bash
-sudo dpkg -i release/NotifyJS-0.1.0-amd64.deb
+sudo dpkg -i release/notifyjs-desktop-linux-amd64.deb
 ```
 
 It installs to `/opt/NotifyJS`, registers the same menu entry, and declares its
@@ -737,12 +771,13 @@ Pushing a `v*` tag builds and publishes everything:
 git tag v0.2.0 && git push origin v0.2.0
 ```
 
-That produces executables for five platforms, an Android APK, a dashboard-only
-zip, a multi-arch container image on GHCR, and a GitHub Release with checksums.
-`workflow_dispatch` runs the same pipeline into a draft release, for rehearsing
-a change to it.
+That produces hub executables for five platforms, desktop installers for
+Windows, macOS and Linux, an Android APK, a dashboard-only zip, a multi-arch
+container image on GHCR, and a GitHub Release with checksums, split into
+clients and servers. `workflow_dispatch` runs the same pipeline into a draft
+release, for rehearsing a change to it.
 
-To build a binary locally:
+To build a hub binary locally:
 
 ```bash
 npm run binary   # -> build/artifacts/notifyjs-linux-x64.tar.gz
@@ -755,6 +790,16 @@ npm run bundle
 npm run package -- --target node20-macos-arm64 --name notifyjs-macos-arm64
 npm run package -- --target node20-win-x64 --name notifyjs-windows-x64 --format zip
 ```
+
+Those asset names are not cosmetic. A hub that updates itself finds its own
+build by matching `notifyjs-<os>-<arch>.(tar.gz|zip)` against the release feed
+([`packages/cli/src/selfupdate.ts`](packages/cli/src/selfupdate.ts)), so
+renaming one strands every binary already installed. That is why the desktop
+installers are `notifyjs-desktop-*` and the server/client split lives in the
+release notes rather than in a rename.
+
+The desktop installers are built from `packages/desktop` — see
+[the desktop app](#the-desktop-app).
 
 Android release signing is optional: set the `ANDROID_KEYSTORE_BASE64`,
 `ANDROID_KEYSTORE_PASSWORD`, `ANDROID_KEY_ALIAS` and `ANDROID_KEY_PASSWORD`

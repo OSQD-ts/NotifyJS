@@ -188,9 +188,19 @@ export class CallOrchestrator {
     });
   }
 
+  /**
+   * A device saying "not me".
+   *
+   * Only a device this rung is actually ringing may decline it - the same rule
+   * `answer()` and `ended()` enforce, and for the same reason. A decline that
+   * empties the rung advances the ladder immediately, so without the check any
+   * device that merely learned a call id could clear the timer mid-delay and
+   * walk the page down to "missed" without a single phone ever ringing.
+   */
   decline(callId: string, deviceId: string): void {
     const call = this.active.get(callId);
     if (!call || call.answeredBy) return;
+    if (!call.ringing.has(deviceId)) return;
     call.declined.add(deviceId);
     call.ringing.delete(deviceId);
     this.emit({ type: 'declined', callId, deviceId });

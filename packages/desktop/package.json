@@ -5,11 +5,15 @@
   "description": "NotifyJS desktop client: the phone app's feed, settings and spoken calls, on a computer.",
   "license": "SEE LICENSE IN LICENSE",
   "main": "./dist/main.js",
+  "desktopName": "notifyjs-desktop.desktop",
   "scripts": {
     "build": "node build.mjs",
     "start": "npm run build && electron .",
     "dev": "node build.mjs --watch",
     "dist": "npm run build && electron-builder",
+    "dist:linux": "npm run build && electron-builder --linux --x64 --arm64",
+    "dist:mac": "npm run build && electron-builder --mac --x64 --arm64",
+    "dist:win": "npm run build && electron-builder --win --x64",
     "install:local": "node scripts/install-local.mjs",
     "uninstall:local": "node scripts/install-local.mjs --uninstall"
   },
@@ -27,19 +31,21 @@
     "appId": "dev.notifyjs.desktop",
     "productName": "NotifyJS",
     "executableName": "notifyjs-desktop",
-    "artifactName": "${productName}-${version}-${arch}.${ext}",
+    "publish": null,
     "files": [
       "dist/**",
       "package.json"
     ],
     "directories": {
-      "output": "release"
+      "output": "release",
+      "buildResources": "assets"
     },
     "linux": {
       "target": [
-        "deb",
-        "AppImage"
+        "AppImage",
+        "deb"
       ],
+      "artifactName": "notifyjs-desktop-linux-${arch}.${ext}",
       "category": "Utility",
       "icon": "assets/icon.png",
       "synopsis": "Self-hosted alerts and spoken calls from your own hubs",
@@ -50,12 +56,27 @@
       "target": [
         "dmg"
       ],
-      "category": "public.app-category.utilities"
+      "artifactName": "notifyjs-desktop-macos-${arch}.${ext}",
+      "icon": "assets/icon.png",
+      "category": "public.app-category.utilities",
+      "identity": null
     },
     "win": {
       "target": [
         "nsis"
-      ]
+      ],
+      "icon": "assets/icon.png"
+    },
+    "nsis": {
+      "artifactName": "notifyjs-desktop-windows-${arch}-setup.${ext}",
+      "oneClick": false,
+      "perMachine": false,
+      "allowElevation": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "NotifyJS",
+      "uninstallDisplayName": "NotifyJS"
     },
     "deb": {
       "packageName": "notifyjs-desktop",

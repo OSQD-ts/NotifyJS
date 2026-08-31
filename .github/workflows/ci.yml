@@ -114,7 +114,7 @@ jobs:
         run: ./gradlew :notifyjs-call:assembleRelease --no-daemon
 
   package:
-    name: Packaged binary smoke test
+    name: Hub binary smoke test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -160,6 +160,48 @@ jobs:
           grep -qE '[0-9A-Z]{4}-[0-9A-Z]{4}-[0-9A-Z]{4}' serve.log
 
           echo "packaged binary serves the dashboard and issues pairing codes"
+
+  desktop:
+    name: Desktop app packages
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 20
+          cache: npm
+
+      - run: npm ci
+
+      # The desktop app resolves @osqd/notifyjs-protocol through
+      # `file:../protocol`, whose entry point is that package's build output,
+      # and its icons are rendered from assets/icon.svg rather than checked in.
+      - run: npm run build
+
+      - name: Install desktop dependencies
+        working-directory: packages/desktop
+        run: npm ci
+
+      - name: Typecheck
+        working-directory: packages/desktop
+        run: npx tsc --noEmit
+
+      # `--dir` packages the app without building the installers: one Electron
+      # download instead of four, and no AppImage or dpkg step. It still
+      # validates the electron-builder configuration and the packaged tree,
+      # which is where a mistake in either would otherwise wait until a release
+      # to surface - on a Windows or macOS runner, hours from the change.
+      - name: Package the app
+        working-directory: packages/desktop
+        run: npx electron-builder --linux --x64 --dir
+
+      - name: The packaged app carries a launcher and its code
+        working-directory: packages/desktop
+        run: |
+          test -x release/linux-unpacked/notifyjs-desktop
+          test -f release/linux-unpacked/resources/app.asar
+          echo "packaged desktop app looks complete"
 
   docker:
     name: Docker image builds

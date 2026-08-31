@@ -307,13 +307,18 @@ export class Store {
   }
 
   putDevice(d: Device): void {
+    if (unsafeKey(d.id)) throw new Error(`"${d.id}" cannot be used as a device id`);
     this.data.devices[d.id] = d;
     this.markDirty();
   }
 
   updateDevice(id: string, patch: Partial<Device>): Device | undefined {
-    const existing = this.data.devices[id];
-    if (!existing) return undefined;
+    // `own`, not `[id]`: a device id arrives over the wire, and
+    // `devices['constructor']` answers with something inherited from
+    // Object.prototype - truthy, not a device, and spreading it would write a
+    // fabricated entry into the store under a key nothing can ever reach.
+    const existing = own(this.data.devices, id);
+    if (!existing || unsafeKey(id)) return undefined;
     const next = { ...existing, ...patch };
     this.data.devices[id] = next;
     this.markDirty();
@@ -321,7 +326,7 @@ export class Store {
   }
 
   deleteDevice(id: string): boolean {
-    if (!this.data.devices[id]) return false;
+    if (!own(this.data.devices, id)) return false;
     delete this.data.devices[id];
     this.markDirty();
     return true;
@@ -344,7 +349,7 @@ export class Store {
   }
 
   deleteRole(name: string): boolean {
-    if (!this.data.roles[name]) return false;
+    if (!own(this.data.roles, name)) return false;
     delete this.data.roles[name];
     this.markDirty();
     return true;
@@ -428,10 +433,11 @@ export class Store {
   }
 
   putBan(record: BanRecord): void {
+    if (unsafeKey(record.ip)) return;
     // Behind a proxy the client IP comes from a header, so the number of
     // distinct "IPs" is whatever an attacker cares to send. Evicting the
     // stalest records keeps a store file from growing without limit.
-    if (!this.data.bans[record.ip] && Object.keys(this.data.bans).length >= MAX_BANS) {
+    if (!own(this.data.bans, record.ip) && Object.keys(this.data.bans).length >= MAX_BANS) {
       const oldest = Object.values(this.data.bans)
         .filter((b) => b.until < Date.now())
         .sort((a, b) => a.lastFailureAt - b.lastFailureAt)[0];
@@ -443,7 +449,7 @@ export class Store {
   }
 
   clearBan(ip: string): void {
-    if (this.data.bans[ip]) {
+    if (own(this.data.bans, ip)) {
       delete this.data.bans[ip];
       this.markDirty();
     }
@@ -471,7 +477,7 @@ export class Store {
   }
 
   deletePolicy(name: string): boolean {
-    if (!this.data.policies?.[name]) return false;
+    if (!this.data.policies || !own(this.data.policies, name)) return false;
     delete this.data.policies[name];
     this.markDirty();
     return true;
@@ -491,7 +497,7 @@ export class Store {
   }
 
   deleteHeartbeat(name: string): boolean {
-    if (!this.data.heartbeats?.[name]) return false;
+    if (!this.data.heartbeats || !own(this.data.heartbeats, name)) return false;
     delete this.data.heartbeats[name];
     this.markDirty();
     return true;
