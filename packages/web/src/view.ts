@@ -1,4 +1,4 @@
-import type { Notification, Severity } from '@osqd/notifyjs-protocol';
+import { formatPairingCode, type Notification, type Severity } from '@osqd/notifyjs-protocol';
 
 /**
  * The parts of the dashboard that turn data into DOM.
@@ -8,14 +8,8 @@ import type { Notification, Severity } from '@osqd/notifyjs-protocol';
  * is only ever set as text, never parsed as markup.
  */
 
-/** Formats a pairing code as the user types: XXXX-XXXX-XXXX. */
-export function formatCodeInput(raw: string): string {
-  return raw
-    .toUpperCase()
-    .replace(/[^0-9A-Z]/g, '')
-    .slice(0, 12)
-    .replace(/(.{4})(?=.)/g, '$1-');
-}
+/** Formats a pairing code as the user types. Shared with the other clients. */
+export const formatCodeInput = formatPairingCode;
 
 export function matchesFilter(n: Notification, filter: Severity | 'all'): boolean {
   return filter === 'all' || n.severity === filter;

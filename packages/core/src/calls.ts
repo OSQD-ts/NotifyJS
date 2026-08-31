@@ -29,6 +29,8 @@ interface ActiveCall {
   declined: Set<string>;
   ringing: Set<string>;
   timer: NodeJS.Timeout | undefined;
+  /** Drops an answered call whose `call.ended` never arrives. See `answer()`. */
+  reaper: NodeJS.Timeout | undefined;
   answeredBy?: CallTarget;
   answeredAt?: number;
   settle: (result: CallResult) => void;
@@ -51,6 +53,13 @@ export type CallEvent =
  * `CallResult`, so the developer writes `if ((await notify.call(...)).outcome
  * === 'missed')` instead of wiring up callbacks.
  */
+/**
+ * How long an answered call is kept waiting for its `call.ended`. Generous
+ * enough for a long message repeated five times, short enough that a device
+ * that never reports back does not pin the record forever.
+ */
+const ANSWERED_CALL_TTL_MS = 15 * 60_000;
+
 export class CallOrchestrator {
   private active = new Map<string, ActiveCall>();
 
@@ -87,6 +96,7 @@ export class CallOrchestrator {
         declined: new Set(),
         ringing: new Set(),
         timer: undefined,
+        reaper: undefined,
         settle: resolve,
         settled: false,
       };
@@ -186,6 +196,15 @@ export class CallOrchestrator {
       answeredAt: call.answeredAt,
       attempted: call.attempted,
     });
+
+    // An answered call is kept so a later `call.ended` still emits - but that
+    // frame is not guaranteed. A device whose speech engine hung, or that was
+    // force-quit without closing its socket, never sends it, and the record
+    // would sit here for the life of the process, counted by `activeCount` and
+    // reported as a call still ringing. The promise has already settled, so
+    // expiring the record costs the caller nothing.
+    call.reaper = setTimeout(() => this.active.delete(callId), ANSWERED_CALL_TTL_MS);
+    call.reaper.unref?.();
   }
 
   /**
@@ -255,6 +274,7 @@ export class CallOrchestrator {
     for (const call of [...this.active.values()]) {
       if (!call.ringing.has(deviceId)) continue;
       if (call.answeredBy?.deviceId === deviceId) {
+        this.clearTimer(call);
         this.active.delete(call.request.id);
         continue;
       }
@@ -340,5 +360,7 @@ export class CallOrchestrator {
   private clearTimer(call: ActiveCall): void {
     if (call.timer) clearTimeout(call.timer);
     call.timer = undefined;
+    if (call.reaper) clearTimeout(call.reaper);
+    call.reaper = undefined;
   }
 }

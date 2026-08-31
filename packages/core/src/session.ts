@@ -18,10 +18,17 @@ export class Session {
   nonce: string | undefined;
   readonly limiter: MessageLimiter;
   handshakeTimer: NodeJS.Timeout | undefined;
-  /** Notifications sent but not yet acknowledged, for `requireAck` retries. */
-  readonly pending = new Set<string>();
   /** Set once the peer has been dropped for refusing to drain its socket. */
   stalled = false;
+  /**
+   * Whether the peer answered the last liveness ping.
+   *
+   * A socket can be dead without being closed - a laptop lid, a dropped NAT
+   * mapping, a middlebox that discards silently. TCP does not notice for many
+   * minutes, so until then the hub believes the device is here: it counts in
+   * `reached`, and an escalating call spends a whole rung ringing it.
+   */
+  alive = true;
   /**
    * Whether `Guard.promote()` has already accounted for this session.
    *
@@ -106,6 +113,24 @@ export class Session {
       this.ws.close(code, reason);
     } catch {
       /* already closing */
+    }
+  }
+
+  /**
+   * Asks the peer to prove it is still there.
+   *
+   * A WebSocket ping is answered by the peer's *implementation*, not its
+   * application code - browsers, React Native and `ws` all reply automatically
+   * - so this works against every client already paired, with no protocol
+   * change and nothing for a device to implement.
+   */
+  ping(): void {
+    if (this.ws.readyState !== 1) return;
+    try {
+      this.ws.ping();
+    } catch {
+      // A ping that cannot be written means the socket is already gone; the
+      // close handler will clean up.
     }
   }
 

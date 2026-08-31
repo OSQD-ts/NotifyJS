@@ -26,7 +26,12 @@ import {
 } from '@osqd/notifyjs-protocol';
 import { nodeCrypto } from '@osqd/notifyjs-protocol/node';
 
-const PORT = 7896;
+/**
+ * Chosen by the OS, not by this file. Fixed ports made the suite fail in
+ * bursts whenever a port was still held from an earlier run - every test in
+ * the file at once, for a reason that had nothing to do with the code.
+ */
+let PORT = 0;
 let hub;
 let storeDir;
 
@@ -70,7 +75,7 @@ async function disconnectAndWait(client, deviceName) {
 before(async () => {
   storeDir = mkdtempSync(join(tmpdir(), 'notifyjs-review-'));
   hub = new Notifier({
-    port: PORT,
+    port: 0,
     storeDir,
     dashboard: false,
     logger: false,
@@ -84,6 +89,7 @@ before(async () => {
     },
   });
   await hub.start();
+  PORT = Number(new URL(hub.url).port);
 });
 
 after(async () => {
@@ -478,7 +484,7 @@ test('the metrics token is not compared with ===', async () => {
   // nothing; this asserts it is actually in the path.
   const dir = mkdtempSync(join(tmpdir(), 'notifyjs-metrics-'));
   const guarded = new Notifier({
-    port: 7895,
+    port: 0,
     host: '127.0.0.1',
     storeDir: dir,
     dashboard: false,
@@ -488,8 +494,8 @@ test('the metrics token is not compared with ===', async () => {
   });
   await guarded.start();
   try {
-    const get = async (headers) =>
-      (await fetch('http://127.0.0.1:7895/metrics', { headers })).status;
+    const base = guarded.dashboardUrl.replace('localhost', '127.0.0.1');
+    const get = async (headers) => (await fetch(`${base}/metrics`, { headers })).status;
 
     assert.equal(await get({}), 401, 'no credentials');
     assert.equal(await get({ authorization: 'Bearer wrong' }), 401, 'wrong token');

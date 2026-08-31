@@ -179,14 +179,40 @@ export class Notifier extends EventEmitter<NotifierEvents> {
       { history: this.opts.historyLimit, audit: this.opts.auditLimit },
       () => randomId(8),
     );
+    // Said as loudly as a constructor can: every paired device is about to fail
+    // to authenticate, because the serverId their signatures are bound to is
+    // gone with the store. Without this the operator sees only every device
+    // breaking at once, with nothing anywhere explaining why.
+    if (this.store.recoveredFrom) {
+      this.opts.logger(
+        'the store could not be read and was started over - every device must pair again',
+        { keptAt: this.store.recoveredFrom },
+      );
+      this.audit('store.recovered', { detail: { keptAt: this.store.recoveredFrom } });
+    }
+
     this.guard = new Guard(this.opts.security, this.store);
     this.calls = new CallOrchestrator(this.opts.defaultRingSeconds, (e) => {
       this.emit('call', e);
       this.audit(`call.${e.type}`, { detail: { callId: e.callId } });
     });
     this.flood = new FloodControl(this.opts.flood, (summary) => this.releaseSummary(summary));
-    this.push = new PushSender(this.opts.push, this.opts.logger, (ok, count) =>
-      this.metrics.pushed(ok, count),
+    this.push = new PushSender(
+      this.opts.push,
+      this.opts.logger,
+      (ok, count) => this.metrics.pushed(ok, count),
+      // A token the push service says is dead is worse than no token: it costs
+      // a request on every alert and never wakes anybody. Clearing it also
+      // makes `pushToken` mean what it claims - a device we can still reach.
+      (deviceId) => {
+        const updated = this.store.updateDevice(deviceId, {
+          pushToken: undefined,
+          pushProvider: undefined,
+        });
+        if (!updated) return;
+        for (const session of this.byDevice.get(deviceId) ?? []) session.device = updated;
+        this.audit('push.unreachable', { deviceId });
+      },
     );
 
     this.watchdog = new Watchdog(
@@ -212,9 +238,26 @@ export class Notifier extends EventEmitter<NotifierEvents> {
    * have the monitored process check in with a `RemoteNotifier`.
    */
   expect(name: string, spec: HeartbeatSpec): Heartbeat {
-    const beat = this.watchdog.expect(name, spec);
-    this.store.putHeartbeat(beat);
-    this.audit('heartbeat.expected', { detail: { name, every: beat.every } });
+    // Validated before the watchdog is touched. `heartbeat.expect` is reachable
+    // over the wire, and the store rightly refuses a `__proto__` key - but it
+    // refused it *after* the watchdog had already registered the beat, leaving
+    // one that alerted forever and never survived a restart.
+    const clean = sanitizeName(name);
+    if (!clean) throw new Error('a heartbeat needs a name');
+    if (clean === '__proto__' || clean === 'constructor' || clean === 'prototype') {
+      throw new Error(`"${clean}" cannot be used as a heartbeat name`);
+    }
+
+    const beat = this.watchdog.expect(clean, spec);
+    try {
+      this.store.putHeartbeat(beat);
+    } catch (err) {
+      // Keep the two in step: a beat the store will not hold is one the
+      // watchdog must not be left holding either.
+      this.watchdog.forget(clean);
+      throw err;
+    }
+    this.audit('heartbeat.expected', { detail: { name: clean, every: beat.every } });
     return beat;
   }
 
@@ -305,7 +348,6 @@ export class Notifier extends EventEmitter<NotifierEvents> {
     for (const session of this.sessions.values()) {
       if (session.state !== 'ready') continue;
       session.send({ v: PROTOCOL_VERSION, t: 'resolve', ids, key: spec.key });
-      for (const id of ids) session.pending.delete(id);
     }
 
     // A resolved alert must stop nagging, or `requireAck` outlives the incident.
@@ -327,12 +369,20 @@ export class Notifier extends EventEmitter<NotifierEvents> {
     return this.store.policies();
   }
 
+  /**
+   * Stores an escalation ladder.
+   *
+   * `policies.upsert` is reachable from any device holding `roles.manage`, and
+   * every number in the result is handed straight to `setTimeout` or used as a
+   * loop bound. Unclamped, one frame buys a ladder that rings for a century, or
+   * repeats without end, or carries a hundred thousand rungs - so the shape is
+   * normalised here rather than trusted.
+   */
   upsertPolicy(policy: EscalationPolicy): void {
-    if (!policy.name || !Array.isArray(policy.steps) || policy.steps.length === 0) {
-      throw new Error('an escalation policy needs a name and at least one step');
-    }
-    this.store.putPolicy(policy);
-    this.audit('policy.upsert', { detail: { name: policy.name, steps: policy.steps.length } });
+    this.store.putPolicy(sanitizePolicy(policy));
+    this.audit('policy.upsert', {
+      detail: { name: policy.name, steps: policy.steps?.length ?? 0 },
+    });
   }
 
   deletePolicy(name: string): boolean {
@@ -453,18 +503,52 @@ export class Notifier extends EventEmitter<NotifierEvents> {
     this.http.headersTimeout = 10_000;
     this.http.requestTimeout = 20_000;
 
-    await new Promise<void>((res, rej) => {
-      this.http!.once('error', rej);
-      this.http!.listen(this.opts.port, this.opts.host, () => {
-        this.http!.off('error', rej);
-        res();
+    try {
+      await new Promise<void>((res, rej) => {
+        this.http!.once('error', rej);
+        this.http!.listen(this.opts.port, this.opts.host, () => {
+          this.http!.off('error', rej);
+          res();
+        });
       });
-    });
-
-    if (this.opts.deviceWatchdog.enabled) {
-      this.beatTimer = setInterval(() => this.beat(), this.opts.deviceWatchdog.intervalMs);
-      this.beatTimer.unref?.();
+    } catch (err) {
+      // Unwound completely, so a caller may try again - on another port, or
+      // once whatever held this one has let go.
+      //
+      // Without this, `started` stayed true after the commonest startup
+      // failure there is, and the retry took the early return at the top of
+      // this method: `start()` resolved, `url` named a plausible address, and
+      // nothing was listening. An alerting hub that believes it is up is worse
+      // than one that refuses to start.
+      this.wss?.close();
+      this.wss = undefined;
+      this.http?.close();
+      this.http = undefined;
+      this.started = false;
+      throw err;
     }
+
+    // Port 0 means "any free port", and the caller has no other way to learn
+    // which one it got. Without reading it back, `url`, `publicUrl`, every
+    // pairing link and the `listening` event would all report 0 - a hub that
+    // is running and reachable but cannot tell anybody where.
+    const bound = this.http.address();
+    if (bound && typeof bound === 'object') this.opts.port = bound.port;
+
+    // Everything `stop()` shut down comes back with the hub. These were armed
+    // once, at construction, so a stopped-and-restarted hub silently ran
+    // without its IP sweeper and without checking a single heartbeat.
+    this.guard.start();
+    this.watchdog.start();
+
+    // Always armed, whether or not devices are watching the hub back: this
+    // timer is how the hub notices a device has gone, which is a separate
+    // question from `deviceWatchdog` and must not share its switch.
+    this.beatTimer = setInterval(() => {
+      if (this.opts.deviceWatchdog.enabled) this.beat();
+      this.sweepDeadSockets();
+    }, this.opts.livenessIntervalMs);
+    this.beatTimer.unref?.();
 
     this.http.on('error', (err) => this.emit('error', err));
     this.opts.logger(`hub listening on ${this.url}`, {
@@ -658,6 +742,43 @@ export class Notifier extends EventEmitter<NotifierEvents> {
     }
   }
 
+  /**
+   * Drops sockets that are open but no longer reachable.
+   *
+   * Nothing else does this. A session is removed on `close` or `error`, and a
+   * half-open connection produces neither: the hub goes on believing the device
+   * is here for as long as TCP takes to give up, which is many minutes and on a
+   * quiet socket can be never. Until then it is counted in `reached` - so the
+   * hub reports alerts as delivered to somebody who is not there - and an
+   * escalating call spends a full rung ringing it before moving on.
+   *
+   * One missed pong is enough. The interval is generous relative to a round
+   * trip, and the cost of being wrong is a reconnect the client performs
+   * automatically, against the cost of a page nobody hears.
+   */
+  private sweepDeadSockets(): void {
+    for (const session of [...this.sessions.values()]) {
+      // A session still in the handshake has its own, much shorter, deadline.
+      if (session.state !== 'ready') continue;
+
+      if (!session.alive) {
+        this.metrics.dropped();
+        this.audit('session.unreachable', {
+          ip: session.ip,
+          deviceId: session.deviceId,
+        });
+        this.opts.logger('dropped a device that stopped answering', {
+          device: session.deviceName,
+        });
+        session.destroy();
+        continue;
+      }
+
+      session.alive = false;
+      session.ping();
+    }
+  }
+
   cancelCall(callId: string): boolean {
     return this.calls.cancel(callId);
   }
@@ -756,7 +877,13 @@ export class Notifier extends EventEmitter<NotifierEvents> {
   }
 
   renameDevice(deviceId: string, name: string): Device | undefined {
-    return this.store.updateDevice(deviceId, { name: name.slice(0, 64) });
+    // Same treatment a name gets at pairing time. `devices.rename` is reachable
+    // over the wire, and the result lands in dashboards, logs and an operator's
+    // terminal - so a rename must not be the one way in for an escape sequence
+    // that `pair` already refuses.
+    const clean = sanitizeName(name);
+    if (!clean) return undefined;
+    return this.store.updateDevice(deviceId, { name: clean });
   }
 
   setDeviceRole(deviceId: string, role: string): Device | undefined {
@@ -899,7 +1026,9 @@ export class Notifier extends EventEmitter<NotifierEvents> {
       if (!info.isFile()) throw new Error('not a file');
       const body = await readFile(target);
       res.writeHead(200, {
-        'content-type': MIME[extname(target)] ?? 'application/octet-stream',
+        // Lowercased: a file served as `LOGO.PNG` is still a PNG, and a browser
+        // handed `application/octet-stream` under `nosniff` will not render it.
+        'content-type': MIME[extname(target).toLowerCase()] ?? 'application/octet-stream',
         'cache-control': 'no-cache',
       });
       res.end(body);
@@ -1004,6 +1133,15 @@ export class Notifier extends EventEmitter<NotifierEvents> {
         session.close(1011, 'internal error');
       });
     });
+    // The peer's implementation answers pings for it, so a pong is proof the
+    // far end is still reachable rather than proof its app is healthy - which
+    // is exactly the question `sweepDeadSockets` asks.
+    ws.on('pong', () => {
+      session.alive = true;
+      // Presence, not intent: the peer's implementation sent this, so it says
+      // the device is reachable and nothing about anyone using it.
+      this.touchDevice(session, false);
+    });
     ws.on('close', () => this.closeSession(session));
     ws.on('error', () => this.closeSession(session));
   }
@@ -1032,6 +1170,34 @@ export class Notifier extends EventEmitter<NotifierEvents> {
         const device = this.store.device(deviceId);
         if (device) this.emit('device:offline', device);
       }
+    }
+  }
+
+  /**
+   * Records that a device was heard from.
+   *
+   * `lastSeenAt` used to be written only at pair and auth, so it meant "when
+   * this device connected" while claiming to mean "when it was last seen" -
+   * which made `notifyjs devices` print `online ... 7 days ago` for a device
+   * connected right now.
+   *
+   * Written through a throttle because it is on the path of every inbound
+   * frame, and a store write per frame would make the busiest device the most
+   * expensive one.
+   */
+  private touchDevice(session: Session, active: boolean): void {
+    const device = session.device;
+    if (!device) return;
+
+    const now = Date.now();
+    const patch: Partial<Device> = {};
+    if (now - (device.lastSeenAt ?? 0) >= DEVICE_TOUCH_MS) patch.lastSeenAt = now;
+    if (active && now - (device.lastActiveAt ?? 0) >= DEVICE_TOUCH_MS) patch.lastActiveAt = now;
+    if (Object.keys(patch).length === 0) return;
+
+    const updated = this.store.updateDevice(device.id, patch);
+    if (updated) {
+      for (const other of this.byDevice.get(device.id) ?? []) other.device = updated;
     }
   }
 
@@ -1066,6 +1232,10 @@ export class Notifier extends EventEmitter<NotifierEvents> {
       session.error('unauthenticated', 'pair or auth first');
       return;
     }
+
+    // `ping` is a keepalive and says nothing about intent; everything else
+    // here is the device or its user doing something.
+    this.touchDevice(session, msg.t !== 'ping');
 
     switch (msg.t) {
       case 'ack':
@@ -1186,6 +1356,7 @@ export class Notifier extends EventEmitter<NotifierEvents> {
       status: 'active',
       createdAt: Date.now(),
       lastSeenAt: Date.now(),
+      lastActiveAt: Date.now(),
       lastIp: session.ip,
       // Start at the current head: a new device gets what happens next, not a
       // replay of every incident from before it existed.
@@ -1359,7 +1530,6 @@ export class Notifier extends EventEmitter<NotifierEvents> {
 
     for (const n of shown) {
       session.send({ v: PROTOCOL_VERSION, t: 'notification', n });
-      if (n.requireAck) session.pending.add(n.id);
     }
   }
 
@@ -1373,7 +1543,6 @@ export class Notifier extends EventEmitter<NotifierEvents> {
     }
     const ids = Array.isArray(msg.ids) ? msg.ids.slice(0, 500) : [];
     for (const id of ids) {
-      session.pending.delete(id);
       this.emit('ack', { notificationId: id, deviceId: session.device.id, action: msg.action });
       // One acknowledgement is enough: a human has seen it, so stop retrying.
       const timer = this.ackWaiters.get(id);
@@ -1671,7 +1840,6 @@ export class Notifier extends EventEmitter<NotifierEvents> {
       if (session.state !== 'ready' || !session.device) continue;
       if (!this.allowed(session, n.channel, n.severity, n.to, false)) continue;
       session.send({ v: PROTOCOL_VERSION, t: 'notification', n });
-      if (n.requireAck) session.pending.add(n.id);
       // A device may hold several sockets; it is still one device reached.
       reached.add(session.device.id);
     }
@@ -1682,6 +1850,10 @@ export class Notifier extends EventEmitter<NotifierEvents> {
    * Re-sends an unacknowledged notification until somebody acks it, its TTL
    * runs out, or we hit the attempt ceiling. This is what makes `requireAck`
    * mean "a person saw this" rather than "a socket was open at the time".
+   *
+   * Tracked hub-wide in `ackWaiters`, keyed by notification, rather than per
+   * session: one acknowledgement from any entitled device is what settles an
+   * alert, so a per-socket set of outstanding ids would have nothing to decide.
    */
   private scheduleAckRetry(n: Notification): void {
     let attempts = 0;
@@ -1722,13 +1894,20 @@ export class Notifier extends EventEmitter<NotifierEvents> {
         send: (m) => session.send(m),
       });
     }
-    // Most recently seen device first: the phone in someone's hand should ring
+    // Most recently *used* device first: the phone in someone's hand should ring
     // before the tablet that has been on a shelf since Tuesday.
-    return targets.sort(
-      (a, b) =>
-        (this.store.device(b.deviceId)?.lastSeenAt ?? 0) -
-        (this.store.device(a.deviceId)?.lastSeenAt ?? 0),
-    );
+    //
+    // Ordered by `lastActiveAt`, not `lastSeenAt`. Every device here is
+    // connected, so "seen" cannot separate them - it recorded when each one
+    // authenticated, which ranked a tablet that had just reconnected after a
+    // network blip above a phone that had been reliably present all day, the
+    // exact inversion of what this is for. Falling back to `lastSeenAt` keeps
+    // a device that has never done anything in the running, just last.
+    const rank = (deviceId: string) => {
+      const device = this.store.device(deviceId);
+      return device?.lastActiveAt ?? device?.lastSeenAt ?? 0;
+    };
+    return targets.sort((a, b) => rank(b.deviceId) - rank(a.deviceId));
   }
 
   private audit(kind: string, extra: Omit<AuditEvent, 'ts' | 'kind'> = {}): void {
@@ -1785,7 +1964,17 @@ function clampNumber(value: unknown, min: number, max: number, fallback: number)
 /** A snooze is a nap, not an off switch. */
 const MAX_SNOOZE_MS = 24 * 60 * 60_000;
 
-const MIME: Record<string, string> = {
+/**
+ * How stale a device's timestamps may get before a frame refreshes them.
+ *
+ * These are read by a human looking at a device list and by the call ladder,
+ * neither of which needs second-level precision - and writing on every frame
+ * would put a store write on the hot path of the noisiest device.
+ */
+const DEVICE_TOUCH_MS = 30_000;
+
+/** Null-prototyped: the key is derived from a request path. */
+const MIME: Record<string, string> = Object.assign(Object.create(null), {
   '.html': 'text/html; charset=utf-8',
   '.js': 'text/javascript; charset=utf-8',
   '.css': 'text/css; charset=utf-8',
@@ -1794,10 +1983,18 @@ const MIME: Record<string, string> = {
   '.png': 'image/png',
   '.ico': 'image/x-icon',
   '.webmanifest': 'application/manifest+json',
-};
+});
 
-/** Least privilege per admin op; `admin` satisfies all of them implicitly. */
-const ADMIN_CAPABILITY: Record<string, Capability> = {
+/**
+ * Least privilege per admin op; `admin` satisfies all of them implicitly.
+ *
+ * Null-prototyped, because `msg.op` comes off the wire and indexes this table
+ * directly. A plain object answers `ADMIN_CAPABILITY['constructor']` with a
+ * truthy function - which today fails the `hasCapability` check that follows
+ * and so denies the frame, but only by accident. An authorization table should
+ * not depend on the next line to catch a key it should never have returned.
+ */
+const ADMIN_CAPABILITY: Record<string, Capability> = Object.assign(Object.create(null), {
   'devices.list': 'devices.manage',
   'devices.revoke': 'devices.manage',
   'devices.rename': 'devices.manage',
@@ -1821,7 +2018,7 @@ const ADMIN_CAPABILITY: Record<string, Capability> = {
   'call.place': 'call.place',
   'audit.tail': 'audit.read',
   history: 'notify.receive',
-};
+});
 
 /** A valid, throwaway key used to keep failed-auth timing flat. */
 const DECOY_PUBLIC_KEY = 'BdC4l3lXbNIqjRfjP8ycxHDCiMMVBpjs7ymEQR8lPFY';
@@ -1835,6 +2032,68 @@ function matchesTargeting(to: Targeting, deviceId: string, role: string): boolea
   if (to.devices?.length && !to.devices.includes(deviceId)) return false;
   if (to.roles?.length && !to.roles.includes(role)) return false;
   return true;
+}
+
+/** Ceilings for a ladder that arrived over the wire. */
+const MAX_POLICY_STEPS = 50;
+const MAX_RING_SECONDS = 600;
+const MAX_STEP_DELAY_SECONDS = 3600;
+const MAX_POLICY_REPEAT = 10;
+
+/**
+ * Normalises an escalation policy, bounding everything a timer will consume.
+ *
+ * Written as a total function over unknown input: the wire path passes the
+ * frame's `args` through unchanged, so a missing `steps` or a `ringSeconds` of
+ * `"soon"` has to produce a usable ladder or a clear error, never a NaN that
+ * `setTimeout` quietly fires immediately.
+ */
+function sanitizePolicy(input: EscalationPolicy): EscalationPolicy {
+  const raw = (input ?? {}) as Partial<EscalationPolicy>;
+  const name = typeof raw.name === 'string' ? raw.name.trim().slice(0, 64) : '';
+  if (!name) throw new Error('an escalation policy needs a name');
+  if (!Array.isArray(raw.steps) || raw.steps.length === 0) {
+    throw new Error('an escalation policy needs at least one step');
+  }
+
+  const steps = raw.steps.slice(0, MAX_POLICY_STEPS).map((step) => {
+    const s = (step ?? {}) as Record<string, unknown>;
+    const out: EscalationPolicy['steps'][number] = {};
+    // Left unset when the value is not a number: `buildLadder` then falls back
+    // to the call's own ring duration, which is a better answer than a figure
+    // invented here.
+    const ring = Number(s.ringSeconds);
+    if (Number.isFinite(ring)) {
+      out.ringSeconds = Math.min(MAX_RING_SECONDS, Math.max(1, Math.floor(ring)));
+    }
+    const delay = Number(s.delaySeconds);
+    if (Number.isFinite(delay)) {
+      out.delaySeconds = Math.min(MAX_STEP_DELAY_SECONDS, Math.max(0, Math.floor(delay)));
+    }
+    const to = s.to as Targeting | undefined;
+    if (to && typeof to === 'object') {
+      out.to = {
+        roles: stringList(to.roles),
+        devices: stringList(to.devices),
+      };
+    }
+    return out;
+  });
+
+  const policy: EscalationPolicy = { name, steps };
+  if (typeof raw.description === 'string') policy.description = raw.description.slice(0, 200);
+  if (raw.repeat !== undefined) {
+    // An unbounded repeat is a ladder that never stops climbing.
+    policy.repeat = clampNumber(raw.repeat, 0, MAX_POLICY_REPEAT, 0);
+  }
+  return policy;
+}
+
+/** A bounded list of strings, for targeting that arrived over the wire. */
+function stringList(value: unknown): string[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const out = value.filter((v): v is string => typeof v === 'string').slice(0, 100);
+  return out.length > 0 ? out : undefined;
 }
 
 function withSeverity(input: NotifyInput | string, severity: Severity): NotifyInput {

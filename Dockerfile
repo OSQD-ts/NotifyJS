@@ -47,7 +47,7 @@ COPY --from=build /app/build/notifyjs.cjs ./notifyjs.cjs
 COPY --from=build /app/build/dashboard ./dashboard
 COPY --from=build /app/LICENSE ./LICENSE
 
-# The hub cannot resolve @notifyjs/web as a module here, so point it directly.
+# The hub cannot resolve @osqd/notifyjs-web as a module here, so point it directly.
 ENV NOTIFYJS_DASHBOARD_DIR=/app/dashboard
 
 # Hub state (devices, roles, history) belongs on a volume, not in the image.

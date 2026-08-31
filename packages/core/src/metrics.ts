@@ -21,6 +21,7 @@ export class Metrics {
   private pushSent = 0;
   private pushFailed = 0;
   private stalledDrops = 0;
+  private unreachableDrops = 0;
   private heartbeatMisses = 0;
 
   notified(severity: Severity, reached: number): void {
@@ -59,6 +60,11 @@ export class Metrics {
 
   stalled(): void {
     this.stalledDrops += 1;
+  }
+
+  /** A device dropped for no longer answering, as opposed to not reading. */
+  dropped(): void {
+    this.unreachableDrops += 1;
   }
 
   heartbeatMissed(): void {
@@ -103,6 +109,12 @@ export class Metrics {
     metric('push_sent_total', 'Wake-up pushes delivered.', 'counter', this.pushSent);
     metric('push_failed_total', 'Wake-up pushes that failed.', 'counter', this.pushFailed);
     metric('stalled_drops_total', 'Devices dropped for not reading.', 'counter', this.stalledDrops);
+    metric(
+      'unreachable_drops_total',
+      'Devices dropped for not answering a liveness ping.',
+      'counter',
+      this.unreachableDrops,
+    );
     metric('heartbeat_misses_total', 'Heartbeat check-ins missed.', 'counter', this.heartbeatMisses);
 
     metric('devices', 'Devices known to the hub.', 'gauge', gauges.devices);

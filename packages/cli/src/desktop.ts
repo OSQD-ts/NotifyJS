@@ -161,7 +161,10 @@ function safeText(value: string, keepNewlines = false): string {
 /** Terminal fallback, and the primary view when running in the foreground. */
 export function printNotification(n: Notification): void {
   const time = new Date(n.ts).toLocaleTimeString();
-  const tag = color(n.severity, String(n.severity).toUpperCase().padEnd(8));
+  // Sanitised like every other field on this line. It is hub-supplied text on
+  // its way to a terminal, and being a short enum by contract is not the same
+  // as being one on the wire.
+  const tag = color(n.severity, safeText(String(n.severity)).toUpperCase().padEnd(8));
   const channel = safeText(String(n.channel));
   process.stdout.write(`${dim(time)} ${tag} ${dim('[' + channel + ']')} ${safeText(n.title)}\n`);
   if (n.body) {
@@ -170,14 +173,19 @@ export function printNotification(n: Notification): void {
   }
 }
 
-const CODES: Record<Severity, string> = {
+/**
+ * Null-prototyped: the lookup key arrives from the hub, and a plain object
+ * answers `CODES['constructor']` with a function, which would be interpolated
+ * straight into the escape sequence below.
+ */
+const CODES: Record<Severity, string> = Object.assign(Object.create(null), {
   debug: '90',
   info: '36',
   success: '32',
   warning: '33',
   error: '31',
   critical: '35',
-};
+});
 
 function color(severity: Severity, text: string): string {
   if (!process.stdout.isTTY) return text;

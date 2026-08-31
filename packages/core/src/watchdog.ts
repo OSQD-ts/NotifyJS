@@ -1,32 +1,10 @@
-import type { Severity } from '@osqd/notifyjs-protocol';
+import type { Heartbeat, HeartbeatSpec } from '@osqd/notifyjs-protocol';
 
-export interface HeartbeatSpec {
-  /** How often a check-in is expected. */
-  every: number | string;
-  /** Extra time allowed before the miss is treated as real. */
-  grace?: number | string;
-  /** Severity of the alert raised when a check-in does not arrive. */
-  severity?: Severity;
-  channel?: string;
-  /** Human-readable description used in the alert body. */
-  description?: string;
-  /** Alert again on every missed interval, not just the first. */
-  repeat?: boolean;
-}
-
-export interface Heartbeat {
-  name: string;
-  every: number;
-  grace: number;
-  severity: Severity;
-  channel: string;
-  description?: string;
-  repeat: boolean;
-  lastSeenAt: number;
-  /** True while the hub is alerting about this one. */
-  missing: boolean;
-  createdAt: number;
-}
+// The shapes themselves live in the protocol package: the hub returns them
+// over `admin`, so they are part of the wire contract rather than of this
+// file's implementation. Re-exported here so callers can keep importing them
+// from beside the watchdog that enforces them.
+export type { Heartbeat, HeartbeatSpec };
 
 export interface HeartbeatEvent {
   heartbeat: Heartbeat;
@@ -116,6 +94,19 @@ export class Watchdog {
   /** Restores heartbeats across a restart, preserving their last check-in. */
   restore(beats: Heartbeat[]): void {
     for (const beat of beats) this.beats.set(beat.name, beat);
+    if (this.beats.size > 0) this.ensureRunning();
+  }
+
+  /**
+   * Resumes checking for overdue check-ins after a `stop()`.
+   *
+   * A hub that was stopped and started again went on *listing* its heartbeats
+   * while no longer sweeping them: `heartbeats()` reported a job as watched and
+   * no missed check-in would ever be raised again. Silence is the whole signal
+   * here, so a watchdog that has quietly stopped watching is the worst possible
+   * failure of it.
+   */
+  start(): void {
     if (this.beats.size > 0) this.ensureRunning();
   }
 

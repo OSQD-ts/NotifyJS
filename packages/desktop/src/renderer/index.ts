@@ -104,7 +104,7 @@ function onCall(call: ActiveCall | null): void {
   if (call) {
     answering = false;
     speaking = false;
-    ringer.start();
+    ringer.start(call.call.ringSeconds);
   } else {
     // Cancelled by the hub because another device picked up, or ended here.
     resetCall();
@@ -114,8 +114,72 @@ function onCall(call: ActiveCall | null): void {
 
 /* ------------------------------- rendering -------------------------- */
 
+/**
+ * What a rebuild would throw away.
+ *
+ * The main process pushes the whole snapshot on every change - a hub
+ * reconnecting, an alert arriving, a source going quiet - and each push
+ * replaces the entire DOM. Anything the user was in the middle of lives only
+ * in that DOM: a half-typed pairing code, the caret inside it, how far down
+ * the feed they had scrolled. Without this, a hub reconnecting in the
+ * background wipes the code someone is still typing.
+ */
+interface LiveState {
+  focusedId: string;
+  value?: string;
+  selectionStart: number | null;
+  selectionEnd: number | null;
+  scroll: Map<string, number>;
+}
+
+/** Elements whose scroll position is worth carrying across a rebuild. */
+const SCROLLERS = ['feed-list', 'settings-scroll'];
+
+function captureLiveState(): LiveState {
+  const scroll = new Map<string, number>();
+  for (const id of SCROLLERS) {
+    const node = document.getElementById(id);
+    if (node && node.scrollTop > 0) scroll.set(id, node.scrollTop);
+  }
+
+  const active = document.activeElement;
+  if (!(active instanceof HTMLInputElement) || !active.id) {
+    return { focusedId: '', selectionStart: null, selectionEnd: null, scroll };
+  }
+  return {
+    focusedId: active.id,
+    // The value the person is typing wins over the one state would supply:
+    // they are still editing it, and state does not know that yet.
+    value: active.value,
+    selectionStart: active.selectionStart,
+    selectionEnd: active.selectionEnd,
+    scroll,
+  };
+}
+
+function restoreLiveState(live: LiveState): void {
+  for (const [id, top] of live.scroll) {
+    const node = document.getElementById(id);
+    if (node) node.scrollTop = top;
+  }
+
+  if (!live.focusedId) return;
+  const node = document.getElementById(live.focusedId);
+  if (!(node instanceof HTMLInputElement)) return;
+
+  if (live.value !== undefined) node.value = live.value;
+  node.focus();
+  try {
+    node.setSelectionRange(live.selectionStart, live.selectionEnd);
+  } catch {
+    // Some input types refuse a selection range; focus alone is the point.
+  }
+}
+
 function render(): void {
   if (!state) return;
+  const live = captureLiveState();
+
   const next = state.activeCall
     ? callScreen(state, actions, speaking)
     : view === 'add' || (view !== 'settings' && state.sources.length === 0)
@@ -128,6 +192,7 @@ function render(): void {
           });
 
   root.replaceChildren(next);
+  restoreLiveState(live);
 }
 
 bridge.onState((next) => {

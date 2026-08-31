@@ -134,3 +134,63 @@ test('the served page carries the accessibility hooks the app relies on', () => 
 
   assert.equal(document.getElementById('feed').getAttribute('aria-label'), 'Notifications');
 });
+
+
+/**
+ * The markup the focus handling in app.ts depends on.
+ *
+ * Every overlay is trapped and Escape-dismissed by walking its focusable
+ * children. That only works if each one has some, and if the drawers carry a
+ * close control - so the page is asserted rather than assumed.
+ */
+test('each overlay carries what the focus trap needs', () => {
+  for (const id of ['call', 'settings', 'devices']) {
+    const overlay = document.getElementById(id);
+    assert.ok(overlay, `#${id} exists`);
+    assert.ok(overlay.hasAttribute('hidden'), `#${id} starts hidden`);
+
+    const focusable = overlay.querySelectorAll(
+      'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])',
+    );
+    assert.ok(focusable.length > 0, `#${id} has something to focus`);
+  }
+
+  // Escape closes a drawer through its own close button's handler, and the
+  // call through decline; both must exist for the keyboard path to work.
+  for (const id of ['settings-close', 'devices-close', 'call-decline']) {
+    assert.ok(document.getElementById(id), `#${id} exists`);
+  }
+});
+
+test('the call overlay is announced to assistive tech as a modal dialog', () => {
+  const call = document.getElementById('call');
+  assert.equal(call.getAttribute('role'), 'dialog');
+  assert.equal(call.getAttribute('aria-modal'), 'true');
+  // A dialog needs a name and a description, or a screen reader announces it
+  // as an unlabelled region and reads nothing about the call.
+  for (const attr of ['aria-labelledby', 'aria-describedby']) {
+    const target = call.getAttribute(attr);
+    assert.ok(target, `call has ${attr}`);
+    assert.ok(document.getElementById(target), `${attr} points at a real element`);
+  }
+});
+
+
+test('a ring stops itself even when nothing tells it to', async () => {
+  // Every normal ending comes from elsewhere - the user answering, or the hub
+  // sending `call.cancel`. A hub that dies mid-call sends neither, and the
+  // ring then ran for as long as the page stayed open.
+  const { maxRingMs } = await import('../dist/speech.js');
+
+  // Bounded above a plausible rung, so a long escalation step is never cut
+  // short, and below anything that would leave a speaker on all day.
+  assert.equal(maxRingMs(30), 45_000, 'the call`s own duration plus a margin');
+  assert.equal(maxRingMs(120), 135_000, 'a long rung still rings for all of it');
+  assert.equal(maxRingMs(undefined), 75_000, 'a call that names no duration still ends');
+
+  // Nothing a hub can send makes it unbounded.
+  for (const hostile of [0, -1, NaN, Infinity, 1e12, 'soon']) {
+    const ms = maxRingMs(hostile);
+    assert.ok(ms >= 30_000 && ms <= 15 * 60_000, `bounded for ${String(hostile)}: ${ms}`);
+  }
+});

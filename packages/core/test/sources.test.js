@@ -12,6 +12,13 @@ import { nodeCrypto } from '@osqd/notifyjs-protocol/node';
 /** Two independent hubs, as a person with a home server and a work one would have. */
 let home;
 let work;
+/**
+ * Assigned in `before`. The hubs take whatever port the OS hands out, so these
+ * hold the addresses the tests actually dial - fixed ports made the whole file
+ * fail whenever one was still held from an earlier run.
+ */
+let HOME_URL = '';
+let WORK_URL = '';
 const dirs = [];
 
 function hub(port, name) {
@@ -39,10 +46,12 @@ function manager(storage = memoryStorage(), minSeverity = 'debug') {
 }
 
 before(async () => {
-  home = hub(7970, 'Home Server');
-  work = hub(7971, 'Work Hub');
+  home = hub(0, 'Home Server');
+  work = hub(0, 'Work Hub');
   await home.start();
   await work.start();
+  HOME_URL = `ws://127.0.0.1:${new URL(home.url).port}`;
+  WORK_URL = `ws://127.0.0.1:${new URL(work.url).port}`;
 });
 
 after(async () => {
@@ -58,8 +67,8 @@ test('one device subscribes to two hubs and sees a merged feed', async () => {
   const received = [];
   sources.on('notification', (n) => received.push(n));
 
-  await sources.add({ url: 'ws://127.0.0.1:7970', code: home.createPairingCode({ role: 'oncall' }).code });
-  await sources.add({ url: 'ws://127.0.0.1:7971', code: work.createPairingCode({ role: 'viewer' }).code });
+  await sources.add({ url: HOME_URL, code: home.createPairingCode({ role: 'oncall' }).code });
+  await sources.add({ url: WORK_URL, code: work.createPairingCode({ role: 'viewer' }).code });
 
   const listed = sources.list();
   assert.equal(listed.length, 2);
@@ -87,7 +96,7 @@ test('each source keeps its own identity across a restart', async () => {
   const storage = memoryStorage();
   const first = manager(storage);
   await first.load();
-  await first.add({ url: 'ws://127.0.0.1:7970', code: home.createPairingCode({ role: 'oncall' }).code });
+  await first.add({ url: HOME_URL, code: home.createPairingCode({ role: 'oncall' }).code });
   const deviceCount = home.devices().length;
   first.disconnectAll();
 
@@ -107,7 +116,7 @@ test('a disabled source stays paired but goes quiet', async () => {
   const sources = manager();
   await sources.load();
   const added = await sources.add({
-    url: 'ws://127.0.0.1:7971',
+    url: WORK_URL,
     code: work.createPairingCode({ role: 'viewer' }).code,
   });
 
@@ -133,7 +142,7 @@ test('removing a source discards its identity', async () => {
   const sources = manager();
   await sources.load();
   const added = await sources.add({
-    url: 'ws://127.0.0.1:7970',
+    url: HOME_URL,
     code: home.createPairingCode({ role: 'oncall' }).code,
   });
 
@@ -142,7 +151,7 @@ test('removing a source discards its identity', async () => {
 
   // Re-adding must mint a new identity rather than resurrect the old one.
   const again = await sources.add({
-    url: 'ws://127.0.0.1:7970',
+    url: HOME_URL,
     code: home.createPairingCode({ role: 'oncall' }).code,
   });
   assert.notEqual(again.id, added.id);
@@ -152,10 +161,10 @@ test('removing a source discards its identity', async () => {
 test('the same hub cannot be added twice', async () => {
   const sources = manager();
   await sources.load();
-  await sources.add({ url: 'ws://127.0.0.1:7970', code: home.createPairingCode({ role: 'oncall' }).code });
+  await sources.add({ url: HOME_URL, code: home.createPairingCode({ role: 'oncall' }).code });
 
   await assert.rejects(
-    () => sources.add({ url: 'ws://127.0.0.1:7970', code: home.createPairingCode({ role: 'oncall' }).code }),
+    () => sources.add({ url: HOME_URL, code: home.createPairingCode({ role: 'oncall' }).code }),
     /already subscribed/,
   );
   sources.disconnectAll();
@@ -166,7 +175,7 @@ test('a failed pairing leaves no half-added source behind', async () => {
   await sources.load();
 
   await assert.rejects(
-    () => sources.add({ url: 'ws://127.0.0.1:7970', code: 'AAAA-AAAA-AAAA' }),
+    () => sources.add({ url: HOME_URL, code: 'AAAA-AAAA-AAAA' }),
     /pairing failed|did not respond/i,
   );
   assert.equal(sources.list().length, 0, 'the list is unchanged after a failure');
@@ -187,7 +196,7 @@ test("a personal severity floor narrows what a role allows, never widens it", as
   const sources = manager(memoryStorage(), 'error');
   await sources.load();
   // The role would permit info and above; the person asked for error and above.
-  await sources.add({ url: 'ws://127.0.0.1:7971', code: work.createPairingCode({ role: 'viewer' }).code });
+  await sources.add({ url: WORK_URL, code: work.createPairingCode({ role: 'viewer' }).code });
 
   const seen = [];
   sources.on('notification', (n) => seen.push(n.notification.title));
@@ -224,7 +233,7 @@ test('adding a source while the list is still loading does not cancel the pairin
   // Seed one existing subscription so load() has real work to do.
   const seed = manager(storage);
   await seed.load();
-  await seed.add({ url: 'ws://127.0.0.1:7970', code: home.createPairingCode({ role: 'oncall' }).code });
+  await seed.add({ url: HOME_URL, code: home.createPairingCode({ role: 'oncall' }).code });
   seed.disconnectAll();
 
   // A fresh manager, with a deep link arriving before load() finishes - which
@@ -232,7 +241,7 @@ test('adding a source while the list is still loading does not cancel the pairin
   const sources = manager(storage);
   const loading = sources.load();
   const adding = sources.add({
-    url: 'ws://127.0.0.1:7971',
+    url: WORK_URL,
     code: work.createPairingCode({ role: 'oncall' }).code,
   });
 
@@ -253,7 +262,7 @@ test('a failed pairing leaves no client retrying in the background', async () =>
   await sources.load();
 
   const before = home.auditLog(500).filter((e) => e.kind === 'pair.failed').length;
-  await assert.rejects(() => sources.add({ url: 'ws://127.0.0.1:7970', code: 'AAAA-AAAA-AAAA' }));
+  await assert.rejects(() => sources.add({ url: HOME_URL, code: 'AAAA-AAAA-AAAA' }));
 
   // An abandoned client with autoReconnect would keep retrying forever, which
   // shows up as a steadily climbing count of failures at the hub.

@@ -4,7 +4,10 @@ import type {
   CallRequest,
   CallOutcome,
   Device,
+  EscalationPolicy,
+  Heartbeat,
   Notification,
+  PairingCode,
   Role,
   AuditEvent,
 } from './types.js';
@@ -225,10 +228,6 @@ export interface PingMsg extends Envelope {
 }
 
 /**
- * Registers a wake-up token so the hub can reach this device while its socket
- * is closed. Sending an empty token withdraws consent and clears it.
- */
-/**
  * Silences this device for a while. `untilMs` of 0 cancels an active snooze.
  */
 export interface SnoozeMsg extends Envelope {
@@ -236,6 +235,10 @@ export interface SnoozeMsg extends Envelope {
   untilMs: number;
 }
 
+/**
+ * Registers a wake-up token so the hub can reach this device while its socket
+ * is closed. Sending an empty token withdraws consent and clears it.
+ */
 export interface PushRegisterMsg extends Envelope {
   t: 'push.register';
   token: string;
@@ -279,11 +282,61 @@ export type AdminOp =
   | 'policies.delete'
   | 'metrics';
 
-/** Shapes returned by `admin.result` for the ops the dashboard relies on. */
+/**
+ * What each `admin` op resolves to.
+ *
+ * The single description of the hub's admin replies, so the CLI, dashboard and
+ * desktop app stop each hand-writing their own. That duplication had already
+ * drifted: this table used to claim `pair.create` returned only a code, role
+ * and expiry, while the hub has long returned the pairing link and QR too -
+ * which both the CLI and the dashboard were reading through their own,
+ * separately-written annotations.
+ *
+ * Every entry must match what `handleAdmin` actually replies.
+ */
 export interface AdminData {
   'devices.list': { devices: Device[]; online: string[] };
-  'pair.create': { code: string; expiresAt: number; role: string };
+  'devices.revoke': { revoked: boolean };
+  'devices.rename': { device?: Device };
+  'devices.setRole': { device?: Device };
+  'pair.create': IssuedPairingCode;
+  'pair.list': { codes: PairingCode[] };
+  'pair.revoke': { revoked: boolean };
   'roles.list': { roles: Role[] };
+  'roles.upsert': { roles: Role[] };
+  'roles.delete': { deleted: boolean };
+  'notify.send': Record<string, never>;
+  'notify.resolve': { resolved: string[] };
+  'call.place': Record<string, never>;
+  'heartbeats.list': { heartbeats: Heartbeat[] };
+  'heartbeat.expect': { heartbeat: Heartbeat };
+  'heartbeat.checkin': { known: boolean };
+  'heartbeat.forget': { forgotten: boolean };
+  'policies.list': { policies: EscalationPolicy[] };
+  'policies.upsert': { policies: EscalationPolicy[] };
+  'policies.delete': { deleted: boolean };
+  metrics: { text: string };
   'audit.tail': { events: AuditEvent[] };
   history: { notifications: Notification[] };
 }
+
+/**
+ * A freshly minted pairing code, as `pair.create` returns it.
+ *
+ * The hub builds the link and renders the QR because it is the only party that
+ * knows its own reachable address; a client cannot reconstruct either.
+ */
+export interface IssuedPairingCode {
+  code: string;
+  role: string;
+  expiresAt: number;
+  /** Deep link carrying both the hub address and the code. */
+  link: string;
+  /** The same link as a QR code, for scanning with a phone. */
+  qr: { svg: string; terminal: string };
+}
+
+/** The reply type for an op, or `unknown` for one nothing has described. */
+export type AdminResult<Op extends AdminOp> = Op extends keyof AdminData
+  ? AdminData[Op]
+  : unknown;

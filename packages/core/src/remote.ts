@@ -1,4 +1,11 @@
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  renameSync,
+  writeFileSync,
+} from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import WebSocket from 'ws';
@@ -165,7 +172,7 @@ export class RemoteNotifier {
   async resolve(target: string | { id?: string; key?: string }): Promise<string[]> {
     await this.connect();
     const spec = typeof target === 'string' ? { key: target } : target;
-    const out = await this.client.admin<{ resolved: string[] }>('notify.resolve', spec);
+    const out = await this.client.admin('notify.resolve', spec);
     return out.resolved ?? [];
   }
 
@@ -194,7 +201,7 @@ export class RemoteNotifier {
    */
   async expect(name: string, spec: HeartbeatSpec): Promise<Heartbeat> {
     await this.connect();
-    const out = await this.client.admin<{ heartbeat: Heartbeat }>('heartbeat.expect', {
+    const out = await this.client.admin('heartbeat.expect', {
       name,
       ...spec,
     } as unknown as Record<string, unknown>);
@@ -203,7 +210,7 @@ export class RemoteNotifier {
 
   async checkIn(name: string): Promise<boolean> {
     await this.connect();
-    const out = await this.client.admin<{ known: boolean }>('heartbeat.checkin', { name });
+    const out = await this.client.admin('heartbeat.checkin', { name });
     return out.known ?? false;
   }
 
@@ -244,7 +251,7 @@ export class RemoteNotifier {
 
   async history(limit = 100): Promise<Notification[]> {
     await this.connect();
-    const out = await this.client.admin<{ notifications: Notification[] }>('history', { limit });
+    const out = await this.client.admin('history', { limit });
     return out.notifications ?? [];
   }
 }
@@ -269,7 +276,14 @@ function defaultStorage(): ClientStorage {
   };
   const save = (data: Record<string, string>) => {
     mkdirSync(dirname(file), { recursive: true, mode: 0o700 });
-    writeFileSync(file, JSON.stringify(data, null, 2), { mode: 0o600 });
+    // Write-then-rename, exactly as the hub's own store does: a crash or power
+    // loss partway through a direct write leaves a truncated file, `load()`
+    // cannot parse it, and this device silently loses the private seed that is
+    // its identity - appearing unpaired while the hub still holds its record.
+    // History can be regenerated; a keypair cannot.
+    const tmp = `${file}.tmp`;
+    writeFileSync(tmp, JSON.stringify(data, null, 2), { mode: 0o600 });
+    renameSync(tmp, file);
     // `mode` above only applies when the file is created; restate it so an
     // existing file cannot keep looser permissions than it should have.
     try {

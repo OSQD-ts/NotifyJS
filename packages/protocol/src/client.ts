@@ -4,6 +4,7 @@ import { normalizePairingCode } from './code.js';
 import type { CryptoProvider, KeyPair } from './crypto.js';
 import type {
   AdminOp,
+  AdminResult,
   CallMsg,
   CallCancelMsg,
   ClientMessage,
@@ -254,10 +255,34 @@ export class NotifyClient {
     this.reconnectTimer = undefined;
     this.socket?.close(1000, 'client closed');
     this.socket = undefined;
+    // Failed here rather than left to `onclose`: that handler ignores a socket
+    // this method has already dropped, so an outstanding admin call would
+    // otherwise sit until its own timeout with no connection left to answer it.
+    this.failPendingAdmin('the connection was closed');
     this.setStatus('idle');
   }
 
   private open(): void {
+    // A reconnect already in flight must not race the socket opened here.
+    // `connect()` and `pair()` are public and are routinely called while a
+    // backoff timer is pending - without this the timer fires anyway and the
+    // client ends up holding two sockets, each acknowledging the same alerts.
+    if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+    this.reconnectTimer = undefined;
+
+    // Likewise for a socket that is still open: dropping the reference without
+    // closing it leaks the connection and leaves the hub counting a device
+    // that nothing is reading from.
+    const previous = this.socket;
+    if (previous) {
+      previous.onopen = previous.onmessage = previous.onclose = previous.onerror = null;
+      try {
+        previous.close(1000, 'reconnecting');
+      } catch {
+        /* already closing */
+      }
+    }
+
     this.setStatus(this.backoff > 0 ? 'reconnecting' : 'connecting');
     const socket = this.opts.createSocket(this.opts.url);
     this.socket = socket;
@@ -273,14 +298,17 @@ export class NotifyClient {
       this.setStatus('error');
     };
     socket.onclose = () => {
+      // A stale socket's close must not disturb the one that replaced it.
+      if (this.socket !== socket) return;
       this.socket = undefined;
       // Anything still waiting on this socket will never be answered.
       this.failPendingAdmin('the connection closed before the hub replied');
+      if (this.closedByUs || this.status === 'revoked') return;
       // A closed socket is a strong hint, but not proof: reconnecting may
       // succeed immediately. Let the same deadline decide, so a blip during a
-      // restart does not page anyone.
+      // restart does not page anyone. `armWatchdog` declines outright for a
+      // close we asked for.
       this.armWatchdog();
-      if (this.closedByUs || this.status === 'revoked') return;
       // Reconnecting without credentials would reopen the socket, be told
       // "unpaired" again, and close - forever, at up to one attempt a second.
       // The UI has to supply a code before there is any point in retrying.
@@ -506,8 +534,16 @@ export class NotifyClient {
     this.send({ v: PROTOCOL_VERSION, t: 'call.ended', callId });
   }
 
-  /** Issues a privileged operation; rejects if the role lacks the capability. */
-  admin<T = unknown>(op: AdminOp, args?: Record<string, unknown>): Promise<T> {
+  /**
+   * Issues a privileged operation; rejects if the role lacks the capability.
+   *
+   * The result type comes from `AdminData`, keyed on the op, so a caller can no
+   * longer describe a reply shape that the hub does not actually send. Every
+   * call site used to carry its own annotation, and they had already drifted
+   * apart from the hub and from each other.
+   */
+  admin<Op extends AdminOp>(op: Op, args?: Record<string, unknown>): Promise<AdminResult<Op>> {
+    type T = AdminResult<Op>;
     const id = `a${++this.adminSeq}`;
     return new Promise<T>((resolve, reject) => {
       const timer = setTimeout(() => {
@@ -571,6 +607,11 @@ export class NotifyClient {
     this.disarmWatchdog();
     const spec = this.watchdogSpec;
     if (!spec?.enabled) return;
+    // A client that has deliberately left is not watching anything. Guarding
+    // the single place the timer is set covers every route back in - the close
+    // handler, and a frame that lands in the moment between `disconnect()` and
+    // the socket actually closing, which re-armed it through `noteHeardFrom`.
+    if (this.closedByUs) return;
 
     const deadline = spec.intervalMs + spec.graceMs;
     this.watchdogTimer = setTimeout(() => void this.onSilence(), deadline);
@@ -664,17 +705,45 @@ export class NotifyClient {
   }
 }
 
-/** Storage backed by `localStorage`, for browsers. */
+/**
+ * Storage backed by `localStorage`, for browsers.
+ *
+ * Every access is guarded. `localStorage` is not merely absent in some
+ * contexts - reading it *throws* when a browser is set to block site data, and
+ * `setItem` throws on a full quota or in some private-browsing modes. An
+ * uncaught throw here rejected the pairing that was in flight, so a browser
+ * with third-party data blocked could not pair at all.
+ */
 export function webStorage(): ClientStorage {
+  const store = (): Storage | undefined => {
+    try {
+      return globalThis.localStorage ?? undefined;
+    } catch {
+      return undefined;
+    }
+  };
+
   return {
     async get(k) {
-      return globalThis.localStorage?.getItem(k) ?? null;
+      try {
+        return store()?.getItem(k) ?? null;
+      } catch {
+        return null;
+      }
     },
     async set(k, v) {
-      globalThis.localStorage?.setItem(k, v);
+      try {
+        store()?.setItem(k, v);
+      } catch {
+        // Nothing persists, but the credentials still work for this session.
+      }
     },
     async remove(k) {
-      globalThis.localStorage?.removeItem(k);
+      try {
+        store()?.removeItem(k);
+      } catch {
+        /* nothing to remove if we cannot reach it */
+      }
     },
   };
 }

@@ -176,7 +176,13 @@ async function verifyChecksum(release: ReleaseInfo, name: string, path: string):
   const sums = release.assets.find((a) => a.name === CHECKSUM_ASSET);
   if (!sums) throw new Error(`release ${release.tag} publishes no checksums; refusing to update`);
 
-  const response = await fetch(sums.url, { redirect: 'follow' });
+  // Bounded like the download it guards. An unbounded fetch here would let a
+  // stalled connection hang the update indefinitely at the one step that
+  // decides whether the binary is safe to install.
+  const response = await fetch(sums.url, {
+    redirect: 'follow',
+    signal: AbortSignal.timeout(60_000),
+  });
   if (!response.ok) {
     throw new Error(`could not read checksums for ${release.tag}: HTTP ${response.status}`);
   }

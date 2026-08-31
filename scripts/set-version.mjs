@@ -9,7 +9,7 @@
  *
  *   node scripts/set-version.mjs 0.2.0
  */
-import { readFileSync, writeFileSync } from 'node:fs';
+import { readFileSync, realpathSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 
@@ -19,12 +19,35 @@ const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 export const PACKAGES = ['protocol', 'web', 'core', 'cli'];
 
 const version = process.argv[2]?.replace(/^v/, '');
-if (import.meta.url === `file://${process.argv[1]}`) {
+if (isEntryPoint()) {
   if (!version) {
     console.error('usage: set-version.mjs <version>');
     process.exit(1);
   }
   setVersion(version);
+}
+
+/**
+ * Whether this file was run directly, rather than imported.
+ *
+ * Compared as resolved paths. The obvious form - `import.meta.url ===
+ * \`file://${process.argv[1]}\`` - is a URL against a filesystem path, and the
+ * two stop matching the moment the checkout sits anywhere needing percent
+ * encoding: a directory with a space in it makes this read false, the script
+ * exits 0 having changed nothing, and the release publishes packages whose
+ * dependencies on each other name a version that was never published. Silent,
+ * and precisely the failure this file exists to prevent.
+ */
+function isEntryPoint() {
+  if (!process.argv[1]) return false;
+  const resolve = (path) => {
+    try {
+      return realpathSync(path);
+    } catch {
+      return path;
+    }
+  };
+  return resolve(fileURLToPath(import.meta.url)) === resolve(process.argv[1]);
 }
 
 export function setVersion(target) {

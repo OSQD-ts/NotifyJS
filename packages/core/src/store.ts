@@ -19,9 +19,17 @@ import {
   type Role,
 } from '@osqd/notifyjs-protocol';
 
-/** Reads the last `limit` JSON lines, skipping any the process died mid-write. */
-function readTail<T>(file: string, limit: number): T[] {
-  if (!existsSync(file)) return [];
+/**
+ * Reads the last `limit` JSON lines, skipping any the process died mid-write,
+ * and reports how many lines the file holds.
+ *
+ * The count comes back from the same pass rather than from a second read: the
+ * line total drives compaction, and reading a file that may hold twice the
+ * retention window twice over - once to parse, once to count - doubled the
+ * startup cost of every hub for a number already in hand.
+ */
+function readTail<T>(file: string, limit: number): { entries: T[]; lines: number } {
+  if (!existsSync(file)) return { entries: [], lines: 0 };
   try {
     const lines = readFileSync(file, 'utf8').split('\n').filter(Boolean);
     const out: T[] = [];
@@ -33,9 +41,9 @@ function readTail<T>(file: string, limit: number): T[] {
       }
     }
     // Trim after parsing, so a damaged line does not cost a retention slot.
-    return out.slice(-limit);
+    return { entries: out.slice(-limit), lines: lines.length };
   } catch {
-    return [];
+    return { entries: [], lines: 0 };
   }
 }
 
@@ -55,17 +63,11 @@ function unsafeKey(key: string): boolean {
   return key === '__proto__' || key === 'constructor' || key === 'prototype';
 }
 
-function countLines(file: string): number {
-  if (!existsSync(file)) return 0;
-  try {
-    return readFileSync(file, 'utf8').split('\n').filter(Boolean).length;
-  } catch {
-    return 0;
-  }
-}
-
 /** Ceiling on retained ban records. See `Store.putBan`. */
 const MAX_BANS = 10_000;
+
+/** The string-keyed maps in a store document, all restored the same way. */
+const COLLECTIONS = ['devices', 'roles', 'codes', 'bans', 'heartbeats', 'policies'] as const;
 
 export interface BanRecord {
   ip: string;
@@ -119,6 +121,17 @@ export class Store {
   private historyLines = 0;
   private auditLines = 0;
 
+  /**
+   * Set when the store on disk could not be read and was started over.
+   *
+   * This is the most destructive thing that can happen here and it used to be
+   * completely silent: the `serverId` is part of every auth signature, so a
+   * fresh one means every paired device fails to authenticate at once, with no
+   * message anywhere connecting the outage to its cause. The path of the file
+   * that was set aside, so an operator can be pointed at it.
+   */
+  readonly recoveredFrom: string | undefined;
+
   constructor(
     private readonly dir: string,
     private readonly limits: { history: number; audit: number },
@@ -133,17 +146,21 @@ export class Store {
     this.auditFile = join(dir, 'audit.jsonl');
 
     const existed = existsSync(this.file);
-    this.data = this.load(serverIdFactory);
+    const loaded = this.load(serverIdFactory);
+    this.data = loaded.data;
+    this.recoveredFrom = loaded.recoveredFrom;
 
     // A fresh store must be written even if nothing is ever added to it. The
     // serverId is part of every auth signature, so letting it be regenerated
     // on the next boot would invalidate every paired device.
     if (!existed) this.markDirty();
 
-    this.historyCache = readTail<Notification>(this.historyFile, limits.history);
-    this.auditCache = readTail<AuditEvent>(this.auditFile, limits.audit);
-    this.historyLines = countLines(this.historyFile);
-    this.auditLines = countLines(this.auditFile);
+    const history = readTail<Notification>(this.historyFile, limits.history);
+    const audit = readTail<AuditEvent>(this.auditFile, limits.audit);
+    this.historyCache = history.entries;
+    this.historyLines = history.lines;
+    this.auditCache = audit.entries;
+    this.auditLines = audit.lines;
 
     this.migrateInlineCollections();
   }
@@ -165,7 +182,9 @@ export class Store {
     this.flush();
   }
 
-  private load(serverIdFactory: () => string): StoreData {
+  private load(
+    serverIdFactory: () => string,
+  ): { data: StoreData; recoveredFrom: string | undefined } {
     const fresh = (): StoreData => ({
       version: 1,
       serverId: serverIdFactory(),
@@ -178,27 +197,45 @@ export class Store {
       policies: {},
     });
 
-    if (!existsSync(this.file)) return fresh();
+    if (!existsSync(this.file)) return { data: fresh(), recoveredFrom: undefined };
     try {
       const parsed = JSON.parse(readFileSync(this.file, 'utf8')) as StoreData;
       if (!parsed || typeof parsed !== 'object') throw new Error('not a store document');
       const merged = { ...fresh(), ...parsed };
+
+      // Every string-keyed collection is restored to an object if the document
+      // does not supply one. `roles` was already guarded; the rest were not,
+      // and a store truncated or hand-edited into `"devices": null` took the
+      // hub down on its first lookup rather than starting with what survived.
+      const blank = fresh();
+      for (const key of COLLECTIONS) {
+        const value = merged[key] as unknown;
+        if (!value || typeof value !== 'object' || Array.isArray(value)) {
+          merged[key] = blank[key] as never;
+        }
+      }
+      if (typeof merged.serverId !== 'string' || !merged.serverId) {
+        merged.serverId = blank.serverId;
+      }
+      // A sequence that is not a number would hand every notification a `seq`
+      // of NaN, and every replay cursor comparison would silently be false.
+      if (!Number.isFinite(merged.seq)) merged.seq = 0;
+
       // Roles ship with the library and may gain new defaults between
-      // versions; merge them in without clobbering operator edits. Guarded
-      // because an older or partial document may have no `roles` at all, and
-      // losing an operator's devices over a missing key is not a fair trade.
-      if (!merged.roles || typeof merged.roles !== 'object') merged.roles = {};
+      // versions; merge them in without clobbering operator edits.
       for (const role of defaultRoles()) merged.roles[role.name] ??= role;
-      return merged;
+      return { data: merged, recoveredFrom: undefined };
     } catch {
       // A truncated store must not stop the app that embedded us from booting.
       const backup = `${this.file}.corrupt-${Date.now()}`;
+      let kept: string | undefined;
       try {
         renameSync(this.file, backup);
+        kept = backup;
       } catch {
         /* best effort */
       }
-      return fresh();
+      return { data: fresh(), recoveredFrom: kept ?? this.file };
     }
   }
 
@@ -438,9 +475,16 @@ export class Store {
     // distinct "IPs" is whatever an attacker cares to send. Evicting the
     // stalest records keeps a store file from growing without limit.
     if (!own(this.data.bans, record.ip) && Object.keys(this.data.bans).length >= MAX_BANS) {
-      const oldest = Object.values(this.data.bans)
-        .filter((b) => b.until < Date.now())
-        .sort((a, b) => a.lastFailureAt - b.lastFailureAt)[0];
+      // A single pass for the minimum, not a filtered copy that is then sorted.
+      // Behind a proxy the "IP" is a header an attacker chooses, so they decide
+      // how often this runs - and sorting ten thousand records per failed
+      // handshake turns a cheap request into expensive work for the hub.
+      const now = Date.now();
+      let oldest: BanRecord | undefined;
+      for (const candidate of Object.values(this.data.bans)) {
+        if (candidate.until >= now) continue;
+        if (!oldest || candidate.lastFailureAt < oldest.lastFailureAt) oldest = candidate;
+      }
       if (oldest) delete this.data.bans[oldest.ip];
       else return; // Every slot is an active ban; keeping those matters more.
     }

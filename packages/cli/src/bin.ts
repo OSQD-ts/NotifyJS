@@ -1,10 +1,11 @@
 #!/usr/bin/env node
 import { parseArgs } from 'node:util';
+import { networkInterfaces } from 'node:os';
 import { createInterface } from 'node:readline/promises';
 import WebSocket from 'ws';
 
 import { Notifier, type Severity } from '@osqd/notifyjs';
-import { NotifyClient, isPairingCodeValid, type Device } from '@osqd/notifyjs-protocol';
+import { NotifyClient, isPairingCodeValid } from '@osqd/notifyjs-protocol';
 import { nodeCrypto } from '@osqd/notifyjs-protocol/node';
 
 import { readFileSync } from 'node:fs';
@@ -45,12 +46,17 @@ serve options
   --tls-cert <file>        Certificate for wss:// (see: notifyjs cert)
   --tls-key <file>         Private key for wss://
   --no-qr                  Do not print a QR code for the pairing link
+  --admin-code             Also print an admin pairing code on start
 
 cert options
   --out <dir>              Where to write the certificate (default .notifyjs)
   --host <name>            Extra hostname or IP to include (repeatable)
 
-  --admin-code             Also print an admin pairing code on start
+code options
+  --role <name>            Role the code grants (default viewer)
+  --uses <n>               Times the code may be redeemed (default 1)
+  --ttl <seconds>          Lifetime of the code (default 600)
+  --no-qr                  Do not print a QR code
 
 send / call options
   --severity <level>       debug|info|success|warning|error|critical
@@ -145,7 +151,7 @@ async function serve(argv: string[]): Promise<void> {
   }
 
   const hub = new Notifier({
-    port: values.port ? Number(values.port) : undefined,
+    port: values.port === undefined ? undefined : port(values.port),
     host: values.host,
     name: values['hub-name'],
     storeDir: values.data,
@@ -193,12 +199,56 @@ async function serve(argv: string[]): Promise<void> {
     process.stdout.write(`banned ${b.ip} until ${new Date(b.until).toLocaleTimeString()}\n`),
   );
 
-  const shutdown = async () => {
-    await hub.stop();
-    process.exit(0);
+  onShutdown(() => hub.stop());
+}
+
+/**
+ * Runs `close` once, on either signal, then exits.
+ *
+ * Both signals, because a supervisor sends SIGTERM: systemd and launchd both
+ * do, and a command that listens only for SIGINT is killed outright when the
+ * service is stopped, with no chance to say goodbye. Once, because the two can
+ * arrive together and a second pass would race the first one's exit.
+ */
+function onShutdown(close: () => void | Promise<void>): void {
+  let closing = false;
+  const handle = () => {
+    if (closing) return;
+    closing = true;
+    void (async () => {
+      try {
+        await close();
+      } finally {
+        process.exit(0);
+      }
+    })();
   };
-  process.on('SIGINT', shutdown);
-  process.on('SIGTERM', shutdown);
+  process.on('SIGINT', handle);
+  process.on('SIGTERM', handle);
+}
+
+/**
+ * A TCP port, or a clear complaint.
+ *
+ * `Number('http')` is NaN, which `listen()` then treats as "any free port" -
+ * so a typo produced a hub that started successfully on a port nobody asked
+ * for and no device could be told about.
+ */
+function port(value: string): number {
+  const n = Number(value);
+  if (!Number.isInteger(n) || n < 0 || n > 65535) {
+    throw new Error(`--port must be a number between 0 and 65535, not "${value}"`);
+  }
+  return n;
+}
+
+/** A positive whole number, or a clear complaint. Same reasoning as `port`. */
+function count(value: string, flag: string): number {
+  const n = Number(value);
+  if (!Number.isFinite(n) || n <= 0) {
+    throw new Error(`${flag} must be a positive number, not "${value}"`);
+  }
+  return Math.floor(n);
 }
 
 /* ------------------------------------------------------------------ */
@@ -245,16 +295,27 @@ function makeClient(o: CommonOptions, autoReconnect = false): NotifyClient {
     model: 'notifyjs-cli',
     autoReconnect,
     // Silence only means something if this machine still has a network.
-    isOnline: async () => {
-      try {
-        const { lookup } = await import('node:dns/promises');
-        await lookup('localhost');
-        return true;
-      } catch {
-        return false;
-      }
-    },
+    isOnline: async () => hasNetwork(),
   });
+}
+
+/**
+ * Whether this machine has any network at all.
+ *
+ * This used to resolve `localhost`, which answers a different question: the
+ * loopback resolves from `/etc/hosts` on a laptop with its wifi off, so the
+ * check passed always and the watchdog reported a dead hub every time this
+ * machine lost its own connection. An assigned, non-internal interface is the
+ * honest local answer - it cannot see an upstream outage, but it does notice
+ * the unplugged cable and the radio that was switched off.
+ */
+function hasNetwork(): boolean {
+  for (const entries of Object.values(networkInterfaces())) {
+    for (const entry of entries ?? []) {
+      if (!entry.internal && entry.address) return true;
+    }
+  }
+  return false;
 }
 
 /** Resolves once the client is authenticated, or rejects with the hub's error. */
@@ -303,7 +364,7 @@ async function pair(argv: string[]): Promise<void> {
 }
 
 async function listen(argv: string[]): Promise<void> {
-  const { options } = common(argv, { quiet: { type: 'boolean' } });
+  const { options } = common(argv);
   const client = makeClient(options, true);
 
   client.on('notification', (n) => {
@@ -360,10 +421,9 @@ async function listen(argv: string[]): Promise<void> {
   await done;
   process.stdout.write(`listening on ${options.url} as ${options.name} (${client.role})\n`);
 
-  process.on('SIGINT', () => {
-    client.disconnect();
-    process.exit(0);
-  });
+  // Disconnecting deliberately tells the hub this was not a crash, so it drops
+  // the session at once instead of waiting to notice the socket went quiet.
+  onShutdown(() => client.disconnect());
 }
 
 async function send(argv: string[]): Promise<void> {
@@ -419,7 +479,7 @@ async function devices(argv: string[]): Promise<void> {
   await client.connect();
   await done;
 
-  const data = await client.admin<{ devices: Device[]; online: string[] }>('devices.list');
+  const data = await client.admin('devices.list');
   const online = new Set(data.online);
 
   for (const device of data.devices) {
@@ -444,19 +504,11 @@ async function code(argv: string[]): Promise<void> {
   await client.connect();
   await done;
 
-  const issued = await client.admin<{
-    code: string;
-    expiresAt: number;
-    role: string;
-    qr?: { terminal: string };
-  }>(
-    'pair.create',
-    {
-      role: (values.role as string) ?? 'viewer',
-      uses: values.uses ? Number(values.uses) : 1,
-      ttlMs: values.ttl ? Number(values.ttl) * 1000 : undefined,
-    },
-  );
+  const issued = await client.admin('pair.create', {
+    role: (values.role as string) ?? 'viewer',
+    uses: values.uses ? count(values.uses as string, '--uses') : 1,
+    ttlMs: values.ttl ? count(values.ttl as string, '--ttl') * 1000 : undefined,
+  });
   if (values.qr !== false && issued.qr) process.stdout.write(`\n${issued.qr.terminal}\n\n`);
   process.stdout.write(
     `${issued.code}\nrole: ${issued.role}\nexpires: ${new Date(issued.expiresAt).toLocaleTimeString()}\n`,
@@ -497,16 +549,13 @@ async function watch(argv: string[]): Promise<void> {
   await client.connect();
   await done;
 
-  const result = await client.admin<{ heartbeat: { every: number; grace: number } }>(
-    'heartbeat.expect',
-    {
-      name,
-      every: values.every as string,
-      grace: values.grace as string | undefined,
-      severity: values.severity as string | undefined,
-      description: values.description as string | undefined,
-    },
-  );
+  const result = await client.admin('heartbeat.expect', {
+    name,
+    every: values.every as string,
+    grace: values.grace as string | undefined,
+    severity: values.severity as string | undefined,
+    description: values.description as string | undefined,
+  });
   process.stdout.write(
     `watching "${name}": a check-in is expected every ${values.every}` +
       (values.grace ? ` (plus ${values.grace} grace)` : '') +
@@ -526,7 +575,7 @@ async function checkin(argv: string[]): Promise<void> {
   await client.connect();
   await done;
 
-  const out = await client.admin<{ known: boolean }>('heartbeat.checkin', { name });
+  const out = await client.admin('heartbeat.checkin', { name });
   client.disconnect();
 
   // A silent no-op here would mean a typo quietly disables the alarm.
@@ -541,9 +590,7 @@ async function watches(argv: string[]): Promise<void> {
   await client.connect();
   await done;
 
-  const out = await client.admin<{
-    heartbeats: { name: string; every: number; grace: number; lastSeenAt: number; missing: boolean }[];
-  }>('heartbeats.list');
+  const out = await client.admin('heartbeats.list');
 
   if (out.heartbeats.length === 0) process.stdout.write('nothing is being watched\n');
   for (const beat of out.heartbeats) {

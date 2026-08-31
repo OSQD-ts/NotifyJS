@@ -9,6 +9,7 @@ import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
 import androidx.core.app.NotificationCompat
+import androidx.core.app.ServiceCompat
 
 /**
  * Keeps the app's process alive so its WebSocket survives.
@@ -60,7 +61,12 @@ class NotifyjsWatchService : Service() {
 
   override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
     if (intent?.action == ACTION_STOP) {
-      stopForeground(STOP_FOREGROUND_REMOVE)
+      // Through the compat shim: `stopForeground(int)` and its flags arrived in
+      // API 24, and this module builds down to 23. On an older device the
+      // direct call resolves to nothing at runtime and throws NoSuchMethodError
+      // - so turning the watcher off would crash the service rather than stop
+      // it.
+      ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
       stopSelf()
       return START_NOT_STICKY
     }

@@ -146,9 +146,8 @@ object CallSpeaker {
    */
   private fun locale(tag: String): Locale {
     if (tag.isBlank()) return Locale.getDefault()
-    return runCatching {
-      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) Locale.forLanguageTag(tag)
-      else Locale(tag)
-    }.getOrDefault(Locale.getDefault())
+    // `forLanguageTag` has been available since API 21 and this module builds
+    // from 23, so there is no older path to keep.
+    return runCatching { Locale.forLanguageTag(tag) }.getOrDefault(Locale.getDefault())
   }
 }

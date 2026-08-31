@@ -31,6 +31,15 @@ updates:
       # a cache tag with no prebuilt for the Node patch the runner uses, and
       # packaging silently falls back to compiling Node from source. Lift this
       # once upstream publishes them. See the review notes.
+      #
+      # This pin is why `npm audit` reports two low-severity findings, both the
+      # same one: the esbuild nested under this package. Do not clear them with
+      # `npm audit fix --force` - it bumps this package past the line above and
+      # breaks the released binaries. The advisory is against esbuild's
+      # development server on Windows, which nothing here runs: the packager
+      # uses esbuild in-process as a bundler. The top-level esbuild, which the
+      # dashboard and desktop builds actually use, is outside the affected
+      # range and is updated normally by the group above.
       - dependency-name: '@yao-pkg/pkg'
         update-types: [version-update:semver-minor, version-update:semver-major]
 

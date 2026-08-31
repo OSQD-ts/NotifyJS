@@ -9,7 +9,12 @@ import { Notifier } from '../dist/index.js';
 import { NotifyClient, memoryStorage } from '@osqd/notifyjs-protocol';
 import { nodeCrypto } from '@osqd/notifyjs-protocol/node';
 
-const PORT = 7853;
+/**
+ * Chosen by the OS, not by this file. Fixed ports made the suite fail in
+ * bursts whenever a port was still held from an earlier run - every test in
+ * the file at once, for a reason that had nothing to do with the code.
+ */
+let PORT = 0;
 let hub;
 let storeDir;
 
@@ -55,7 +60,7 @@ function once(client, event, timeout = 5000) {
 before(async () => {
   storeDir = mkdtempSync(join(tmpdir(), 'notifyjs-test-'));
   hub = new Notifier({
-    port: PORT,
+    port: 0,
     storeDir,
     dashboard: false,
     logger: false,
@@ -72,6 +77,7 @@ before(async () => {
     },
   });
   await hub.start();
+  PORT = Number(new URL(hub.url).port);
 });
 
 after(async () => {

@@ -138,7 +138,12 @@ export function fastifyErrorHandler(sink: AlertSink, options: HttpErrorOptions =
 }
 
 /** Maps common logger level names and numeric levels onto severities. */
-const LEVELS: Record<string, Severity> = {
+/**
+ * Null-prototyped: the key comes from a log record, and a plain object answers
+ * `LEVELS['constructor']` with a function inherited from Object.prototype -
+ * truthy, not a severity, and on its way into a comparison that expects one.
+ */
+const LEVELS: Record<string, Severity> = Object.assign(Object.create(null), {
   trace: 'debug',
   debug: 'debug',
   info: 'info',
@@ -146,7 +151,7 @@ const LEVELS: Record<string, Severity> = {
   warning: 'warning',
   error: 'error',
   fatal: 'critical',
-};
+});
 
 function severityForLevel(level: unknown): Severity | undefined {
   if (typeof level === 'string') return LEVELS[level.toLowerCase()];
@@ -178,35 +183,60 @@ const ORDER: Severity[] = ['debug', 'info', 'success', 'warning', 'error', 'crit
  */
 export function createLogStream(sink: AlertSink, options: LogStreamOptions = {}): Writable {
   const floor = ORDER.indexOf(options.minSeverity ?? 'error');
+  /**
+   * A stream is a byte pipe, not a line pipe: a logger writing one JSON object
+   * per line can still split that line across two chunks. Parsing each chunk on
+   * its own dropped the halves and, with them, the alert. Whatever follows the
+   * last newline is held here until the rest of it arrives.
+   */
+  let partial = '';
+
+  const emit = (line: string): void => {
+    if (!line.trim()) return;
+    let record: Record<string, unknown>;
+    try {
+      record = JSON.parse(line) as Record<string, unknown>;
+    } catch {
+      // Not JSON. Only this line is dropped - a single unparseable line used to
+      // abort the whole chunk, taking every later line in it along.
+      return;
+    }
+    const severity = severityForLevel(record.level);
+    if (!severity || ORDER.indexOf(severity) < floor) return;
+
+    const message = String(record.msg ?? record.message ?? 'log event');
+    void sink
+      .notify({
+        title: message.slice(0, 200),
+        body: typeof record.stack === 'string' ? record.stack : undefined,
+        channel: options.channel ?? String(record.name ?? 'log'),
+        severity,
+        dedupeKey: `log:${severity}:${message}`,
+      })
+      .catch(() => {});
+  };
 
   return new Writable({
     write(chunk, _encoding, callback) {
-      // A malformed line must never break the logger it is attached to.
-      try {
-        for (const line of String(chunk).split('\n')) {
-          if (!line.trim()) continue;
-          const record = JSON.parse(line) as Record<string, unknown>;
-          const severity = severityForLevel(record.level);
-          if (!severity || ORDER.indexOf(severity) < floor) continue;
-
-          const message = String(record.msg ?? record.message ?? 'log event');
-          void sink
-            .notify({
-              title: message.slice(0, 200),
-              body: typeof record.stack === 'string' ? record.stack : undefined,
-              channel: options.channel ?? String(record.name ?? 'log'),
-              severity,
-              dedupeKey: `log:${severity}:${message}`,
-            })
-            .catch(() => {});
-        }
-      } catch {
-        // Not JSON, or not a shape we understand. Drop it silently.
-      }
+      const lines = (partial + String(chunk)).split('\n');
+      // The tail has no newline yet, so it may be half a record.
+      partial = lines.pop() ?? '';
+      // A writer that never emits a newline must not buffer without bound.
+      if (partial.length > MAX_PARTIAL_LINE_BYTES) partial = '';
+      for (const line of lines) emit(line);
+      callback();
+    },
+    final(callback) {
+      // The last line of a log file often has no trailing newline.
+      if (partial) emit(partial);
+      partial = '';
       callback();
     },
   });
 }
+
+/** A log line longer than this is not a log line; drop it rather than grow. */
+const MAX_PARTIAL_LINE_BYTES = 1024 * 1024;
 
 /**
  * Adapter for loggers that hand you a structured record (winston transports,

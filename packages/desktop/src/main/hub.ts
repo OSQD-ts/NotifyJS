@@ -1,5 +1,4 @@
-import { lookup } from 'node:dns/promises';
-import { hostname, platform, release } from 'node:os';
+import { hostname, networkInterfaces, platform, release } from 'node:os';
 import { join } from 'node:path';
 import WebSocket from 'ws';
 import { SourceManager, type ClientPreferences } from '@osqd/notifyjs-protocol';
@@ -61,15 +60,8 @@ export class Hub {
       deviceName: () => this.prefs.client.deviceName,
       minSeverity: () => this.prefs.client.minSeverity,
       // A laptop on a train produces the same silence as a dead hub. Asking
-      // the resolver first is what stops it paging anyone over lost wifi.
-      isOnline: async () => {
-        try {
-          await lookup('localhost');
-          return true;
-        } catch {
-          return false;
-        }
-      },
+      // the interfaces first is what stops it paging anyone over lost wifi.
+      isOnline: async () => hasNetwork(),
     });
 
     this.wire();
@@ -244,4 +236,23 @@ export class Hub {
     if (this.snoozedUntil && this.snoozedUntil <= Date.now()) this.snoozedUntil = 0;
     this.listeners.state?.(this.snapshot());
   }
+}
+
+/**
+ * Whether this computer has any network at all.
+ *
+ * This used to resolve `localhost`, which answers a different question: the
+ * loopback resolves from the hosts file on a laptop with its wifi off, so the
+ * check passed always and the watchdog reported a dead hub every time this
+ * machine lost its own connection. An assigned, non-internal interface is the
+ * honest local answer - it cannot see an upstream outage, but it does notice
+ * the unplugged cable and the radio that was switched off.
+ */
+function hasNetwork(): boolean {
+  for (const entries of Object.values(networkInterfaces())) {
+    for (const entry of entries ?? []) {
+      if (!entry.internal && entry.address) return true;
+    }
+  }
+  return false;
 }

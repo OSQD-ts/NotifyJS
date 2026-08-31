@@ -1,4 +1,11 @@
-import { chmodSync, mkdirSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  renameSync,
+  writeFileSync,
+} from 'node:fs';
 import { dirname } from 'node:path';
 import type { ClientStorage } from '@osqd/notifyjs-protocol';
 
@@ -25,7 +32,14 @@ export function fileStorage(path: string): ClientStorage {
 
   const save = (data: Record<string, string>): void => {
     mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
-    writeFileSync(path, JSON.stringify(data, null, 2), { mode: 0o600 });
+    // Write-then-rename, exactly as the hub's own store does: a crash or power
+    // loss partway through a direct write leaves a truncated file, `load()`
+    // cannot parse it, and this device silently loses the private seed that is
+    // its identity - appearing unpaired while the hub still holds its record.
+    // History can be regenerated; a keypair cannot.
+    const tmp = `${path}.tmp`;
+    writeFileSync(tmp, JSON.stringify(data, null, 2), { mode: 0o600 });
+    renameSync(tmp, path);
     // `mode` above only applies when the file is created; a file that already
     // existed keeps whatever permissions it had.
     tighten(path);
