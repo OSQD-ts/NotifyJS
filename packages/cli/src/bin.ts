@@ -46,6 +46,9 @@ serve options
   --tls-cert <file>        Certificate for wss:// (see: notifyjs cert)
   --tls-key <file>         Private key for wss://
   --no-qr                  Do not print a QR code for the pairing link
+  --no-web-push            Do not send encrypted pushes to browsers
+  --web-push-subject <uri> mailto: or https: URI identifying you to a push
+                           service (required by RFC 8292)
   --admin-code             Also print an admin pairing code on start
 
 cert options
@@ -138,6 +141,8 @@ async function serve(argv: string[]): Promise<void> {
       'tls-cert': { type: 'string' },
       'tls-key': { type: 'string' },
       qr: { type: 'boolean', default: true },
+      'web-push': { type: 'boolean', default: true },
+      'web-push-subject': { type: 'string' },
     },
     allowNegative: true,
   });
@@ -156,6 +161,10 @@ async function serve(argv: string[]): Promise<void> {
     name: values['hub-name'],
     storeDir: values.data,
     dashboard: values.dashboard,
+    webPush: {
+      enabled: values['web-push'],
+      ...(values['web-push-subject'] ? { subject: values['web-push-subject'] } : {}),
+    },
     dashboardDir: values['dashboard-dir'],
     publicUrl: values['public-url'],
     tls:

@@ -7,7 +7,21 @@
     <link rel="stylesheet" href="./styles.css" />
     <link rel="icon" type="image/svg+xml" href="./icon.svg" />
     <link rel="alternate icon" href="./favicon.png" />
-    <link rel="apple-touch-icon" href="./favicon.png" />
+    <!-- iOS uses this for the home-screen tile, and will not read the SVG. -->
+    <link rel="apple-touch-icon" href="./icon-192.png" />
+
+    <!--
+      What makes this installable, and on iOS what makes Web Push possible at
+      all: Safari delivers pushes only to a web app added to the home screen,
+      and only offers to add one when it finds a manifest with `display`
+      set to something other than `browser`.
+    -->
+    <link rel="manifest" href="./manifest.webmanifest" />
+    <meta name="theme-color" content="#0e1116" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="NotifyJS" />
   </head>
   <body>
     <!-- Pairing gate: shown until this browser holds device credentials. -->

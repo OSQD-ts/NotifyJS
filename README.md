@@ -480,10 +480,44 @@ new Notifier({ push: { enabled: true } });
 ```
 
 The phone registers a token after pairing, and the hub wakes devices that are
-not connected. **This is the one place NotifyJS talks to anyone else's
-servers** — alert titles pass through Expo and then Apple or Google — which is
-why it is off by default and the body is withheld unless you pass
-`includeBody: true`. Point `endpoint` at your own relay to keep it in-house.
+not connected. Alert titles pass through Expo and then Apple or Google in the
+clear, which is why it is off by default and the body is withheld unless you
+pass `includeBody: true`. Point `endpoint` at your own relay to keep it
+in-house.
+
+## The dashboard as a real client, and iPhones
+
+The browser has the same problem as the phone and a better answer to it. A tab
+only receives while it is open, so closing it used to stop the dashboard being
+a client at all. It now registers for Web Push, and its service worker draws
+the alert with nothing of ours running:
+
+```ts
+new Notifier({ webPush: { enabled: true } }); // the default
+```
+
+**This is also how NotifyJS reaches an iPhone.** Safari has delivered Web Push
+since iOS 16.4 — but only to a web app added to the home screen. Open the
+dashboard in Safari, **Share → Add to Home Screen**, open it from there, and
+tap *Enable alerts*. That is the whole setup: no App Store, no Apple Developer
+account, no native build. Lock-screen calls still need the Android app; alerts
+do not.
+
+Unlike the Expo path above, this one is **on by default**, because it is a
+different bargain. The hub encrypts each payload to a key the browser
+generated ([RFC 8291](https://www.rfc-editor.org/rfc/rfc8291)) and signs the
+request with its own key ([RFC 8292](https://www.rfc-editor.org/rfc/rfc8292)):
+Mozilla, Google and Apple forward bytes they cannot read. It is the browser's
+own vendor rather than a service this project chose, nothing is sent until
+somebody has clicked *Enable alerts* in that specific browser, and the endpoint
+must be `https`. Turn it off with `--no-web-push`.
+
+Set `webPush.subject` (or `--web-push-subject`) to a `mailto:` or `https:` URI
+identifying you; RFC 8292 requires one, and Apple rejects a push without it.
+
+The keypair is generated on first use and kept in `store.json`. Do not delete
+it: a browser stores the key inside the subscription it created, so a new one
+silently stops every existing subscription from delivering.
 
 ## Snoozing
 
@@ -926,10 +960,17 @@ reports `outcome: "answered"` back to the caller. The device watchdog is
 verified against a hub killed with `process.exit(1)`: the paired client raises
 the alarm on its own.
 
-Not yet run on iOS. The shared client, protocol and crypto are the same code
-paths the Android build exercises, but CallKit-style behaviour, iOS
-text-to-speech and Keychain storage are untested, and distributing an IPA needs
-an Apple Developer account.
+iOS is covered for alerts, through the dashboard rather than a native app:
+add it to the home screen and Web Push delivers to the lock screen, with no
+App Store and no Apple Developer account. See
+[the dashboard as a real client](#the-dashboard-as-a-real-client-and-iphones).
+The encryption is verified against the RFC's own test vector, but the delivery
+path has not been exercised on a physical iPhone.
+
+The native iOS app is still unrun. The shared client, protocol and crypto are
+the same code paths the Android build exercises, but CallKit-style behaviour,
+iOS text-to-speech and Keychain storage are untested, and distributing an IPA
+needs an Apple Developer account — which is what the home-screen route avoids.
 
 ## License
 

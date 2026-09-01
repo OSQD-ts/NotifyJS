@@ -88,6 +88,15 @@ interface StoreData {
   bans: Record<string, BanRecord>;
   heartbeats: Record<string, Heartbeat>;
   policies: Record<string, EscalationPolicy>;
+  /**
+   * The hub's VAPID keypair, generated on first use.
+   *
+   * Kept rather than derived, because a browser stores the application server
+   * key inside the subscription it created: regenerating this invalidates
+   * every Web Push subscription at once, silently, and each browser only finds
+   * out the next time an alert fails to arrive.
+   */
+  vapid?: { publicKey: string; privateKey: string };
   /** Legacy inline collections, migrated to their own files on first load. */
   history?: Notification[];
   audit?: AuditEvent[];
@@ -316,6 +325,24 @@ export class Store {
 
   get serverId(): string {
     return this.data.serverId;
+  }
+
+  /**
+   * The hub's VAPID keypair, minting one the first time it is asked for.
+   *
+   * Lazy rather than generated at construction: a hub with Web Push turned off
+   * never needs one, and a keypair that exists only because something might
+   * want it later is a secret with no owner.
+   */
+  vapid(generate: () => { publicKey: string; privateKey: string }): {
+    publicKey: string;
+    privateKey: string;
+  } {
+    if (!this.data.vapid) {
+      this.data.vapid = generate();
+      this.markDirty();
+    }
+    return this.data.vapid;
   }
 
   nextSeq(): number {

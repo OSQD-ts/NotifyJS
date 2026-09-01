@@ -249,7 +249,94 @@ $('enable-notifications').addEventListener('click', async () => {
   await ringer.unlock();
   await Notification.requestPermission();
   updateNotificationButton();
+  await subscribeToPush();
 });
+
+/* ---------------------------------------------------------------- */
+/* Web Push                                                          */
+/*                                                                   */
+/* `new Notification(...)` below only fires while this page is alive, */
+/* which makes an open tab a requirement for being paged. This is the */
+/* other half: the hub encrypts to a key this browser generated, the  */
+/* push service forwards bytes it cannot read, and sw.js draws the    */
+/* alert with nothing of ours running.                                */
+/*                                                                   */
+/* It is also the whole of iOS. Safari has delivered Web Push since   */
+/* 16.4, but only to a web app added to the home screen - which is    */
+/* why index.html carries a manifest.                                 */
+/* ---------------------------------------------------------------- */
+
+/** Sent by the hub in `ready`; absent when Web Push is turned off there. */
+let vapidPublicKey: string | undefined;
+
+function urlBase64ToUint8Array(value: string): Uint8Array<ArrayBuffer> {
+  // `applicationServerKey` predates browsers accepting base64url, so it wants
+  // the raw bytes. Standard base64 with the padding put back.
+  const padded = value.padEnd(value.length + ((4 - (value.length % 4)) % 4), '=');
+  const binary = atob(padded.replace(/-/g, '+').replace(/_/g, '/'));
+
+  // Built over an explicit ArrayBuffer rather than `Uint8Array.from`, which
+  // infers the shared-memory-capable `ArrayBufferLike` and is therefore not a
+  // `BufferSource` as far as the DOM types are concerned.
+  const bytes = new Uint8Array(new ArrayBuffer(binary.length));
+  for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
+  return bytes;
+}
+
+async function subscribeToPush(): Promise<void> {
+  if (!vapidPublicKey) return;
+  if (!('serviceWorker' in navigator) || !('PushManager' in window)) return;
+  // Asking for a subscription without permission prompts, and this is called
+  // from places that are not a user gesture.
+  if (Notification.permission !== 'granted') return;
+
+  try {
+    const registration = await navigator.serviceWorker.register('./sw.js');
+    await navigator.serviceWorker.ready;
+
+    const existing = await registration.pushManager.getSubscription();
+
+    // A subscription is bound to the application server key it was created
+    // with. If the hub's has changed - a store restored from before it had
+    // one, a fresh data directory - the old subscription still looks valid
+    // here and silently receives nothing, so it has to go.
+    const wanted = vapidPublicKey;
+    let subscription = existing;
+    if (existing && !subscribedWith(existing, wanted)) {
+      await existing.unsubscribe();
+      subscription = null;
+    }
+
+    subscription ??= await registration.pushManager.subscribe({
+      // Required by every browser: a push that cannot be shown to the user is
+      // one a page could use to phone home in the background.
+      userVisibleOnly: true,
+      applicationServerKey: urlBase64ToUint8Array(wanted),
+    });
+
+    const json = subscription.toJSON();
+    if (!json.endpoint || !json.keys?.p256dh || !json.keys?.auth) return;
+
+    client.registerWebPush({
+      endpoint: json.endpoint,
+      keys: { p256dh: json.keys.p256dh, auth: json.keys.auth },
+    });
+  } catch (err) {
+    // Never fatal. A browser without Web Push, a private window, or a refused
+    // permission all land here, and the dashboard still works exactly as it
+    // did - it just needs to stay open to page you.
+    console.warn('web push unavailable:', err);
+  }
+}
+
+/** Whether a subscription was created with the key the hub is offering now. */
+function subscribedWith(subscription: PushSubscription, key: string): boolean {
+  const applied = subscription.options?.applicationServerKey;
+  if (!applied) return false;
+  const bytes = new Uint8Array(applied);
+  const wanted = urlBase64ToUint8Array(key);
+  return bytes.length === wanted.length && bytes.every((b, i) => b === wanted[i]);
+}
 
 function popNotification(n: Notification): void {
   if (!('Notification' in window) || Notification.permission !== 'granted') return;
@@ -525,6 +612,12 @@ client.on('ready', (ready) => {
   $('settings-toggle').hidden = false;
   renderSettings();
   updateNotificationButton();
+  // Re-registered on every `ready`, not only the first: a push service may
+  // rotate an endpoint at any time, and the browser then hands us a new
+  // subscription that the hub has never been told about. Cheap, and the
+  // alternative is a device that reads as reachable and is not.
+  vapidPublicKey = ready.vapidPublicKey;
+  void subscribeToPush();
   // Catch up on anything sent while this tab was closed.
   client.sync();
 });

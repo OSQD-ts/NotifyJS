@@ -17,6 +17,14 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { spawnSync } from 'node:child_process';
+import {
+  createDecipheriv,
+  createECDH,
+  createHmac,
+  createPublicKey,
+  randomBytes,
+  verify,
+} from 'node:crypto';
 import { createServer } from 'node:http';
 
 import { tmpdir } from 'node:os';
@@ -32,6 +40,11 @@ const REPO = fileURLToPath(new URL('../../..', import.meta.url));
 
 function tmp(prefix) {
   return mkdtempSync(join(tmpdir(), `notifyjs-${prefix}-`));
+}
+
+/** Long enough for a frame to cross the socket and be acted on. */
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 /** A device speaking the same client the phone and dashboard use. */
@@ -628,6 +641,334 @@ test('set-version stamps one version across the packages and their links', async
     }
   } finally {
     process.chdir(cwd);
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+/* ------------------------------------------------------------------ */
+/* Web Push                                                            */
+/* ------------------------------------------------------------------ */
+
+test('web push encryption reproduces the RFC 8291 example byte for byte', async () => {
+  // The one test here that could not be written any other way. A round trip
+  // against our own decryption would pass just as happily with an info string
+  // wrong in both directions, and the failure would only surface as pushes no
+  // real browser can open. This is the vector from RFC 8291 section 5, with
+  // the salt and sender key fixed so the output is deterministic.
+  const { encryptPayload } = await import('../dist/webpush.js');
+
+  const body = encryptPayload(
+    Buffer.from('When I grow up, I want to be a watermelon'),
+    {
+      p256dh:
+        'BCVxsr7N_eNgVRqvHtD0zTZsEc6-VV-JvLexhqUzORcxaOzi6-AYWXvTBHm4bjyPjs7Vd8pZGH6SRpkNtoIAiw4',
+      auth: 'BTBZMqHH6r4Tts7J_aSIgg',
+    },
+    {
+      salt: Buffer.from('DGv6ra1nlYgDCS1FRnbzlw', 'base64url'),
+      senderPrivateKey: Buffer.from('yfWPiYE-n46HLnH0KqZOF1fJJU3MYrct3AELtAQ-oRw', 'base64url'),
+    },
+  );
+
+  assert.equal(
+    body.toString('base64url'),
+    'DGv6ra1nlYgDCS1FRnbzlwAAEABBBP4z9KsN6nGRTbVYI_c7VJSPQTBtkgcy27ml' +
+      'mlMoZIIgDll6e3vCYLocInmYWAmS6TlzAC8wEqKK6PBru3jl7A_yl95bQpu6cVPT' +
+      'pK4Mqgkf1CXztLVBSt2Ks3oZwbuwXPXLWyouBWLVWGNWQexSgSxsj_Qulcy4a-fN',
+  );
+});
+
+test('the VAPID header is scoped to one push service and signed as ES256', async () => {
+  const { generateVapidKeys, vapidAuthorization } = await import('../dist/webpush.js');
+  const keys = generateVapidKeys();
+
+  const header = vapidAuthorization(
+    'https://updates.push.services.mozilla.com/wpush/v2/gAAAA',
+    keys,
+    'https://example.invalid',
+    1_700_000_000_000,
+  );
+
+  const [, t, k] = /^vapid t=([^,]+), k=(.+)$/.exec(header) ?? [];
+  assert.ok(t && k, `unexpected header shape: ${header}`);
+  assert.equal(k, keys.publicKey, 'the browser matches this against what it subscribed with');
+
+  const [rawHeader, rawClaims, rawSig] = t.split('.');
+  assert.deepEqual(JSON.parse(Buffer.from(rawHeader, 'base64url').toString()), {
+    typ: 'JWT',
+    alg: 'ES256',
+  });
+
+  const claims = JSON.parse(Buffer.from(rawClaims, 'base64url').toString());
+  // Scoped to the origin, not the endpoint: a token captured from one request
+  // to Mozilla must not be replayable against Apple.
+  assert.equal(claims.aud, 'https://updates.push.services.mozilla.com');
+  assert.equal(claims.sub, 'https://example.invalid');
+  assert.equal(claims.exp, 1_700_000_000 + 12 * 60 * 60);
+
+  // JWS ES256 is r||s, 64 bytes. Node signs EC as DER unless told otherwise,
+  // and every push service answers a DER signature with a 401 that explains
+  // nothing.
+  const signature = Buffer.from(rawSig, 'base64url');
+  assert.equal(signature.length, 64, 'signature must be P1363, not DER');
+
+  const publicKey = Buffer.from(keys.publicKey, 'base64url');
+  const verified = verify(
+    'sha256',
+    Buffer.from(`${rawHeader}.${rawClaims}`),
+    {
+      key: createPublicKey({
+        key: {
+          kty: 'EC',
+          crv: 'P-256',
+          x: publicKey.subarray(1, 33).toString('base64url'),
+          y: publicKey.subarray(33, 65).toString('base64url'),
+        },
+        format: 'jwk',
+      }),
+      dsaEncoding: 'ieee-p1363',
+    },
+    signature,
+  );
+  assert.ok(verified, 'the push service must be able to verify this');
+});
+
+test('a hub reaches a disconnected browser, and the push service cannot read it', async () => {
+  // End to end against the real server: pair a browser, register a real
+  // subscription through the real protocol frame, disconnect it, send an
+  // alert, and decrypt what actually left the hub using only what a browser
+  // would hold.
+  //
+  // `fetch` is stubbed rather than a local server being stood up, because the
+  // hub refuses a non-https endpoint - and weakening that check so a test can
+  // use `http://127.0.0.1` would be contorting the thing under test.
+  const dir = tmp('webpush');
+  const sent = [];
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async (url, init) => {
+    sent.push({ url: String(url), init });
+    return new Response(null, { status: 201 });
+  };
+
+  const hub = new Notifier({
+    port: 0,
+    storeDir: dir,
+    dashboard: false,
+    logger: false,
+    webPush: { enabled: true, subject: 'mailto:test@example.invalid' },
+  });
+  await hub.start();
+
+  const client = makeClient(hub, 'browser');
+  const paired = new Promise((resolve) => client.on('paired', resolve));
+  await client.pair(hub.createPairingCode({ role: 'admin' }).code);
+  await paired;
+
+  // The keys a browser generates for itself and never sends anywhere in the
+  // clear. The hub only ever sees the public half.
+  const ua = createECDH('prime256v1');
+  ua.generateKeys();
+  const authSecret = randomBytes(16);
+
+  try {
+    client.registerWebPush({
+      endpoint: 'https://push.example.invalid/wpush/v2/abc',
+      keys: {
+        p256dh: ua.getPublicKey().toString('base64url'),
+        auth: authSecret.toString('base64url'),
+      },
+    });
+    await delay(150);
+
+    const [device] = hub.devices();
+    assert.equal(device.pushProvider, 'webpush', 'the hub stored the subscription');
+
+    // Offline, which is the only time a wake-up push is sent at all.
+    client.disconnect();
+    await delay(100);
+
+    await hub.notify({ title: 'Disk is full', body: 'root at 98%', severity: 'critical' });
+    await delay(300);
+
+    assert.equal(sent.length, 1, 'exactly one request to the push service');
+    const [{ url, init }] = sent;
+    assert.equal(url, 'https://push.example.invalid/wpush/v2/abc');
+    assert.equal(init.headers['content-encoding'], 'aes128gcm');
+    assert.equal(init.headers.urgency, 'high');
+    assert.match(init.headers.authorization, /^vapid t=[\w-]+\.[\w-]+\.[\w-]+, k=[\w-]+$/);
+
+    // What the push service holds is ciphertext. Nothing in the request body
+    // says what the alert is about - which is the whole reason this transport
+    // belongs in a project that refuses to route alerts through anybody.
+    const body = init.body;
+    assert.ok(!body.includes(Buffer.from('Disk is full')), 'the title must not be in the clear');
+    assert.ok(!body.includes(Buffer.from('root at 98%')), 'nor the body');
+
+    // Now decrypt it the way the browser would, from the subscription keys.
+    const payload = JSON.parse(decryptWebPush(body, ua, authSecret));
+    assert.equal(payload.title, 'CRITICAL: Disk is full');
+    assert.equal(payload.severity, 'critical');
+    assert.ok(payload.tag, 'a tag, so a repeat replaces rather than stacks');
+  } finally {
+    globalThis.fetch = realFetch;
+    client.disconnect();
+    await hub.stop();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+/**
+ * The receiving half of RFC 8291, as a browser performs it.
+ *
+ * Written out here rather than shared with the sender so that a mistake in one
+ * cannot be cancelled out by the same mistake in the other.
+ */
+function decryptWebPush(body, uaEcdh, authSecret) {
+  const salt = body.subarray(0, 16);
+  const keyIdLength = body.readUInt8(20);
+  const asPublic = body.subarray(21, 21 + keyIdLength);
+  const ciphertext = body.subarray(21 + keyIdLength);
+
+  const shared = uaEcdh.computeSecret(asPublic);
+  const hmac = (key, data) => createHmac('sha256', key).update(data).digest();
+  const expand = (prk, info, length) =>
+    hmac(prk, Buffer.concat([info, Buffer.of(1)])).subarray(0, length);
+
+  const ikm = expand(
+    hmac(authSecret, shared),
+    Buffer.concat([Buffer.from('WebPush: info\0'), uaEcdh.getPublicKey(), asPublic]),
+    32,
+  );
+  const prk = hmac(salt, ikm);
+  const cek = expand(prk, Buffer.from('Content-Encoding: aes128gcm\0'), 16);
+  const nonce = expand(prk, Buffer.from('Content-Encoding: nonce\0'), 12);
+
+  const decipher = createDecipheriv('aes-128-gcm', cek, nonce);
+  decipher.setAuthTag(ciphertext.subarray(ciphertext.length - 16));
+  const plaintext = Buffer.concat([
+    decipher.update(ciphertext.subarray(0, ciphertext.length - 16)),
+    decipher.final(),
+  ]);
+
+  // Strip the record padding delimiter.
+  return plaintext.subarray(0, plaintext.length - 1).toString();
+}
+
+test('the VAPID key survives a restart, or every browser goes deaf at once', async () => {
+  // A browser stores the application server key inside the subscription it
+  // created, and refuses pushes signed by any other. So a key regenerated on
+  // restart does not fail loudly - every existing subscription simply stops
+  // delivering, and each browser only finds out the next time an alert does
+  // not arrive. It has to be persisted, and it has to be the same one the
+  // `ready` frame advertises.
+  const dir = tmp('vapid-persist');
+  const advertised = [];
+
+  try {
+    for (const round of [1, 2]) {
+      const hub = new Notifier({ port: 0, storeDir: dir, dashboard: false, logger: false });
+      await hub.start();
+
+      const client = makeClient(hub, 'browser', { storage: memoryStorage() });
+      const ready = new Promise((resolve) => client.on('ready', resolve));
+      if (round === 1) {
+        await client.pair(hub.createPairingCode({ role: 'admin' }).code);
+      } else {
+        // A second hub over the same directory: a restart, as far as any
+        // paired browser is concerned.
+        await client.pair(hub.createPairingCode({ role: 'admin' }).code);
+      }
+      advertised.push((await ready).vapidPublicKey);
+
+      client.disconnect();
+      await hub.stop();
+    }
+
+    assert.ok(advertised[0], 'ready must carry the key a browser subscribes with');
+    assert.equal(advertised[0], advertised[1], 'a restart must not mint a new key');
+
+    const onDisk = JSON.parse(readFileSync(join(dir, 'store.json'), 'utf8')).vapid;
+    assert.ok(onDisk, 'and it must actually reach the disk before the process ends');
+    assert.equal(onDisk.publicKey, advertised[0]);
+
+    // The shapes the crypto depends on: an uncompressed P-256 point, and a
+    // scalar padded to 32 bytes rather than left with its leading zeroes
+    // trimmed, which is what a JWK will not accept.
+    const publicKey = Buffer.from(onDisk.publicKey, 'base64url');
+    assert.equal(publicKey.length, 65);
+    assert.equal(publicKey[0], 0x04);
+    assert.equal(Buffer.from(onDisk.privateKey, 'base64url').length, 32);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a subscription the hub cannot encrypt to is refused, not stored', async () => {
+  // A device that reads as push-reachable and is not is the worst of both:
+  // it shows up in `devices` as covered, counts as a push target, and
+  // silently receives nothing. The check belongs at registration, where there
+  // is somebody to tell.
+  const dir = tmp('webpush-bad');
+  const hub = new Notifier({
+    port: 0,
+    storeDir: dir,
+    dashboard: false,
+    logger: false,
+    webPush: { enabled: true },
+  });
+  await hub.start();
+
+  const client = makeClient(hub, 'browser');
+  const paired = new Promise((resolve) => client.on('paired', resolve));
+  await client.pair(hub.createPairingCode({ role: 'admin' }).code);
+  const { deviceId } = await paired;
+
+  const valid = createECDH('prime256v1');
+  valid.generateKeys();
+  const good = valid.getPublicKey().toString('base64url');
+
+  try {
+    const cases = [
+      ['keys missing entirely', { endpoint: 'https://push.example/x', keys: undefined }],
+      [
+        'p256dh is the wrong length',
+        { endpoint: 'https://push.example/x', keys: { p256dh: 'AAAA', auth: 'BTBZMqHH6r4Tts7J_aSIgg' } },
+      ],
+      [
+        'auth secret is not 16 bytes',
+        { endpoint: 'https://push.example/x', keys: { p256dh: good, auth: 'AAAA' } },
+      ],
+      [
+        // The hub POSTs here on every alert. Over http: that announces, in the
+        // clear and repeatedly, that something is wrong.
+        'endpoint is not https',
+        {
+          endpoint: 'http://push.example/x',
+          keys: { p256dh: good, auth: 'BTBZMqHH6r4Tts7J_aSIgg' },
+        },
+      ],
+    ];
+
+    for (const [why, subscription] of cases) {
+      client.registerWebPush(subscription);
+      await delay(60);
+      const device = hub.devices().find((d) => d.id === deviceId);
+      assert.equal(device.pushToken, undefined, `${why}: must not be stored`);
+      assert.equal(device.pushProvider, undefined, why);
+    }
+
+    // And the good one is.
+    client.registerWebPush({
+      endpoint: 'https://push.example/x',
+      keys: { p256dh: good, auth: 'BTBZMqHH6r4Tts7J_aSIgg' },
+    });
+    await delay(60);
+    const device = hub.devices().find((d) => d.id === deviceId);
+    assert.equal(device.pushProvider, 'webpush');
+    assert.equal(device.pushToken, 'https://push.example/x');
+  } finally {
+    client.disconnect();
+    await hub.stop();
     rmSync(dir, { recursive: true, force: true });
   }
 });

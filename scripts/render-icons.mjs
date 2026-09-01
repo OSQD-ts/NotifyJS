@@ -8,7 +8,7 @@
  *   node scripts/render-icons.mjs
  */
 import sharp from 'sharp';
-import { copyFileSync, mkdirSync } from 'node:fs';
+import { copyFileSync, mkdirSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 
@@ -73,3 +73,19 @@ console.log('  desktop icon.png + tray.png');
 await sharp(join(src, 'icon.svg')).resize(196, 196).png().toFile(join(web, 'favicon.png'));
 copyFileSync(join(src, 'icon.svg'), join(web, 'icon.svg'));
 console.log('  dashboard favicon.png + icon.svg');
+
+// The dashboard is an installable web app, and both a manifest icon set and an
+// iOS home-screen icon have to be PNG at fixed sizes - Safari will not take the
+// SVG, and a web app it cannot find an icon for installs as a blank tile.
+//
+// The maskable one is inset because a maskable icon is cropped to whatever
+// shape the platform likes (a circle on most Android launchers). Full bleed
+// there loses the edges of the bell; 0.62 keeps it inside the safe area, the
+// same fraction the Android adaptive icon uses.
+await sharp(join(src, 'icon.svg')).resize(192, 192).png().toFile(join(web, 'icon-192.png'));
+await sharp(join(src, 'icon.svg')).resize(512, 512).png().toFile(join(web, 'icon-512.png'));
+writeFileSync(
+  join(web, 'icon-maskable-512.png'),
+  await inset(join(src, 'icon.svg'), 512, 0.62, { r: 14, g: 17, b: 22, alpha: 1 }),
+);
+console.log('  dashboard icon-192.png + icon-512.png + icon-maskable-512.png');
