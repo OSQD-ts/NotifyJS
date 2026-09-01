@@ -288,7 +288,7 @@ async function subscribeToPush(): Promise<void> {
   if (!('serviceWorker' in navigator) || !('PushManager' in window)) return;
   // Asking for a subscription without permission prompts, and this is called
   // from places that are not a user gesture.
-  if (Notification.permission !== 'granted') return;
+  if (!globalThis.Notification || globalThis.Notification.permission !== 'granted') return;
 
   try {
     const registration = await navigator.serviceWorker.register('./sw.js');
