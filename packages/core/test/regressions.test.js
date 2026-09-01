@@ -632,6 +632,57 @@ test('set-version stamps one version across the packages and their links', async
   }
 });
 
+test('a run: block never carries an expression GitHub will choke on', () => {
+  // This shipped. A comment inside a `run:` block explaining why you must not
+  // interpolate an expression into a shell contained the empty expression as
+  // its example - and GitHub scans the whole block for expressions without
+  // caring that a `#` starts a shell comment. The workflow was rejected at
+  // load time with "An expression was expected", pointing at the block scalar
+  // rather than at the line, on a push that had already happened.
+  const check = join(REPO, 'scripts/check-workflow-hardening.mjs');
+
+  const dir = tmp('hardening');
+  try {
+    const fixture = join(dir, 'broken.yml');
+    writeFileSync(
+      fixture,
+      [
+        'name: Broken',
+        'on: push',
+        'permissions:',
+        '  contents: read',
+        'jobs:',
+        '  a:',
+        '    runs-on: ubuntu-latest',
+        '    steps:',
+        '      - run: |',
+        // The exact shape that broke it.
+        '          # an expression like ${{ }} would paste it into the shell',
+        '          echo hi',
+        '',
+      ].join('\n'),
+    );
+
+    const broken = spawnSync(process.execPath, [check, fixture], { encoding: 'utf8' });
+    assert.equal(broken.status, 1, 'an empty expression in a run: block must fail');
+    assert.match(broken.stderr, /empty expression/);
+
+    // And the workflows this repository actually ships must stay loadable.
+    // Running the checker over them here is what turns "GitHub rejected the
+    // file" into a test failure before the push rather than after it.
+    const real = spawnSync(
+      process.execPath,
+      [check, ...readdirSync(join(REPO, '.github/workflows'))
+        .filter((f) => f.endsWith('.yml'))
+        .map((f) => join(REPO, '.github/workflows', f))],
+      { encoding: 'utf8' },
+    );
+    assert.equal(real.status, 0, `the repository's own workflows: ${real.stderr}`);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('set-version reaches the manifests nothing publishes', async () => {
   // The desktop app's version is what it reports to a hub, and the mobile
   // app's is the versionName inside the APK. Neither was ever stamped, so

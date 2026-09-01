@@ -61,9 +61,14 @@ jobs:
 
           # The subject line of the newest commit, which for a one-commit
           # branch is exactly the title anyone would have typed. Read from the
-          # API into a variable rather than interpolated into this script:
-          # a commit message is text somebody chooses, and `${{ }}` would paste
-          # it into the shell as syntax.
+          # API into a variable rather than interpolated into this script: a
+          # commit message is text somebody chooses, and a workflow expression
+          # would paste it into the shell as syntax instead of passing it as
+          # data.
+          #
+          # Naming that expression here, even inside a shell comment, is enough
+          # on its own to make GitHub refuse to load this file: it scans the
+          # whole run block for one and does not know what a `#` means.
           title=$(gh api "repos/$REPO/commits/$SHA" --jq '.commit.message' | head -n 1)
           [ -n "$title" ] || title="$BRANCH"
 

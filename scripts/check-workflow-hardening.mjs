@@ -91,6 +91,21 @@ for (const file of files) {
       if (typeof step?.run === 'string') {
         for (const m of step.run.matchAll(/\$\{\{([^}]*)\}\}/g)) {
           const expr = m[1].trim();
+
+          // GitHub scans a whole run block for expressions and has no idea
+          // what a `#` means, so an empty one written inside a shell comment
+          // is still an empty one - and the file is rejected at load time with
+          // "An expression was expected", pointing at the block rather than at
+          // the line. Which is exactly how a comment *about* not putting
+          // expressions in run blocks took this workflow down.
+          if (expr === '') {
+            problems.push(
+              `${file} (${jobName}): run: contains an empty expression` +
+                '\n    GitHub refuses to load a workflow with one, even inside a shell comment',
+            );
+            continue;
+          }
+
           const bad = UNTRUSTED.find((ctx) => expr.includes(ctx));
           if (bad) {
             problems.push(
