@@ -1,4 +1,12 @@
-import { cpSync, readdirSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
+import {
+  cpSync,
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  writeFileSync,
+} from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { join } from 'node:path';
 
 /**
@@ -7,12 +15,23 @@ import { join } from 'node:path';
  * emits, and an inline import map would need a CSP exception, so instead the
  * protocol's build is vendored in and the specifiers rewritten to real paths.
  */
-const dist = new URL('./dist/', import.meta.url).pathname;
+/**
+ * `fileURLToPath`, not `.pathname`.
+ *
+ * A file URL's pathname keeps its leading slash, which on Windows makes
+ * `/D:/a/NotifyJS/...` - and joining that onto anything produces
+ * `D:\D:\a\NotifyJS\...`, the doubled drive letter this build died on.
+ * Every other script here already converts properly; this file was the one
+ * that did not, and only the Windows leg of the release ever noticed.
+ */
+const here = (relative) => fileURLToPath(new URL(relative, import.meta.url));
+
+const dist = here('./dist/');
 const vendor = join(dist, 'vendor', 'protocol');
 
 mkdirSync(vendor, { recursive: true });
-cpSync(new URL('../protocol/dist/', import.meta.url).pathname, vendor, { recursive: true });
-cpSync(new URL('./public/', import.meta.url).pathname, dist, { recursive: true });
+cpSync(here('../protocol/dist/'), vendor, { recursive: true });
+cpSync(here('./public/'), dist, { recursive: true });
 
 /**
  * Keyed on the package's real name. These went stale once when the package was
@@ -49,6 +68,29 @@ for (const file of readdirSync(dist)) {
   for (const match of code.matchAll(BARE_IMPORT)) {
     unresolved.push(`${file}: ${match[2] ?? match[4]}`);
   }
+}
+
+/**
+ * Everything index.html asks the browser to fetch must actually be there.
+ *
+ * The check below only inspects the .js files it finds, so an empty `dist`
+ * passes it vacuously - which is how a build that emitted nothing at all still
+ * reported success. `tsc -b` is incremental and skips emitting when it thinks
+ * the output is current, so a `dist` deleted without its .tsbuildinfo produces
+ * exactly that: no app.js, no error, and a dashboard that 404s on load.
+ */
+const referenced = [
+  ...readFileSync(join(dist, 'index.html'), 'utf8').matchAll(/(?:src|href)="\.\/([^"]+)"/g),
+].map((m) => m[1]);
+
+const absent = [...new Set(referenced)].filter((f) => !existsSync(join(dist, f)));
+if (absent.length > 0) {
+  throw new Error(
+    'the dashboard is missing files its own page loads: ' +
+      absent.join(', ') +
+      '\n  If dist was cleared by hand, remove packages/web/tsconfig.tsbuildinfo too -' +
+      '\n  tsc skips emitting when it believes the output is already current.',
+  );
 }
 
 // A bare specifier here is not a warning: the page throws on load and the
