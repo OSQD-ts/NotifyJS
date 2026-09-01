@@ -1,0 +1,137 @@
+name: Dependabot auto-merge
+
+# Merges a Dependabot pull request once CI has actually passed on it.
+#
+# Triggered by CI *finishing* rather than by the pull request opening, for two
+# reasons. A workflow run by `pull_request` from Dependabot is handed a
+# read-only token and no secrets, so it could not merge anything even if it
+# wanted to. And keying on the completed run means the gate is the real result
+# of the real jobs - not a promise that they will be required later by a branch
+# protection rule someone may not have configured.
+#
+# This workflow never checks out or runs any code from the pull request. It is
+# always the copy on the default branch that runs, so a pull request cannot
+# alter the thing deciding whether to merge it. Everything it needs it asks the
+# API for.
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+
+# Only what merging needs.
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  merge:
+    name: Merge if CI passed
+    runs-on: ubuntu-latest
+    # A first pass on cheap facts: CI succeeded, it was a pull request, and the
+    # run was started by Dependabot. The author is confirmed against the API
+    # below - this is only to avoid spinning a runner for every other push.
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'pull_request' &&
+      github.event.workflow_run.actor.login == 'dependabot[bot]'
+
+    steps:
+      - name: Merge
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          # The exact commit CI ran against. Everything below is judged on this
+          # revision and no other.
+          TESTED_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          set -euo pipefail
+
+          # The pull request for the commit CI tested. Asked for by SHA rather
+          # than read from the event payload, which carries no pull request at
+          # all in some cases.
+          PR=$(gh api "repos/$REPO/commits/$TESTED_SHA/pulls" \
+                 --jq '.[0].number // empty')
+          if [ -z "$PR" ]; then
+            echo "No pull request for $TESTED_SHA; nothing to merge."
+            exit 0
+          fi
+
+          # One request, one field per line, read with mapfile.
+          #
+          # Not a tab-separated line: `head.repo` is null once a fork has been
+          # deleted, which collapses to an empty field and shifts every value
+          # after it one place left. Silently reading the state into the draft
+          # flag is not a way to reach a merge decision. Blank lines survive
+          # mapfile intact, so a missing value stays missing.
+          #
+          # Read through `gh --jq` rather than piping to `jq`, so this depends
+          # only on the tool it already needs.
+          mapfile -t FIELDS < <(gh api "repos/$REPO/pulls/$PR" --jq '
+            [ (.user.login // ""),
+              (.base.ref // ""),
+              (.head.repo.full_name // ""),
+              (.head.sha // ""),
+              (.state // ""),
+              (.draft | tostring),
+              (.title // "" | gsub("\n"; " ")) ] | .[]')
+
+          AUTHOR=${FIELDS[0]:-}
+          BASE=${FIELDS[1]:-}
+          HEAD_REPO=${FIELDS[2]:-}
+          HEAD_SHA=${FIELDS[3]:-}
+          STATE=${FIELDS[4]:-}
+          DRAFT=${FIELDS[5]:-}
+          TITLE=${FIELDS[6]:-}
+
+          echo "PR #$PR by $AUTHOR -> $BASE (state=$STATE draft=$DRAFT)"
+
+          # Author, confirmed against the API. The `actor` on a workflow run is
+          # who started it, which is not the same claim.
+          if [ "$AUTHOR" != "dependabot[bot]" ]; then
+            echo "Not a Dependabot pull request; leaving it alone."
+            exit 0
+          fi
+
+          # Same repository only. A fork's branch is somebody else's to change.
+          if [ "$HEAD_REPO" != "$REPO" ]; then
+            echo "Head is $HEAD_REPO, not $REPO; refusing."
+            exit 0
+          fi
+
+          if [ "$BASE" != "main" ] || [ "$STATE" != "open" ] || [ "$DRAFT" != "false" ]; then
+            echo "Not an open, non-draft pull request onto main; nothing to do."
+            exit 0
+          fi
+
+          # The branch must not have moved since CI ran. Without this a commit
+          # pushed between the run finishing and this job starting would be
+          # merged on the strength of a green tick that never covered it.
+          if [ "$HEAD_SHA" != "$TESTED_SHA" ]; then
+            echo "Head is now $HEAD_SHA but CI tested $TESTED_SHA; waiting for the newer run."
+            exit 0
+          fi
+
+          # Major bumps are for a person to read. Dependabot records the update
+          # type in its own commit message - the same metadata its action reads
+          # - and a grouped pull request lists every dependency it moved, so one
+          # major anywhere in the group is enough to hold the whole thing back.
+          #
+          # Fails closed: if that block is missing, the update type is unknown
+          # and unknown is not a reason to merge.
+          MESSAGE=$(gh api "repos/$REPO/pulls/$PR/commits" --jq '.[0].commit.message')
+
+          if ! grep -q 'update-type: version-update:semver-' <<<"$MESSAGE"; then
+            echo "No update-type metadata on the commit; refusing to guess."
+            exit 0
+          fi
+          if grep -q 'update-type: version-update:semver-major' <<<"$MESSAGE"; then
+            echo "Contains a major bump; leaving it for review."
+            exit 0
+          fi
+
+          grep -o 'dependency-name: .*' <<<"$MESSAGE" | sed 's/^/  /' || true
+          echo "CI passed on $TESTED_SHA and every bump is minor or patch; merging."
+
+          gh pr merge "$PR" --squash --delete-branch \
+            --subject "Chore: $TITLE" \
+            --body "Merged automatically: CI passed on $TESTED_SHA and the update is minor or patch."
