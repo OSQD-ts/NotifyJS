@@ -50,6 +50,36 @@ updates:
     schedule:
       interval: weekly
     groups:
+      # Patches only, for the reason in the ignore list below. One PR rather
+      # than one per package.
       expo:
-        patterns: ['expo', 'expo-*', 'react-native']
-        update-types: [minor, patch]
+        patterns: ['expo', 'expo-*']
+        update-types: [patch]
+    ignore:
+      # The Expo SDK decides these versions; they are not independent choices.
+      # `expo@~51` ships react-native 0.74.5, expo-constants ~16.0.2 and the
+      # rest, and they only move together - `npx expo install --fix` after an
+      # SDK bump is what moves them.
+      #
+      # Left to itself Dependabot proposes each one on its own and every such
+      # PR fails to install. react-native is the trap: it is a 0.x package, so
+      # 0.74 -> 0.87 reads as *minor* to semver and was swept into the grouped
+      # "safe" updates, while `expo` 51 -> 54 reads as major and was not. The
+      # result was a weekly PR pairing a react-native three years newer than
+      # the SDK pinning it, which npm refuses outright:
+      #
+      #   Conflicting peer dependency: @types/react@19.2.18
+      #   peerOptional @types/react@"^19.1.1" from react-native@0.87.1
+      #
+      # Patches still flow, so a security fix within the SDK's own line is not
+      # blocked by this.
+      - dependency-name: expo
+        update-types: [version-update:semver-minor, version-update:semver-major]
+      - dependency-name: expo-*
+        update-types: [version-update:semver-minor, version-update:semver-major]
+      - dependency-name: react
+        update-types: [version-update:semver-minor, version-update:semver-major]
+      - dependency-name: react-native
+        update-types: [version-update:semver-minor, version-update:semver-major]
+      - dependency-name: '@types/react'
+        update-types: [version-update:semver-minor, version-update:semver-major]

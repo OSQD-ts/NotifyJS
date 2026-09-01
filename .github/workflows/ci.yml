@@ -196,6 +196,15 @@ jobs:
         working-directory: packages/desktop
         run: npx tsc --noEmit
 
+      # electron-builder packages `dist/`, it does not produce it. Every
+      # `dist:*` script in this package is `npm run build && electron-builder`
+      # for that reason, and calling the packager directly skipped the first
+      # half - so on a clean checkout there was no `dist/main.js` to package
+      # and the job failed on an app.asar missing its entry point.
+      - name: Bundle main, preload and renderer
+        working-directory: packages/desktop
+        run: npm run build
+
       # `--dir` packages the app without building the installers: one Electron
       # download instead of four, and no AppImage or dpkg step. It still
       # validates the electron-builder configuration and the packaged tree,
