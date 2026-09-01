@@ -619,9 +619,25 @@ jobs:
           fi
 
           echo "Merging #$number into $BASE."
-          gh pr merge "$number" --repo "$REPO" --squash --delete-branch
+          gh pr merge "$number" --repo "$REPO" --squash
 
+          # Recorded before the branch is deleted, and deliberately so. These
+          # were one `gh pr merge --squash --delete-branch`, which meant a
+          # deletion that failed - a protected ref, one somebody had already
+          # removed, a transient API error - exited non-zero *after* the merge
+          # had landed. The step failed, this output was never written, and the
+          # dispatch below never ran: the change was on the default branch and
+          # nothing built, versioned or released it.
           echo "merged=true" >> "$GITHUB_OUTPUT"
+
+          # Best effort from here. The merge is the part that matters; a branch
+          # left behind is untidy, not broken, and is worth a warning rather
+          # than a red run over a change that has already landed.
+          if err=$(gh api -X DELETE "repos/$REPO/git/refs/heads/$BRANCH" 2>&1); then
+            echo "Deleted $BRANCH."
+          else
+            echo "::warning::Merged #$number, but could not delete $BRANCH: $err"
+          fi
         id: merge
 
       # The merge above was made with GITHUB_TOKEN, so it triggered nothing.
