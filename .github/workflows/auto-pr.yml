@@ -61,9 +61,14 @@ jobs:
 
           # The subject line of the newest commit, which for a one-commit
           # branch is exactly the title anyone would have typed. Read from the
-          # API into a variable rather than interpolated into this script:
-          # a commit message is text somebody chooses, and `${{ }}` would paste
-          # it into the shell as syntax.
+          # API into a variable rather than interpolated into this script: a
+          # commit message is text somebody chooses, and a workflow expression
+          # would paste it into the shell as syntax instead of passing it as
+          # data.
+          #
+          # Naming that expression here, even inside a shell comment, is enough
+          # on its own to make GitHub refuse to load this file: it scans the
+          # whole run block for one and does not know what a `#` means.
           title=$(gh api "repos/$REPO/commits/$SHA" --jq '.commit.message' | head -n 1)
           [ -n "$title" ] || title="$BRANCH"
 
@@ -90,7 +95,34 @@ jobs:
           )
 
           # shellcheck disable=SC2086  # $draft is a flag or nothing, by design.
-          gh pr create --repo "$REPO" --base "$BASE" --head "$BRANCH" \
-            --title "$title" --body "$body" $draft
+          if out=$(gh pr create --repo "$REPO" --base "$BASE" --head "$BRANCH" \
+                     --title "$title" --body "$body" $draft 2>&1); then
+            printf '%s\n' "$out"
+            echo "Opened a pull request for $BRANCH onto $BASE."
+            exit 0
+          fi
 
-          echo "Opened a pull request for $BRANCH onto $BASE."
+          # One failure here is a setting rather than a fault, and it arrives
+          # as a bare GraphQL error that says nothing about where to fix it.
+          # Opening pull requests is off for GITHUB_TOKEN by default, on the
+          # theory that a workflow able to open one is a step away from a
+          # workflow able to approve it.
+          if printf '%s' "$out" | grep -q 'not permitted to create or approve pull requests'; then
+            {
+              echo "::error::GitHub Actions may not open pull requests in this repository."
+              echo
+              echo "Settings -> Actions -> General -> Workflow permissions"
+              echo "  tick 'Allow GitHub Actions to create and approve pull requests'"
+              echo
+              echo "In an organisation the same box has to be ticked for the"
+              echo "organisation first, or the repository's own is locked off."
+              echo
+              echo "Nothing else is blocked: CI has already run on this commit."
+              echo "Open the pull request by hand and it merges as usual:"
+              echo "  https://github.com/$REPO/compare/$BASE...$BRANCH?expand=1"
+            } >&2
+            exit 1
+          fi
+
+          printf '%s\n' "$out" >&2
+          exit 1

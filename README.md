@@ -798,6 +798,24 @@ cascade into new workflow runs, so the merge job dispatches CI and Version on
 `main` itself afterwards. Without that, `main` would be written to and never
 built, scanned, or rolled forward.
 
+### What the repository has to allow
+
+Two settings, both off or on by default in ways that only show up as a failed
+job:
+
+- **Settings → Actions → General → Workflow permissions →
+  _Allow GitHub Actions to create and approve pull requests_.** Off by default.
+  Without it `auto-pr.yml` fails with a bare GraphQL error, no pull request is
+  opened, and the merge job then finds nothing to merge and quietly stands
+  down. In an organisation the same box has to be ticked for the organisation
+  first, or the repository's own is locked off.
+- **Settings → General → _Allow squash merging_.** On by default. The merge job
+  squashes, so without it `gh pr merge --squash` fails and the pull request
+  stays open.
+
+Neither is needed for the checks themselves — CI runs on the push regardless,
+and a pull request opened by hand merges exactly the same way.
+
 ## Versioning
 
 Nobody types a version number. After every merge,
