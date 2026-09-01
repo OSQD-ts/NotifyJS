@@ -332,3 +332,22 @@ jobs:
           docker logs nj
           curl -sf http://127.0.0.1:7741/health
           docker rm -f nj
+
+      # The release publishes linux/amd64 *and* linux/arm64, and CI only ever
+      # built the first - so an arm64-only failure could not be seen until a
+      # tag was cut. It was: Node crashed under QEMU partway through `npm ci`,
+      # and the build hung rather than failing.
+      #
+      # Cheap now that the build stage is pinned to the native platform. The
+      # arm64 leg is a base image, three COPYs and two busybox commands, with
+      # no Node executed under emulation at all.
+      - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
+
+      - name: Both published architectures build
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          push: false
+          platforms: linux/amd64,linux/arm64
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

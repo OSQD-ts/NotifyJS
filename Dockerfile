@@ -5,8 +5,23 @@
 # ---------------------------------------------------------------------------
 # Pinned by digest, not just by tag: `20-alpine` is republished whenever the
 # base is rebuilt, so a tag alone means the image this produces is not the one
-# that was reviewed. Dependabot bumps the digest and the comment together.
-FROM node:20-alpine@sha256:fb4cd12c85ee03686f6af5362a0b0d56d50c58a04632e6c0fb8363f609372293 AS build
+# that was reviewed. Nothing bumps this automatically; move the digest and the
+# comment together.
+#
+# `--platform=$BUILDPLATFORM` keeps this stage on the machine doing the
+# building, whatever architectures are being produced. What it emits is a
+# bundled `notifyjs.cjs` and a directory of HTML, CSS and JavaScript - not one
+# byte of it architecture-specific - so running `npm ci` and a TypeScript build
+# again under emulation buys nothing.
+#
+# It also cost the arm64 leg of a multi-platform build entirely: Node under
+# QEMU aarch64 dies partway through `npm ci` with
+#
+#   qemu: uncaught target signal 4 (Illegal instruction) - core dumped
+#
+# and the build then sits there rather than failing. Only the runtime stage
+# below is built per-architecture now, and it runs no Node at all.
+FROM --platform=$BUILDPLATFORM node:20-alpine@sha256:fb4cd12c85ee03686f6af5362a0b0d56d50c58a04632e6c0fb8363f609372293 AS build
 
 WORKDIR /app
 
