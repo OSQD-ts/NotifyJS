@@ -1,9 +1,23 @@
 name: CI
 
 on:
+  # Every branch, not only main. A change here is a branch, and the run that
+  # decides whether it reaches main is the one its own push starts.
+  #
+  # This is not just convenience. A pull request opened by GITHUB_TOKEN does
+  # not start a workflow - GitHub refuses to let its own token cascade - so a
+  # workflow triggered only by `pull_request` would leave the pull request this
+  # repository opens for you with nothing to report, forever. Check runs attach
+  # to the head commit rather than to the pull request, so the push run shows
+  # up on the pull request all the same.
   push:
-    branches: [main]
+    branches: ['**']
+  # Kept for anything arriving from a fork, where no push event lands here.
   pull_request:
+  # `merge` below dispatches this on main after an automatic merge, because a
+  # push made with GITHUB_TOKEN does not trigger one either - and without it
+  # main would never be built or scanned, only its branches.
+  workflow_dispatch:
 
 # Every job here only reads the repository. Stated explicitly because the
 # default token permissions are a repository-level setting: without this, what
@@ -24,10 +38,20 @@ concurrency:
 # together. Nothing bumps these automatically, so `check-action-contracts.mjs`
 # is what catches a SHA that was edited to something that no longer fits.
 
+# Every build job below carries the same `if:`. A branch in this repository is
+# already covered by its push run, and without the guard each one would build
+# the same commit twice - once for the push, once for the pull request that
+# push opens. A fork's pull request produces no push event here, so it keeps
+# the `pull_request` run and stays covered.
+
 jobs:
   test:
     name: Build and test (Node ${{ matrix.node }})
     runs-on: ubuntu-latest
+    # See the note above `jobs:`.
+    if: >-
+      github.event_name != 'pull_request'
+      || github.event.pull_request.head.repo.full_name != github.repository
     strategy:
       fail-fast: false
       matrix:
@@ -51,6 +75,10 @@ jobs:
   mobile:
     name: Mobile app typecheck and bundle
     runs-on: ubuntu-latest
+    # See the note above `jobs:`.
+    if: >-
+      github.event_name != 'pull_request'
+      || github.event.pull_request.head.repo.full_name != github.repository
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
@@ -117,6 +145,10 @@ jobs:
   package:
     name: Hub binary smoke test
     runs-on: ubuntu-latest
+    # See the note above `jobs:`.
+    if: >-
+      github.event_name != 'pull_request'
+      || github.event.pull_request.head.repo.full_name != github.repository
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
@@ -174,6 +206,10 @@ jobs:
   desktop:
     name: Desktop app packages
     runs-on: ubuntu-latest
+    # See the note above `jobs:`.
+    if: >-
+      github.event_name != 'pull_request'
+      || github.event.pull_request.head.repo.full_name != github.repository
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
@@ -241,6 +277,10 @@ jobs:
   release-dry-run:
     name: A release would still build
     runs-on: ubuntu-latest
+    # See the note above `jobs:`.
+    if: >-
+      github.event_name != 'pull_request'
+      || github.event.pull_request.head.repo.full_name != github.repository
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
@@ -308,6 +348,10 @@ jobs:
   docker:
     name: Docker image builds
     runs-on: ubuntu-latest
+    # See the note above `jobs:`.
+    if: >-
+      github.event_name != 'pull_request'
+      || github.event.pull_request.head.repo.full_name != github.repository
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
@@ -351,3 +395,253 @@ jobs:
           platforms: linux/amd64,linux/arm64
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+  # ------------------------------------------------------------------
+  # Whether anything got worse, security-wise, in this branch.
+  #
+  # Everything here is differential, and deliberately so. An absolute gate on
+  # this tree is red today - the mobile app carries Expo and React Native,
+  # which between them have twenty-odd open advisories at any moment - and a
+  # gate that is red on an unchanged tree is one everybody learns to merge
+  # past. What blocks a merge is what *this branch* added.
+  # ------------------------------------------------------------------
+  security:
+    name: Nothing got worse
+    runs-on: ubuntu-latest
+    # See the note above `jobs:`.
+    if: >-
+      github.event_name != 'pull_request'
+      || github.event.pull_request.head.repo.full_name != github.repository
+    permissions:
+      contents: read
+      # CodeQL posts its findings to the code scanning API, and the step after
+      # it reads them back to compare against the default branch.
+      security-events: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          # check-audit.mjs builds a worktree of the base ref to audit, so the
+          # base ref has to actually be in the clone.
+          fetch-depth: 0
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 20
+          cache: npm
+
+      # No `npm ci`: `npm audit` resolves the lockfile against the registry and
+      # never needs node_modules, which is the only reason auditing three
+      # separate dependency trees twice each is affordable at all.
+      - name: No dependency advisory this branch did not already inherit
+        env:
+          BASE_REF: ${{ github.base_ref || github.event.repository.default_branch }}
+        run: |
+          set +e
+          node scripts/check-audit.mjs --base "origin/$BASE_REF" --severity high \
+            . packages/desktop packages/mobile
+          status=$?
+          # 1 is a new advisory and fails. 2 means the comparison could not be
+          # made - a missing ref, a registry that would not answer - and
+          # unknown is not the same as broken.
+          if [ "$status" = "2" ]; then
+            echo "::warning::Could not compare advisories against origin/$BASE_REF; see the log."
+            exit 0
+          fi
+          exit "$status"
+
+      # The properties SECURITY.md claims for these workflows, checked rather
+      # than asserted - and now that a green run merges itself, the claim about
+      # `${{ }}` in a `run:` block is load-bearing.
+      - name: Workflows are pinned, scoped, and free of shell injection
+        run: node scripts/check-workflow-hardening.mjs .github/workflows/*.yml
+
+      # Same check release-dry-run performs, but that job does not run for a
+      # fork's pull request, and a moved action pin is exactly the kind of
+      # change worth catching there.
+      - name: Pinned actions still accept the inputs they are given
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set +e
+          node scripts/check-action-contracts.mjs .github/workflows/*.yml
+          status=$?
+          if [ "$status" = "2" ]; then
+            echo "::warning::Could not verify every pinned action; see the log."
+            exit 0
+          fi
+          exit "$status"
+
+      - uses: github/codeql-action/init@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4
+        with:
+          languages: javascript-typescript
+          # The default suite is tuned to be quiet. This runs the security
+          # queries and the correctness ones, which is the point of having it.
+          queries: security-and-quality
+
+      # No build step: CodeQL reads JavaScript and TypeScript straight from
+      # source, so nothing third-party is compiled inside a job holding a token
+      # that can write to the security events API.
+      - uses: github/codeql-action/analyze@cdf488f595d80d6e07e03d4674febd5ab45fa938 # v4
+        with:
+          category: /language:javascript-typescript
+
+      # `analyze` uploads findings; on its own it never fails a build, so an
+      # automatic merge would sail past a fresh SQL injection alert without
+      # comment. This is the gate. Same differential shape as the audit above:
+      # what fails is a high or critical alert on this branch that the default
+      # branch does not already have, keyed by rule and file so that moving
+      # code around does not read as a new finding.
+      - name: No code scanning alert this branch introduced
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          # Code scanning indexes results by the ref they were analysed on,
+          # and for a pull request that is the merge ref, not the branch -
+          # asking for a fork's branch name would 404 and read as "clean".
+          HEAD_REF: ${{ github.event_name == 'pull_request' && format('refs/pull/{0}/merge', github.event.number) || format('refs/heads/{0}', github.ref_name) }}
+          BASE_REF: refs/heads/${{ github.base_ref || github.event.repository.default_branch }}
+        run: |
+          set -uo pipefail
+
+          alerts() {
+            gh api --paginate \
+              "/repos/$REPO/code-scanning/alerts?ref=$1&state=open&per_page=100" \
+              --jq '.[]
+                    | select(.rule.security_severity_level == "high"
+                          or .rule.security_severity_level == "critical")
+                    | "\(.rule.id)\t\(.most_recent_instance.location.path)"' \
+              2>/dev/null || true
+          }
+
+          if [ "$HEAD_REF" = "$BASE_REF" ]; then
+            echo "This is the base branch; there is nothing to compare it to."
+            exit 0
+          fi
+
+          head_alerts=$(alerts "$HEAD_REF" | sort -u)
+          if [ -z "$head_alerts" ]; then
+            echo "No high or critical code scanning alert on $HEAD_REF."
+            exit 0
+          fi
+
+          base_alerts=$(alerts "$BASE_REF" | sort -u)
+          if [ -z "$base_alerts" ]; then
+            # Either the base is genuinely clean or it has never been scanned,
+            # and those are not the same thing. Guessing the second would let a
+            # real finding through, so say so and let a person look.
+            echo "::warning::No scan results for $BASE_REF to compare against;" \
+                 "treating every alert on $HEAD_REF as pre-existing."
+            echo "$head_alerts"
+            exit 0
+          fi
+
+          introduced=$(comm -23 <(echo "$head_alerts") <(echo "$base_alerts"))
+          if [ -n "$introduced" ]; then
+            echo "::error::This branch introduces code scanning alerts $BASE_REF does not have:"
+            echo "$introduced"
+            exit 1
+          fi
+          echo "Every alert on $HEAD_REF is already present on $BASE_REF."
+
+  # ------------------------------------------------------------------
+  # The merge.
+  #
+  # Reached only when every job above succeeded, which is what makes this the
+  # gate rather than a second opinion. It lives in this workflow rather than in
+  # a `workflow_run` listener for one practical reason: `workflow_run` always
+  # runs the copy of the file on the default branch, so a change to the merge
+  # rules could never be tested before being merged by the rules it replaces.
+  #
+  # Only this job holds a write token, and it runs no third-party code - just
+  # the `gh` CLI already on the runner.
+  # ------------------------------------------------------------------
+  merge:
+    name: Merge into ${{ github.event.repository.default_branch }}
+    needs: [test, mobile, package, desktop, release-dry-run, docker, security]
+    if: >-
+      github.event_name == 'push'
+      && github.ref_name != github.event.repository.default_branch
+    runs-on: ubuntu-latest
+    permissions:
+      # Squashing the pull request writes to the default branch.
+      contents: write
+      pull-requests: write
+      # A push made with GITHUB_TOKEN starts no workflow, so main would be
+      # merged into and then never built, scanned or released. This job
+      # dispatches both afterwards, and dispatching needs this.
+      actions: write
+    steps:
+      - name: Merge the pull request for this branch
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          BRANCH: ${{ github.ref_name }}
+          BASE: ${{ github.event.repository.default_branch }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+
+          # `gh` has jq compiled in, so `--jq` needs no jq on the runner - and
+          # one call returning tab-separated fields beats four calls asking the
+          # same question about the same pull request.
+          pr=$(gh pr list --repo "$REPO" --head "$BRANCH" --base "$BASE" \
+                 --state open --limit 1 \
+                 --json number,isDraft,headRefOid,labels \
+                 --jq '.[] | [.number, .isDraft, .headRefOid,
+                              ([.labels[].name] | join(" "))] | @tsv')
+
+          if [ -z "$pr" ]; then
+            echo "::notice::No open pull request for $BRANCH; nothing to merge."
+            exit 0
+          fi
+          IFS=$'\t' read -r number is_draft head labels <<< "$pr"
+
+          # A draft is how you say "run the checks, do not land it yet".
+          if [ "$is_draft" = "true" ]; then
+            echo "::notice::#$number is a draft; marking it ready is what merges it."
+            exit 0
+          fi
+
+          # And a label is how you say it about a pull request already open.
+          case " $(printf '%s' "$labels" | tr '[:upper:]' '[:lower:]') " in
+            *" hold "*|*" no-auto-merge "*)
+              echo "::notice::#$number is held by a label; leaving it alone."
+              exit 0
+              ;;
+          esac
+
+          # The commit this run actually built. If the branch has moved since,
+          # merging now would land code no job here ever saw; the run for the
+          # newer commit is the one entitled to merge it.
+          if [ "$head" != "$SHA" ]; then
+            echo "::notice::$BRANCH moved to ${head:0:8} while this run was building ${SHA:0:8}; leaving the newer run to decide."
+            exit 0
+          fi
+
+          echo "Merging #$number into $BASE."
+          gh pr merge "$number" --repo "$REPO" --squash --delete-branch
+
+          echo "merged=true" >> "$GITHUB_OUTPUT"
+        id: merge
+
+      # The merge above was made with GITHUB_TOKEN, so it triggered nothing.
+      # Without these two, main is a branch that is written to and never built,
+      # its rolling release goes stale, and CodeQL never records the baseline
+      # the next branch is compared against. `workflow_dispatch` is the one
+      # event GITHUB_TOKEN is allowed to raise, which is why it exists on both.
+      #
+      # Version, not Release: it reads what just landed, decides whether that
+      # is a release at all, and dispatches Release itself either way - onto a
+      # new tag if the merge carried a `Feat:` or a `Fix:`, onto the default
+      # branch if it only carried `CI:`.
+      - name: Build the default branch, and version what just landed
+        if: steps.merge.outputs.merged == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          BASE: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+          gh workflow run ci.yml      --repo "$REPO" --ref "$BASE"
+          gh workflow run version.yml --repo "$REPO" --ref "$BASE"
+          echo "Dispatched CI and Version on $BASE."

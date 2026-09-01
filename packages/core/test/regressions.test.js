@@ -632,6 +632,216 @@ test('set-version stamps one version across the packages and their links', async
   }
 });
 
+test('set-version reaches the manifests nothing publishes', async () => {
+  // The desktop app's version is what it reports to a hub, and the mobile
+  // app's is the versionName inside the APK. Neither was ever stamped, so
+  // every release shipped apps claiming to be 0.1.0 - and an Android
+  // versionCode that never moved is an APK a phone refuses to upgrade to.
+  const mod = await import(
+    pathToFileURL(join(REPO, 'scripts/set-version.mjs')).href
+  );
+
+  const dir = tmp('setversion-private');
+  try {
+    // A checkout shaped like the real one, down to the `file:` links the two
+    // private apps use to resolve the protocol package.
+    writeFileSync(join(dir, 'package.json'), JSON.stringify({ name: 'root', version: '0.1.0' }));
+    for (const pkg of mod.PACKAGES) {
+      mkdirSync(join(dir, 'packages', pkg), { recursive: true });
+      writeFileSync(
+        join(dir, 'packages', pkg, 'package.json'),
+        readFileSync(join(REPO, 'packages', pkg, 'package.json'), 'utf8'),
+      );
+    }
+    for (const app of ['desktop', 'mobile']) {
+      mkdirSync(join(dir, 'packages', app), { recursive: true });
+      writeFileSync(
+        join(dir, 'packages', app, 'package.json'),
+        readFileSync(join(REPO, 'packages', app, 'package.json'), 'utf8'),
+      );
+    }
+    writeFileSync(
+      join(dir, 'packages', 'mobile', 'app.json'),
+      readFileSync(join(REPO, 'packages/mobile/app.json'), 'utf8'),
+    );
+
+    mkdirSync(join(dir, 'scripts'), { recursive: true });
+    writeFileSync(
+      join(dir, 'scripts', 'set-version.mjs'),
+      readFileSync(join(REPO, 'scripts/set-version.mjs'), 'utf8'),
+    );
+    const copied = await import(pathToFileURL(join(dir, 'scripts/set-version.mjs')).href);
+    copied.setVersion('2.3.4');
+
+    const read = (...parts) => JSON.parse(readFileSync(join(dir, ...parts), 'utf8'));
+
+    assert.equal(read('package.json').version, '2.3.4', 'the root manifest');
+    assert.equal(read('packages', 'desktop', 'package.json').version, '2.3.4', 'the desktop app');
+    assert.equal(read('packages', 'mobile', 'package.json').version, '2.3.4', 'the mobile app');
+
+    const expo = read('packages', 'mobile', 'app.json').expo;
+    assert.equal(expo.version, '2.3.4', 'the Expo versionName');
+    assert.equal(expo.android.versionCode, 2003004, 'the Android versionCode');
+
+    // The whole reason the two apps can be built from a checkout at all. A
+    // release rewrote this to a version number once, pointing the build at a
+    // tarball the registry did not have yet.
+    for (const app of ['desktop', 'mobile']) {
+      const deps = read('packages', app, 'package.json').dependencies ?? {};
+      assert.equal(
+        deps['@osqd/notifyjs-protocol'],
+        'file:../protocol',
+        `${app} must keep its file: link`,
+      );
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('versionCode only ever increases, in the order semver does', async () => {
+  const { versionCode } = await import(
+    pathToFileURL(join(REPO, 'scripts/set-version.mjs')).href
+  );
+
+  const ordered = ['0.1.0', '0.1.1', '0.2.0', '0.9.9', '1.0.0', '1.0.1', '2.0.0'];
+  const codes = ordered.map(versionCode);
+  for (let i = 1; i < codes.length; i += 1) {
+    assert.ok(
+      codes[i] > codes[i - 1],
+      `${ordered[i]} (${codes[i]}) must outrank ${ordered[i - 1]} (${codes[i - 1]})`,
+    );
+  }
+  // Android's own ceiling. Passing it makes the APK unbuildable, not merely wrong.
+  assert.ok(codes.at(-1) < 2_100_000_000);
+  // A prerelease is still the version it is a prerelease of.
+  assert.equal(versionCode('1.2.3-main.7'), versionCode('1.2.3'));
+});
+
+test('next-version reads a bump out of a commit subject', async () => {
+  const { classify } = await import(
+    pathToFileURL(join(REPO, 'scripts/next-version.mjs')).href
+  );
+
+  const cases = [
+    ['Feat: snooze windows', '', 'minor'],
+    ['feat(mobile): lowercase and scoped', '', 'minor'],
+    ['Fix: retry backoff', '', 'patch'],
+    // Not conventional-commits' default, and deliberate: in this repository
+    // `Refactor:` has meant "Security improvements".
+    ['Refactor: rework the store', '', 'patch'],
+    ['CI: pin the runner', '', 'none'],
+    ['Docs: fix a typo', '', 'none'],
+    // Unrecognised subjects release nothing rather than defaulting to a patch.
+    // `Init` and `License Rename` are both real commits in this history.
+    ['License Rename', '', 'none'],
+    ['Init', '', 'none'],
+    ['Feat!: drop the v1 handshake', '', 'major'],
+    ['Fix: something', 'BREAKING CHANGE: store.json moved', 'major'],
+    // How a squash merge actually writes it: every branch commit becomes a
+    // bullet, so the footer is no longer at the start of its line. Missing
+    // this ships a breaking change as a patch.
+    ['Fix: something', '* Fix: a\n* BREAKING CHANGE: store.json moved', 'major'],
+    // Prose must not trip it.
+    ['Fix: something', 'This is not a breaking change: everything still works.', 'patch'],
+  ];
+
+  for (const [subject, body, expected] of cases) {
+    assert.equal(classify({ subject, body }).level, expected, `${subject} / ${body}`);
+  }
+});
+
+test('next-version keeps 1.0.0 a decision rather than a side effect', async () => {
+  const { bump } = await import(pathToFileURL(join(REPO, 'scripts/next-version.mjs')).href);
+
+  // While the major is 0, a breaking change is a minor. 0.x already means
+  // anything can change, and the alternative is the first `Feat!:` quietly
+  // declaring the project 1.0.0.
+  assert.equal(bump('0.1.0', 'major'), '0.2.0');
+  assert.equal(bump('0.1.0', 'minor'), '0.2.0');
+  assert.equal(bump('0.1.0', 'patch'), '0.1.1');
+  assert.equal(bump('0.1.0', 'none'), '0.1.0');
+
+  // Past 1.0.0 it is ordinary semver again.
+  assert.equal(bump('1.2.3', 'major'), '2.0.0');
+  assert.equal(bump('1.2.3', 'minor'), '1.3.0');
+  assert.equal(bump('1.2.3', 'patch'), '1.2.4');
+
+  // A prerelease is counted from its release, not from its own suffix.
+  assert.equal(bump('1.2.3-main.9', 'patch'), '1.2.4');
+});
+
+test('next-version cuts from the tags, and never publishes a rolling build below the last release', () => {
+  // Two failures this covers. Describing against `latest` - which is a rolling
+  // pointer, not a release - would make every version look already cut. And a
+  // rolling prerelease of the *current* version sorts below it, so
+  // `npm i @osqd/notifyjs@next` would hand people something older than
+  // `@latest`.
+  const dir = tmp('nextversion');
+  const git = (...args) => {
+    const r = spawnSync('git', args, { cwd: dir, encoding: 'utf8' });
+    assert.equal(r.status, 0, `git ${args.join(' ')}: ${r.stderr}`);
+    return r.stdout.trim();
+  };
+  const run = (...args) => {
+    const r = spawnSync(
+      process.execPath,
+      [join(dir, 'scripts/next-version.mjs'), ...args],
+      { cwd: dir, encoding: 'utf8' },
+    );
+    assert.equal(r.status, 0, r.stderr);
+    return Object.fromEntries(
+      r.stdout.trim().split('\n').map((line) => line.split('=')),
+    );
+  };
+
+  try {
+    mkdirSync(join(dir, 'scripts'), { recursive: true });
+    writeFileSync(
+      join(dir, 'scripts/next-version.mjs'),
+      readFileSync(join(REPO, 'scripts/next-version.mjs'), 'utf8'),
+    );
+    writeFileSync(join(dir, 'package.json'), JSON.stringify({ version: '0.1.0' }));
+
+    git('init', '-q', '.');
+    git('config', 'user.email', 'test@example.com');
+    git('config', 'user.name', 'test');
+    git('add', '-A');
+    git('commit', '-qm', 'Init');
+
+    // No release tag yet: the first version is what the manifests claim,
+    // not a bump away from it.
+    let out = run('--github-output');
+    assert.equal(out.next, '0.1.0');
+    assert.equal(out.level, 'seed');
+    assert.equal(out.releasable, 'true');
+
+    git('tag', '-a', 'v0.1.0', '-m', 'first');
+    // The rolling tag must not be mistaken for a release.
+    git('tag', 'latest');
+
+    git('commit', '-q', '--allow-empty', '-m', 'CI: pin the runner');
+    out = run('--github-output');
+    assert.equal(out.current, '0.1.0', 'counted from v0.1.0, not from `latest`');
+    assert.equal(out.releasable, 'false', 'a CI: commit is not a release');
+    assert.equal(out.next, '0.1.0');
+
+    // ...but the build the default branch publishes still needs a version
+    // above the one already on npm.
+    out = run('--rolling', '--github-output');
+    assert.equal(out.next, '0.1.1');
+
+    git('commit', '-q', '--allow-empty', '-m', 'Feat: snooze windows');
+    out = run('--github-output');
+    assert.equal(out.next, '0.2.0');
+    assert.equal(out.tag, 'v0.2.0');
+    assert.equal(out.level, 'minor');
+    assert.equal(out.releasable, 'true');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('set-version still runs itself from a path that needs URL encoding', () => {
   // Its entry-point check used to compare `import.meta.url` against a raw
   // filesystem path. In a checkout with a space in it the two never matched:

@@ -1,0 +1,147 @@
+name: Version
+
+# Works out what the next version is from the commits since the last release
+# tag, and cuts it.
+#
+# CI's `merge` job dispatches this after every automatic merge, so the version
+# number is a consequence of what changed rather than something anybody has to
+# remember. A merge carrying a `Feat:` or a `Fix:` produces a tag and a full
+# release; a merge carrying only `CI:` or `Docs:` produces neither, and just
+# refreshes the rolling `latest` build.
+#
+# `workflow_dispatch` rather than `push`, for the same reason everything else
+# in this repository is: the merge that leads here is made with GITHUB_TOKEN,
+# and GitHub does not let its own token cascade into new workflow runs.
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Work out the version and report it, without tagging anything.'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+# Never cancel this. A run that is interrupted between pushing a tag and
+# dispatching the release leaves a version that exists in git and nowhere else.
+concurrency:
+  group: version
+
+jobs:
+  cut:
+    name: Cut the next version
+    runs-on: ubuntu-latest
+    permissions:
+      # Pushing the tag.
+      contents: write
+      # Dispatching the release that builds it - a tag pushed with
+      # GITHUB_TOKEN triggers nothing on its own.
+      actions: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          # The whole point of this job is to read the history since the last
+          # release tag, so it needs the history and the tags.
+          fetch-depth: 0
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 20
+
+      # Printed in full before anything acts on it, so that the run log says
+      # which commit produced which part of the decision.
+      - name: Work out the next version
+        id: next
+        run: |
+          set -euo pipefail
+          node scripts/next-version.mjs | tee decision.txt
+          node scripts/next-version.mjs --github-output >> "$GITHUB_OUTPUT"
+
+      - name: Tag it
+        id: tag
+        if: steps.next.outputs.releasable == 'true' && !inputs.dry_run
+        env:
+          TAG: ${{ steps.next.outputs.tag }}
+          LEVEL: ${{ steps.next.outputs.level }}
+          CURRENT: ${{ steps.next.outputs.current }}
+        run: |
+          set -euo pipefail
+
+          # Dispatched twice with nothing in between, this would otherwise fail
+          # on the push rather than say what happened.
+          if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
+            echo "::notice::$TAG already exists; nothing to cut."
+            exit 0
+          fi
+
+          git config user.name  'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+
+          # Annotated, and carrying the decision that produced it: `git show`
+          # on the tag then answers "why is this a minor?" without anyone
+          # having to find the workflow run.
+          {
+            echo "NotifyJS $TAG"
+            echo
+            echo "$LEVEL release, up from $CURRENT."
+            echo
+            cat decision.txt
+          } > message.txt
+          git tag -a "$TAG" -F message.txt
+          git push origin "$TAG"
+
+          echo "tagged=true" >> "$GITHUB_OUTPUT"
+          echo "Cut $TAG."
+
+      # On the tag, so that release.yml sees `refs/tags/v*` and builds a real
+      # versioned release rather than a rolling one. The version is passed
+      # explicitly as well, because a dispatch does not inherit `github.ref_name`
+      # as the tag name in every context that reads it.
+      - name: Release the new version
+        if: steps.tag.outputs.tagged == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          TAG: ${{ steps.next.outputs.tag }}
+        run: |
+          set -euo pipefail
+          gh workflow run release.yml --repo "$REPO" --ref "$TAG" -f version="$TAG"
+          echo "Dispatched Release for $TAG."
+
+      # Nothing releasable, or a dry run. The default branch still needs its
+      # rolling build refreshed, which is what a push to it used to do before
+      # merges started being made with a token that triggers nothing.
+      - name: Refresh the rolling build instead
+        if: steps.tag.outputs.tagged != 'true' && !inputs.dry_run
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          BASE: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+          gh workflow run release.yml --repo "$REPO" --ref "$BASE"
+          echo "No version to cut; refreshed the rolling build on $BASE."
+
+      - name: Summary
+        env:
+          NEXT: ${{ steps.next.outputs.next }}
+          LEVEL: ${{ steps.next.outputs.level }}
+          TAGGED: ${{ steps.tag.outputs.tagged }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          {
+            if [ "$TAGGED" = "true" ]; then
+              echo "### Cut \`v$NEXT\` (\`$LEVEL\`)"
+            elif [ "$DRY_RUN" = "true" ]; then
+              echo "### Would cut \`v$NEXT\` (\`$LEVEL\`)"
+            else
+              echo "### No version cut"
+              echo
+              echo "Nothing since the last release tag asks for one."
+            fi
+            echo
+            echo '```'
+            cat decision.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
