@@ -267,7 +267,13 @@ Third-party GitHub Actions are pinned to commit SHAs rather than tags, since a
 tag is a pointer its owner can move and these workflows hold the npm and
 container publishing credentials. The container base image is pinned by digest,
 and `npm ci --ignore-scripts` builds it, so no dependency's lifecycle script
-runs during an image build. Dependabot keeps all of it current.
+runs during an image build.
+
+Keeping those pins current is a manual job. There is no bot proposing bumps,
+so a pinned SHA stays exactly where it is until somebody moves it — including
+when the version it points at has a published advisory. `npm audit` and
+`scripts/check-action-contracts.mjs` are what surface that; neither runs on a
+schedule, so both are worth a deliberate pass before a release.
 
 Release jobs run with `contents: read`; only the two jobs that publish are
 granted more, and only what they publish with. No workflow interpolates a

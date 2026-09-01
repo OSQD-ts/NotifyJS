@@ -21,7 +21,8 @@ concurrency:
 # A tag is a mutable pointer the action's owner can move: anyone who can retag
 # can change what runs here, and this workflow holds the publishing
 # credentials. The trailing comment is the human-readable version; update both
-# together (Dependabot understands this form).
+# together. Nothing bumps these automatically, so `check-action-contracts.mjs`
+# is what catches a SHA that was edited to something that no longer fits.
 
 jobs:
   test:
@@ -196,6 +197,15 @@ jobs:
         working-directory: packages/desktop
         run: npx tsc --noEmit
 
+      # electron-builder packages `dist/`, it does not produce it. Every
+      # `dist:*` script in this package is `npm run build && electron-builder`
+      # for that reason, and calling the packager directly skipped the first
+      # half - so on a clean checkout there was no `dist/main.js` to package
+      # and the job failed on an app.asar missing its entry point.
+      - name: Bundle main, preload and renderer
+        working-directory: packages/desktop
+        run: npm run build
+
       # `--dir` packages the app without building the installers: one Electron
       # download instead of four, and no AppImage or dpkg step. It still
       # validates the electron-builder configuration and the packaged tree,
@@ -211,6 +221,89 @@ jobs:
           test -x release/linux-unpacked/notifyjs-desktop
           test -f release/linux-unpacked/resources/app.asar
           echo "packaged desktop app looks complete"
+
+  # ------------------------------------------------------------------
+  # What a release would produce, without publishing any of it.
+  #
+  # CI never runs release.yml, so nothing here used to check that a tag would
+  # still build: the first sign of a broken release was the release. Every
+  # release binary cross-compiles from Linux, so all five targets fit on one
+  # runner and a break surfaces in the change that caused it.
+  #
+  # The publishing half is deliberately not faked. `docker/login-action` needs
+  # packages:write and `softprops/action-gh-release` needs contents:write, and
+  # neither belongs in a job that runs on every pull request. What can be
+  # checked without them is whether those actions still accept the inputs
+  # release.yml passes - the failure a version bump actually causes, and the
+  # one no CI job would otherwise reach, since four of the five release
+  # actions are used nowhere else.
+  # ------------------------------------------------------------------
+  release-dry-run:
+    name: A release would still build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 20
+          cache: npm
+
+      - run: npm ci
+      - run: npm run build
+      - run: node scripts/bundle.mjs
+
+      # Every target the release publishes. pkg cross-compiles them all from
+      # here, so a break in any one shows up in the pull request that caused it
+      # rather than at the next tag.
+      - name: Package every release target
+        run: |
+          set -euo pipefail
+          node scripts/package.mjs --target node20-linux-x64   --name notifyjs-linux-x64
+          node scripts/package.mjs --target node20-linux-arm64 --name notifyjs-linux-arm64
+          node scripts/package.mjs --target node20-macos-x64   --name notifyjs-macos-x64
+          node scripts/package.mjs --target node20-macos-arm64 --name notifyjs-macos-arm64
+          node scripts/package.mjs --target node20-win-x64     --name notifyjs-windows-x64 --format zip
+          ls -la build/artifacts
+
+      - name: Every published artifact is present and not empty
+        run: |
+          set -euo pipefail
+          for f in notifyjs-linux-x64.tar.gz notifyjs-linux-arm64.tar.gz \
+                   notifyjs-macos-x64.tar.gz notifyjs-macos-arm64.tar.gz \
+                   notifyjs-windows-x64.zip; do
+            test -s "build/artifacts/$f" || { echo "missing or empty: $f" >&2; exit 1; }
+            echo "  ok  $f"
+          done
+
+      # The two release-only actions that are side-effect free: qemu installs
+      # binfmt handlers, metadata computes tags. Running them for real is the
+      # closest thing to a rehearsal that a read-only token allows.
+      - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
+      - uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5
+        id: meta
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: type=raw,value=dry-run
+
+      - name: The tags a release would push
+        run: echo "${{ steps.meta.outputs.tags }}"
+
+      - name: Pinned actions still accept the inputs they are given
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set +e
+          node scripts/check-action-contracts.mjs .github/workflows/*.yml
+          status=$?
+          # 1 is a real incompatibility and fails. 2 means the check could not
+          # reach the API - unknown is not the same as broken, and failing the
+          # build over a rate limit would only teach people to ignore this.
+          if [ "$status" = "2" ]; then
+            echo "::warning::Could not verify every pinned action; see the log."
+            exit 0
+          fi
+          exit "$status"
 
   docker:
     name: Docker image builds
