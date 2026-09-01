@@ -1,0 +1,96 @@
+name: Auto PR
+
+# A push to any branch but the default one opens the pull request that will
+# carry it back. Nothing here decides whether the change is good - CI does
+# that, and its `merge` job is what lands it. This exists so the pull request
+# is there from the first push, with a place for review comments and a visible
+# list of checks, rather than appearing only once everything has already gone
+# green.
+on:
+  push:
+    branches-ignore: [main, master]
+
+permissions:
+  contents: read
+
+# Not cancel-in-progress: opening a pull request takes seconds, is idempotent,
+# and a second push racing the first should update the same one rather than
+# leave neither done.
+concurrency:
+  group: auto-pr-${{ github.ref }}
+
+jobs:
+  open:
+    name: Open a pull request
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      # No checkout. Everything this needs - how far ahead the branch is, its
+      # latest commit message, whether a pull request already exists - is a
+      # question the API answers faster than a clone would.
+      - name: Open the pull request for this branch
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          BRANCH: ${{ github.ref_name }}
+          BASE: ${{ github.event.repository.default_branch }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+
+          # `--jq` rather than a pipe into jq: gh has jq compiled in, and
+          # nothing guarantees the standalone binary is on the runner.
+          existing=$(gh pr list --repo "$REPO" --head "$BRANCH" --base "$BASE" \
+                       --state open --limit 1 --json number --jq '.[].number')
+          if [ -n "$existing" ]; then
+            echo "#$existing is already open for $BRANCH; this push updates it."
+            exit 0
+          fi
+
+          # A branch pushed with nothing on it that main does not have has no
+          # pull request to open, and `gh pr create` would fail rather than say
+          # so. Happens routinely: a branch pushed before its first commit, or
+          # re-pushed after its work was already merged.
+          ahead=$(gh api "repos/$REPO/compare/$BASE...$BRANCH" --jq '.ahead_by')
+          if [ "$ahead" = "0" ]; then
+            echo "$BRANCH is not ahead of $BASE; nothing to open."
+            exit 0
+          fi
+
+          # The subject line of the newest commit, which for a one-commit
+          # branch is exactly the title anyone would have typed. Read from the
+          # API into a variable rather than interpolated into this script:
+          # a commit message is text somebody chooses, and `${{ }}` would paste
+          # it into the shell as syntax.
+          title=$(gh api "repos/$REPO/commits/$SHA" --jq '.commit.message' | head -n 1)
+          [ -n "$title" ] || title="$BRANCH"
+
+          # A branch whose name says it is not finished opens as a draft, which
+          # is also what stops CI from merging it.
+          draft=''
+          case "$BRANCH" in
+            wip/*|draft/*) draft='--draft' ;;
+          esac
+
+          body=$(cat <<'EOF'
+          Opened automatically by `auto-pr.yml` for this branch.
+
+          CI builds every release artifact for this commit - the five server
+          binaries, the desktop packages, the Android APK, the container image
+          for both published architectures - and checks that the branch adds no
+          dependency advisory or code scanning alert that the default branch
+          does not already carry. If all of that passes, CI squashes this onto
+          the default branch and deletes the branch.
+
+          **To stop that:** convert this to a draft, or add the `hold` label.
+          Either one leaves the checks running and the merge undone.
+          EOF
+          )
+
+          # shellcheck disable=SC2086  # $draft is a flag or nothing, by design.
+          gh pr create --repo "$REPO" --base "$BASE" --head "$BRANCH" \
+            --title "$title" --body "$body" $draft
+
+          echo "Opened a pull request for $BRANCH onto $BASE."

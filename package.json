@@ -21,7 +21,8 @@
     "bundle": "node scripts/bundle.mjs",
     "package": "node scripts/package.mjs",
     "binary": "npm run build && npm run bundle && node scripts/package.mjs --target node20-linux-x64 --name notifyjs-linux-x64",
-    "icons": "node scripts/render-icons.mjs"
+    "icons": "node scripts/render-icons.mjs",
+    "version:next": "node scripts/next-version.mjs"
   },
   "devDependencies": {
     "@types/node": "^20.14.0",

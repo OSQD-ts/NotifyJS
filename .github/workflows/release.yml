@@ -6,11 +6,16 @@ on:
     # Every push to the default branch refreshes a rolling "latest" release, so
     # there is always a build people can download without waiting for a tag.
     branches: [main, master]
+  # Also how an automatic merge reaches this workflow. A push made with
+  # GITHUB_TOKEN triggers nothing, so CI's `merge` job dispatches this on the
+  # default branch instead - with no version, which is why the input is
+  # optional and why an empty one has to behave exactly like a push to main.
   workflow_dispatch:
     inputs:
       version:
-        description: 'Version to build (e.g. v0.1.0). Produces a draft release.'
-        required: true
+        description: 'Version to build (e.g. v0.1.0). Produces a draft release. Leave empty to refresh the rolling build.'
+        required: false
+        default: ''
 
 # Least privilege by default. Only the jobs that actually publish something
 # widen this, and they do it themselves: every other job runs `npm ci`,
@@ -53,7 +58,7 @@ jobs:
           REQUESTED: ${{ github.event.inputs.version }}
         run: |
           if [ -z "$REQUESTED" ]; then
-            echo "Not a manual dispatch; the version comes from the ref."
+            echo "No version requested; the version comes from the ref."
             exit 0
           fi
           # A tag-shaped version and nothing else: no whitespace, no shell
@@ -181,8 +186,11 @@ jobs:
         working-directory: packages/desktop
         run: npm ci
 
-      # packages/desktop is private, so set-version.mjs never touches it - but
-      # its version is what the app reports to a hub and shows in its settings.
+      # The desktop app's version is what it reports to a hub and shows in its
+      # settings, and it is also what electron-builder puts in the installer
+      # filenames. set-version.mjs now covers it along with everything else
+      # that carries a version.
+      #
       # Only for a tag: `latest` is not a version electron-builder, or any of
       # the three installer formats, will accept, so a rolling build keeps
       # whatever the manifest says.
@@ -191,15 +199,7 @@ jobs:
         shell: bash
         env:
           VERSION: ${{ env.NOTIFYJS_VERSION }}
-        run: |
-          node -e '
-            const fs = require("fs");
-            const path = "packages/desktop/package.json";
-            const json = JSON.parse(fs.readFileSync(path, "utf8"));
-            json.version = process.env.VERSION.replace(/^v/, "");
-            fs.writeFileSync(path, JSON.stringify(json, null, 2) + "\n");
-            console.log("desktop is now " + json.version);
-          '
+        run: node scripts/set-version.mjs "$VERSION"
 
       # These builds are unsigned. Left to itself electron-builder signs with
       # whatever certificate happens to be in the runner's keychain, which
@@ -263,6 +263,21 @@ jobs:
       - name: Install app dependencies
         working-directory: packages/mobile
         run: npm ci
+
+      # Before prebuild, which is what copies app.json's version and
+      # versionCode into the generated build.gradle. Nothing stamped this
+      # before, so every APK ever built called itself 0.1.0 with a versionCode
+      # of 1 - and a phone refuses to install an APK whose versionCode is not
+      # higher than the one it already has, which made every release after the
+      # first un-upgradeable.
+      #
+      # Tags only, for the same reason as the desktop app: `latest` is not a
+      # version, and there is no integer versionCode to derive from it.
+      - name: Stamp the release version
+        if: env.IS_TAG == 'true'
+        env:
+          VERSION: ${{ env.NOTIFYJS_VERSION }}
+        run: node scripts/set-version.mjs "$VERSION"
 
       - name: Generate the native Android project
         working-directory: packages/mobile
@@ -436,6 +451,10 @@ jobs:
       id-token: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          # next-version.mjs counts from the last release tag, and a shallow
+          # clone has neither the tags nor the commits to count.
+          fetch-depth: 0
 
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
@@ -452,11 +471,18 @@ jobs:
         env:
           RUN_NUMBER: ${{ github.run_number }}
         run: |
-          BASE=$(node -p "require('./package.json').version")
+          set -euo pipefail
           if [ "$IS_TAG" = "true" ]; then
             VERSION="${NOTIFYJS_VERSION#v}"
             TAG=latest
           else
+            # The version this branch would be released as, not the one in the
+            # manifests. Those sit at whatever was committed, so once tags
+            # reached 0.4.0 a rolling build was still calling itself
+            # `0.1.0-main.N` - below every release on npm, under a `next` tag
+            # that is supposed to be ahead of `latest`.
+            BASE=$(node scripts/next-version.mjs --rolling --github-output \
+                   | sed -n 's/^next=//p')
             # Unique per run and ordered, so a later build always wins.
             VERSION="${BASE}-main.${RUN_NUMBER}"
             TAG=next
@@ -733,5 +759,9 @@ jobs:
           # replaced wholesale each time rather than accumulating stale assets.
           prerelease: true
           make_latest: false
-          draft: ${{ github.event_name == 'workflow_dispatch' }}
+          # Drafted only when a person asked for a particular version and
+          # wants to look at it first. A dispatch with no version is how an
+          # automatic merge refreshes this build, and drafting that would stop
+          # the rolling release from ever being published again.
+          draft: ${{ github.event.inputs.version != '' }}
           fail_on_unmatched_files: true

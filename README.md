@@ -759,13 +759,104 @@ few days old.
 dashboard. A tab left open notices the version changed and offers a reload
 rather than reloading out from under you mid-incident.
 
+## How a change reaches main
+
+Work on a branch and push it. Everything after that is automatic:
+
+```bash
+git switch -c fix-retry-backoff
+git commit -am "Fix: Retry backoff no longer resets on a reconnect"
+git push -u origin fix-retry-backoff
+```
+
+The push opens a pull request onto `main`
+([`auto-pr.yml`](.github/workflows/auto-pr.yml)) and starts the full CI run on
+that commit. CI does everything a release does short of publishing: it builds
+and tests on Node 20 and 22, typechecks and Metro-bundles the mobile app and
+compiles its native call module, packages the hub binary and *runs* it — a
+bundle that compiles but cannot start is a real failure mode — packages the
+desktop app, builds the container image for both published architectures and
+curls its health endpoint, and cross-compiles all five release binaries so a
+tag can never be the first thing to discover a broken release.
+
+Alongside that it checks that nothing got worse: no dependency advisory and no
+CodeQL alert that `main` does not already carry, every action still pinned to a
+commit SHA, and no untrusted text interpolated into a shell. Those checks are
+differential on purpose — see [Security](#security).
+
+If all of it passes, CI squashes the branch onto `main` and deletes it, and
+then [`version.yml`](.github/workflows/version.yml) decides whether that was a
+release — see [Versioning](#versioning). A push to `main` is still allowed and
+still works; it simply skips the review window this gives you.
+
+To stop a branch from landing, mark its pull request as a draft or label it
+`hold` — either one leaves the checks running and the merge undone. Branches
+named `wip/*` or `draft/*` open as drafts to begin with.
+
+A merge is made with `GITHUB_TOKEN`, and GitHub does not let its own token
+cascade into new workflow runs, so the merge job dispatches CI and Version on
+`main` itself afterwards. Without that, `main` would be written to and never
+built, scanned, or rolled forward.
+
+## Versioning
+
+Nobody types a version number. After every merge,
+[`version.yml`](.github/workflows/version.yml) reads the commits since the last
+`v*` tag and works out what the next one is:
+
+| Commit subject | Bump |
+| --- | --- |
+| `Feat: …` | minor |
+| `Fix: …`, `Refactor: …`, `Perf: …`, `Revert: …` | patch |
+| `CI: …`, `Docs: …`, `Chore: …`, `Test: …`, `Build: …`, `Style: …` | nothing |
+| anything unrecognised — `Init`, `License Rename` | nothing |
+| `Feat!: …`, or `BREAKING CHANGE:` in the body | see below |
+
+The largest bump among the commits wins. If nothing asks for a release, no tag
+is cut and `main` just refreshes its rolling `latest` build. Otherwise the
+version is tagged, and that tag is what
+[`release.yml`](.github/workflows/release.yml) builds and publishes — binaries,
+installers, APK, container image, npm under `latest`, and a GitHub Release.
+
+`Refactor:` earning a patch is a deliberate departure from
+conventional-commits, which releases nothing for it. In this repository
+`Refactor:` has meant things like "Security improvements", and a type that
+reliably produces no release is a type that quietly strands work on `main`.
+
+**While the major version is 0, a breaking change bumps the minor, not the
+major.** 0.x already means anything can change, and the alternative is the
+first `Feat!:` silently declaring the project 1.0.0. Reaching 1.0.0 is a
+decision: edit the manifests and push the tag by hand.
+
+With no `v*` tag in the repository, the first release is exactly what the
+manifests already claim — `0.1.0`, not a bump past it.
+
+To see what the next version would be, without cutting it:
+
+```bash
+npm run version:next
+```
+
+or run `version.yml` with **dry_run** ticked.
+
+Once the number is decided, [`set-version.mjs`](scripts/set-version.mjs) stamps
+it across every manifest that carries one: the four published packages and the
+pins between them, the root, the desktop app — whose version is what it reports
+to a hub — and the mobile app's `app.json`, including an Android `versionCode`
+derived from the semver. That last one matters: a phone refuses to install an
+APK whose `versionCode` is not higher than the one already on it, so a
+`versionCode` stuck at Expo's default of `1` makes every release after the
+first un-upgradeable.
+
+The `file:../protocol` links the two apps build against are left alone. Pointing
+one at a version number during a release aims it at a tarball the registry does
+not have yet.
+
 ## Releasing
 
-CI builds and tests on every push, and additionally packages the binary and
-runs it — a bundle that compiles but cannot start is a real failure mode, so
-the smoke test executes the artifact rather than trusting the build.
-
-Pushing a `v*` tag builds and publishes everything:
+Cutting a version is automatic — see [Versioning](#versioning). Pushing a `v*`
+tag by hand does the same thing, and is how you would reach 1.0.0 or re-cut a
+release the automatic path skipped:
 
 ```bash
 git tag v0.2.0 && git push origin v0.2.0
@@ -774,8 +865,10 @@ git tag v0.2.0 && git push origin v0.2.0
 That produces hub executables for five platforms, desktop installers for
 Windows, macOS and Linux, an Android APK, a dashboard-only zip, a multi-arch
 container image on GHCR, and a GitHub Release with checksums, split into
-clients and servers. `workflow_dispatch` runs the same pipeline into a draft
-release, for rehearsing a change to it.
+clients and servers. `workflow_dispatch` with a version runs the same pipeline
+into a draft release, for rehearsing a change to it; with the version left
+empty it refreshes the rolling `latest` build, which is how an automatic merge
+publishes the new `main`.
 
 To build a hub binary locally:
 

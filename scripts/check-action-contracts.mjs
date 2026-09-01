@@ -75,7 +75,17 @@ async function actionInputs(owner, repo, ref, subpath) {
   for (const name of ['action.yml', 'action.yaml']) {
     const path = subpath ? `${subpath}/${name}` : name;
     const url = `https://api.github.com/repos/${owner}/${repo}/contents/${path}?ref=${ref}`;
-    const response = await fetch(url, { headers, signal: AbortSignal.timeout(30_000) });
+    // A refused connection, a DNS failure or the 30s timeout all throw out of
+    // `fetch` rather than returning a status, and an uncaught throw here is
+    // recorded as a real finding - which would fail a build over a network
+    // blip. The rate-limit branch below already draws this distinction; this
+    // is the same distinction one layer out.
+    let response;
+    try {
+      response = await fetch(url, { headers, signal: AbortSignal.timeout(30_000) });
+    } catch (err) {
+      throw new Unverifiable(`could not reach ${key}: ${err.message}`);
+    }
 
     // A 404 is an answer: this ref has no such file, try the other spelling.
     if (response.status === 404) continue;
