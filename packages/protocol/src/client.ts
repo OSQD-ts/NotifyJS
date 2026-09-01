@@ -12,7 +12,7 @@ import type {
   ReadyMsg,
   ServerMessage,
 } from './messages.js';
-import type { Capability, CallRequest, Notification } from './types.js';
+import type { Capability, CallRequest, Notification, WebPushKeys } from './types.js';
 
 /**
  * The three things a client needs from its host platform. Supplying these is
@@ -685,6 +685,25 @@ export class NotifyClient {
    */
   registerPush(token: string, provider: 'expo' = 'expo'): void {
     this.send({ v: PROTOCOL_VERSION, t: 'push.register', token, provider });
+  }
+
+  /**
+   * Registers a browser's Web Push subscription, so the hub can reach this
+   * browser while nothing of ours is running - including an iPhone, where a
+   * home-screen web app is the only way in without a native build.
+   *
+   * Separate from `registerPush` rather than another argument to it: this one
+   * cannot work without the keys, and a signature where the keys are optional
+   * is one where forgetting them compiles.
+   */
+  registerWebPush(subscription: { endpoint: string; keys: WebPushKeys }): void {
+    this.send({
+      v: PROTOCOL_VERSION,
+      t: 'push.register',
+      token: subscription.endpoint,
+      provider: 'webpush',
+      keys: subscription.keys,
+    });
   }
 
   /** Withdraws the wake-up token. */

@@ -10,6 +10,7 @@ import type {
   PairingCode,
   Role,
   AuditEvent,
+  WebPushKeys,
 } from './types.js';
 
 /**
@@ -56,6 +57,15 @@ export interface ReadyMsg extends Envelope {
   /** Highest sequence the hub holds, so the client knows how far to sync. */
   seq: number;
   serverTime: number;
+  /**
+   * VAPID application server key, base64url, for `pushManager.subscribe`.
+   *
+   * Sent here rather than fetched from an endpoint of its own: a browser only
+   * needs it once it is a paired device, and this frame is already the answer
+   * to "you are authenticated, here is what this hub can do". Absent when Web
+   * Push is turned off, which is also how the dashboard knows not to offer it.
+   */
+  vapidPublicKey?: string;
 }
 
 export interface NotificationMsg extends Envelope {
@@ -241,8 +251,11 @@ export interface SnoozeMsg extends Envelope {
  */
 export interface PushRegisterMsg extends Envelope {
   t: 'push.register';
+  /** An Expo push token, or a Web Push subscription endpoint. Empty clears it. */
   token: string;
-  provider: 'expo';
+  provider: 'expo' | 'webpush';
+  /** Required for `webpush`, meaningless for `expo`. */
+  keys?: WebPushKeys;
 }
 
 export type ClientMessage =

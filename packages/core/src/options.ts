@@ -95,6 +95,33 @@ export interface PushOptions {
 }
 
 /**
+ * Web Push, for browsers - which is also what reaches an iPhone.
+ *
+ * Separate from `PushOptions`, and on by default, because it is a different
+ * bargain. The Expo path hands a third party your notification title, so it
+ * stays off until you decide otherwise. Here the payload is encrypted to a key
+ * the browser generated (RFC 8291): the push service forwards bytes it cannot
+ * read, and it is the browser's own vendor rather than a service this project
+ * picked. Nothing is ever sent until somebody has clicked "enable" in a
+ * specific browser, which is a stronger opt-in than a server flag.
+ *
+ * `includeBody` and `evenWhenOnline` are deliberately shared with
+ * `PushOptions`: they are decisions about what leaves the hub, and having them
+ * answer differently per transport is how one of them ends up forgotten.
+ */
+export interface WebPushOptions {
+  enabled: boolean;
+  /**
+   * The VAPID `sub` claim - a `mailto:` or `https:` URI identifying whoever
+   * runs this hub, which a push service uses to contact you if it becomes a
+   * problem. Required by RFC 8292 and rejected by Apple if it is neither.
+   */
+  subject: string;
+  /** How long a push service holds a message for a browser that is offline. */
+  ttlSeconds: number;
+}
+
+/**
  * Turns every paired device into a watchdog for this hub.
  *
  * An embedded hub cannot report its own death - it dies with the process. But
@@ -180,6 +207,8 @@ export interface NotifierOptions {
   flood?: Partial<FloodOptions>;
   /** Wake-up pushes for devices that are not connected. See `PushOptions`. */
   push?: Partial<PushOptions>;
+  /** Encrypted pushes to browsers, including iOS. See `WebPushOptions`. */
+  webPush?: Partial<WebPushOptions>;
   security?: Partial<SecurityOptions>;
   /** Print pairing codes and lifecycle lines to stdout. */
   logger?: ((line: string, meta?: Record<string, unknown>) => void) | false;
@@ -195,6 +224,7 @@ export interface ResolvedOptions
       | 'dashboardDir'
       | 'flood'
       | 'push'
+      | 'webPush'
       | 'publicUrl'
       | 'metricsToken'
       | 'deviceWatchdog'
@@ -207,6 +237,7 @@ export interface ResolvedOptions
   security: SecurityOptions;
   flood: FloodOptions;
   push: PushOptions;
+  webPush: WebPushOptions;
   deviceWatchdog: DeviceWatchdogOptions;
   logger: (line: string, meta?: Record<string, unknown>) => void;
 }
@@ -259,6 +290,14 @@ export function resolveOptions(o: NotifierOptions = {}): ResolvedOptions {
       includeBody: false,
       evenWhenOnline: false,
       ...o.push,
+    },
+    webPush: {
+      enabled: true,
+      subject: 'https://github.com/OSQD-ts/NotifyJS',
+      // Four hours. Long enough to survive a closed laptop over lunch, short
+      // enough that a pager alert never arrives stale enough to mislead.
+      ttlSeconds: 4 * 60 * 60,
+      ...o.webPush,
     },
     security: {
       maxConnectionsPerIp: 10,

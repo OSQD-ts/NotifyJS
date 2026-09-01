@@ -103,14 +103,42 @@ export interface Device {
   /**
    * Wake-up token for when the device is not connected. Opt-in, and only set
    * by the device itself - see `PushOptions` for what enabling it implies.
+   *
+   * For `expo` this is the push token. For `webpush` it is the subscription
+   * endpoint the browser was given, which is a URL rather than an opaque
+   * string - but it plays the same role, so every "can this device be woken"
+   * check stays `device.pushToken`.
    */
   pushToken?: string;
-  pushProvider?: 'expo';
+  pushProvider?: 'expo' | 'webpush';
+  /**
+   * Web Push only: the keys the browser generated for this subscription.
+   *
+   * The hub encrypts to `p256dh` and no push service can read what it
+   * forwards. Losing these means losing the ability to reach the browser at
+   * all, which is why they live beside the endpoint rather than being derived.
+   */
+  pushKeys?: WebPushKeys;
   /**
    * Silenced until this timestamp. Set by the device itself; `critical` still
    * gets through, so snoozing quiets noise without disabling the pager.
    */
   snoozedUntil?: number;
+}
+
+/**
+ * The two values a browser hands out with a `PushSubscription`, base64url.
+ *
+ * `p256dh` is the user agent's public key - the hub does ECDH against it, so a
+ * push service forwards ciphertext it cannot read. `auth` is a per-
+ * subscription secret that binds the derived key to this subscription and no
+ * other.
+ */
+export interface WebPushKeys {
+  /** Uncompressed P-256 point, 65 bytes. */
+  p256dh: string;
+  /** 16 bytes. */
+  auth: string;
 }
 
 export interface NotificationAction {

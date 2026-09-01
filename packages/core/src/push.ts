@@ -17,11 +17,15 @@ interface PushTicket {
 /**
  * Wake-up pushes for devices whose socket is closed.
  *
- * This is the one place NotifyJS talks to anybody else's servers, which is why
- * it is off unless you turn it on. When enabled, a notification's title (and
- * its body, if you allow it) travels through Expo and then Apple or Google.
- * Everything else in this project stays on infrastructure you control; this
- * trades a little of that for reaching a phone whose app has been swiped away.
+ * Off unless you turn it on, because of what it costs: a notification's title
+ * (and its body, if you allow it) travels in the clear through Expo and then
+ * Apple or Google. Everything else in this project stays on infrastructure you
+ * control; this trades a little of that for reaching a phone whose app has
+ * been swiped away.
+ *
+ * `webpush.ts` is the other wake-up transport and it does not make that trade -
+ * the payload is encrypted to a key the browser generated, so the push service
+ * forwards bytes it cannot read. That is why it defaults on and this does not.
  */
 export class PushSender {
   constructor(

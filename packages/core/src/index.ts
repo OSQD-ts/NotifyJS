@@ -28,6 +28,8 @@ export {
 export type { AlertSink, CaptureOptions, HttpErrorOptions, LogStreamOptions } from './adapters.js';
 export { FloodControl } from './flood.js';
 export { PushSender } from './push.js';
+export { WebPushSender, generateVapidKeys, encryptPayload, vapidAuthorization } from './webpush.js';
+export type { VapidKeys, WebPushPayload, WebPushTarget } from './webpush.js';
 export { renderQr } from './qr.js';
 export { Store } from './store.js';
 export { Guard, normalizeIp } from './guard.js';

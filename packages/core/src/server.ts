@@ -31,6 +31,7 @@ import {
   type Capability,
   type ClientMessage,
   type Device,
+  type WebPushKeys,
   type Notification,
   type NotificationAction,
   type EscalationPolicy,
@@ -49,6 +50,7 @@ import { Watchdog, formatDuration, type Heartbeat, type HeartbeatSpec } from './
 import { Metrics } from './metrics.js';
 import { FloodControl, summaryTitle, type FloodSummary } from './flood.js';
 import { PushSender } from './push.js';
+import { WebPushSender, generateVapidKeys } from './webpush.js';
 import { renderQr } from './qr.js';
 
 export interface NotifyInput {
@@ -156,6 +158,7 @@ export class Notifier extends EventEmitter<NotifierEvents> {
   private readonly calls: CallOrchestrator;
   private readonly flood: FloodControl;
   private readonly push: PushSender;
+  private readonly webPush: WebPushSender;
   private readonly watchdog: Watchdog;
   private readonly metrics = new Metrics();
   private readonly sessions = new Map<string, Session>();
@@ -208,6 +211,26 @@ export class Notifier extends EventEmitter<NotifierEvents> {
         const updated = this.store.updateDevice(deviceId, {
           pushToken: undefined,
           pushProvider: undefined,
+        });
+        if (!updated) return;
+        for (const session of this.byDevice.get(deviceId) ?? []) session.device = updated;
+        this.audit('push.unreachable', { deviceId });
+      },
+    );
+
+    // The same retirement rule as above, and the same reason for it: an
+    // endpoint a push service answers 404 or 410 for will never deliver again,
+    // and nothing else in the system would ever notice.
+    this.webPush = new WebPushSender(
+      this.opts.webPush,
+      () => this.store.vapid(generateVapidKeys),
+      this.opts.logger,
+      (ok, count) => this.metrics.pushed(ok, count),
+      (deviceId) => {
+        const updated = this.store.updateDevice(deviceId, {
+          pushToken: undefined,
+          pushProvider: undefined,
+          pushKeys: undefined,
         });
         if (!updated) return;
         for (const session of this.byDevice.get(deviceId) ?? []) session.device = updated;
@@ -422,7 +445,7 @@ export class Notifier extends EventEmitter<NotifierEvents> {
    * currently connected. No-op unless push is explicitly enabled.
    */
   private async pushToOffline(n: Notification, deliveredTo: string[]): Promise<void> {
-    if (!this.push.enabled) return;
+    if (!this.push.enabled && !this.webPush.enabled) return;
     const online = new Set(this.opts.push.evenWhenOnline ? [] : deliveredTo);
 
     const targets = this.store.devices().filter((device) => {
@@ -440,7 +463,23 @@ export class Notifier extends EventEmitter<NotifierEvents> {
       });
     });
 
-    await this.push.notify(targets, n);
+    // Who may be woken is one question and how to reach them is another. The
+    // filter above answers the first for every transport at once, which is
+    // what keeps a device from being reachable by one route and not the other
+    // after somebody edits a role.
+    const { expo, web } = splitByProvider(targets);
+
+    await Promise.all([
+      this.push.notify(expo, n),
+      this.webPush.send(web, {
+        title: `${n.severity.toUpperCase()}: ${n.title}`,
+        body: this.opts.push.includeBody ? (n.body ?? n.channel) : n.channel,
+        // The notification id, so a repeat of the same alert replaces the one
+        // already on screen rather than stacking beside it.
+        tag: n.id,
+        severity: n.severity,
+      }),
+    ]);
   }
 
   /* ------------------------------------------------------------------ */
@@ -716,7 +755,7 @@ export class Notifier extends EventEmitter<NotifierEvents> {
   }
 
   private async pushCallToOffline(req: CallRequest, ringing: string[]): Promise<void> {
-    if (!this.push.enabled) return;
+    if (!this.push.enabled && !this.webPush.enabled) return;
     const online = new Set(ringing);
     const targets = this.store.devices().filter((device) => {
       if (!device.pushToken || device.status !== 'active' || online.has(device.id)) return false;
@@ -731,7 +770,18 @@ export class Notifier extends EventEmitter<NotifierEvents> {
         isCall: true,
       });
     });
-    await this.push.call(targets, req);
+
+    const { expo, web } = splitByProvider(targets);
+
+    await Promise.all([
+      this.push.call(expo, req),
+      this.webPush.send(web, {
+        title: `Incoming alert from ${req.from}`,
+        body: this.opts.push.includeBody ? req.message : 'Open to answer',
+        tag: req.id,
+        severity: req.severity,
+      }),
+    ]);
   }
 
   private beat(): void {
@@ -1464,6 +1514,10 @@ export class Notifier extends EventEmitter<NotifierEvents> {
       capabilities: role.capabilities,
       seq: this.store.seq,
       serverTime: Date.now(),
+      // Minted on first use, so a hub with Web Push off never generates one.
+      vapidPublicKey: this.opts.webPush.enabled
+        ? this.store.vapid(generateVapidKeys).publicKey
+        : undefined,
     });
 
     this.sendWatchdogSpec(session);
@@ -1569,14 +1623,49 @@ export class Notifier extends EventEmitter<NotifierEvents> {
     msg: Extract<ClientMessage, { t: 'push.register' }>,
   ): void {
     if (!session.device) return;
-    const token = typeof msg.token === 'string' ? msg.token.slice(0, 256) : '';
+
+    // 2048 rather than 256: an Expo token is short and fixed, but a Web Push
+    // endpoint is a URL with an opaque per-subscription path, and FCM's run
+    // past 200 characters already. A cap that truncates one is worse than no
+    // cap - it stores an endpoint that looks fine and 404s forever.
+    const token = typeof msg.token === 'string' ? msg.token.slice(0, 2048) : '';
+    const provider = msg.provider === 'webpush' ? 'webpush' : 'expo';
+
+    if (!token) {
+      const cleared = this.store.updateDevice(session.device.id, {
+        pushToken: undefined,
+        pushProvider: undefined,
+        pushKeys: undefined,
+      });
+      if (cleared) session.device = cleared;
+      this.audit('push.cleared', { deviceId: session.device.id });
+      return;
+    }
+
+    let keys: WebPushKeys | undefined;
+    if (provider === 'webpush') {
+      // Checked here rather than at send time. A subscription that cannot be
+      // encrypted to is not a subscription, and accepting one would leave a
+      // device that reads as reachable in `devices list`, is counted as a push
+      // target, and silently receives nothing.
+      keys = validWebPushKeys(msg.keys);
+      if (!keys || !isPushEndpoint(token)) {
+        this.audit('push.rejected', { deviceId: session.device.id });
+        this.opts.logger('rejected a web push subscription', {
+          deviceId: session.device.id,
+          reason: keys ? 'endpoint is not an https URL' : 'missing or malformed keys',
+        });
+        return;
+      }
+    }
 
     const updated = this.store.updateDevice(session.device.id, {
-      pushToken: token || undefined,
-      pushProvider: token ? 'expo' : undefined,
+      pushToken: token,
+      pushProvider: provider,
+      pushKeys: keys,
     });
     if (updated) session.device = updated;
-    this.audit(token ? 'push.registered' : 'push.cleared', { deviceId: session.device.id });
+    this.audit('push.registered', { deviceId: session.device.id, detail: { provider } });
   }
 
   /**
@@ -1945,6 +2034,71 @@ export class Notifier extends EventEmitter<NotifierEvents> {
 }
 
 /* -------------------------------------------------------------------- */
+
+/**
+ * A Web Push endpoint, or nothing.
+ *
+ * `https` only. The hub POSTs an encrypted body here on every alert, and a
+ * device that could nominate an `http:` endpoint would be asking the hub to
+ * announce, in the clear and repeatedly, that something is wrong - which is
+ * most of what an observer wants to know. See the metadata note in SECURITY.md.
+ */
+function isPushEndpoint(value: string): boolean {
+  try {
+    return new URL(value).protocol === 'https:';
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The subscription keys, checked for the shapes RFC 8291 requires.
+ *
+ * Both lengths are fixed by the spec: an uncompressed P-256 point is 65 bytes
+ * beginning 0x04, and the auth secret is 16. Anything else cannot be encrypted
+ * to, and finding that out at send time means finding it out once per alert.
+ */
+function validWebPushKeys(keys: unknown): WebPushKeys | undefined {
+  if (typeof keys !== 'object' || keys === null) return undefined;
+  const { p256dh, auth } = keys as Record<string, unknown>;
+  if (typeof p256dh !== 'string' || typeof auth !== 'string') return undefined;
+
+  const point = Buffer.from(p256dh, 'base64url');
+  const secret = Buffer.from(auth, 'base64url');
+  if (point.length !== 65 || point[0] !== 0x04) return undefined;
+  if (secret.length !== 16) return undefined;
+
+  return { p256dh, auth };
+}
+
+/**
+ * Sorts push-eligible devices by how they are actually reached.
+ *
+ * A device carries one provider, and the two senders want different shapes:
+ * Expo takes the whole `Device` and reads `pushToken` itself, Web Push needs
+ * the endpoint and the subscription keys unpacked. Anything claiming
+ * `webpush` without keys is dropped rather than passed on - it cannot be
+ * encrypted to, so handing it to the sender would only produce a failure
+ * further from the cause.
+ */
+function splitByProvider(devices: Device[]): {
+  expo: Device[];
+  web: Array<{ deviceId: string; endpoint: string; keys: WebPushKeys }>;
+} {
+  const expo: Device[] = [];
+  const web: Array<{ deviceId: string; endpoint: string; keys: WebPushKeys }> = [];
+
+  for (const device of devices) {
+    if (device.pushProvider === 'webpush') {
+      if (device.pushToken && device.pushKeys) {
+        web.push({ deviceId: device.id, endpoint: device.pushToken, keys: device.pushKeys });
+      }
+      continue;
+    }
+    expo.push(device);
+  }
+  return { expo, web };
+}
 
 /** Stamped in at bundle time; falls back for source checkouts. */
 const NOTIFYJS_VERSION = process.env.NOTIFYJS_VERSION ?? '0.1.0';

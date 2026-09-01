@@ -189,13 +189,44 @@ output.
 
 ## Push wake-ups
 
-Push is **off by default**, and turning it on is a deliberate trade against
-everything else here. When enabled, the hub asks a push service to wake devices
-that are not connected, which means the notification title leaves your
-infrastructure and passes through Expo and then Apple or Google. The body is
-withheld unless you set `includeBody`. Point `endpoint` at a relay you run to
-keep the traffic in-house. Tokens are supplied by the device and can be
-withdrawn by it at any time.
+Two transports, making two different trades.
+
+**Expo (`push`) is off by default.** Turning it on is a deliberate trade
+against everything else here: the hub asks a push service to wake devices that
+are not connected, which means the notification title leaves your
+infrastructure and passes through Expo and then Apple or Google in the clear.
+The body is withheld unless you set `includeBody`. Point `endpoint` at a relay
+you run to keep the traffic in-house.
+
+**Web Push (`webPush`) is on by default**, because the payload is encrypted
+before it leaves. The hub derives a key by ECDH against a public key the
+browser generated and never disclosed, and encrypts with AES-128-GCM
+([RFC 8291](https://www.rfc-editor.org/rfc/rfc8291)); the push service
+forwards ciphertext. What it still learns is that a message was sent, roughly
+how large, and to which subscription — the same metadata caveat as everywhere
+else in this document. Requests are signed with the hub's own P-256 key
+([RFC 8292](https://www.rfc-editor.org/rfc/rfc8292)), so a captured
+subscription is not usable by anybody else, and the assertion is scoped to one
+push service's origin and expires in twelve hours.
+
+Endpoints must be `https`. The hub POSTs to one on every alert, and an `http:`
+endpoint would announce in the clear, repeatedly, that something is wrong —
+most of what an observer wants to know.
+
+Both are supplied by the device and can be withdrawn by it at any time. A
+subscription the hub cannot encrypt to is refused at registration rather than
+stored, so a device never reads as reachable while receiving nothing. An
+endpoint a push service answers 404 or 410 for is retired automatically.
+
+The VAPID keypair lives in `store.json` and is generated on first use. It is a
+private key: the store is created 0600 in a 0700 directory, and the
+"Message confidentiality at rest" caveat below applies to it too.
+
+RFC 8291 is implemented in `packages/core/src/webpush.ts` against `node:crypto`
+rather than pulled in as a dependency, and is tested against the worked example
+in section 5 of the RFC — byte for byte, with the salt and ephemeral key fixed
+so the output is deterministic. A round trip against our own decryption would
+not have been evidence of anything.
 
 ## Transport
 
