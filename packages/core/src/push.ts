@@ -5,6 +5,18 @@ import type { PushOptions } from './options.js';
 const MAX_BATCH = 100;
 
 /**
+ * The Android channel the phone app creates for alerts, at MAX importance.
+ *
+ * Android takes importance from the channel, not from the message, and a push
+ * that names no channel lands on the app's default one. Omitting it left every
+ * alert at default importance - no heads-up, and eligible to be held back
+ * until the phone next came out of Doze, which reads exactly like the app
+ * having missed it. Must stay in step with `setNotificationChannelAsync` in
+ * the mobile package.
+ */
+const ANDROID_CHANNEL = 'alerts';
+
+/**
  * One entry of Expo's response array, in the shape this code depends on.
  * Everything else in a ticket is Expo's business.
  */
@@ -56,6 +68,7 @@ export class PushSender {
         body: this.opts.includeBody ? (n.body ?? n.channel) : n.channel,
         sound: 'default',
         priority: 'high',
+        channelId: ANDROID_CHANNEL,
         // The app reconnects on wake and syncs, so the payload only needs to
         // identify what arrived - never to be the source of truth.
         data: { kind: 'notification', id: n.id, seq: n.seq },
@@ -73,6 +86,7 @@ export class PushSender {
         body: this.opts.includeBody ? c.message : 'Open to answer',
         sound: 'default',
         priority: 'high',
+        channelId: ANDROID_CHANNEL,
         data: { kind: 'call', id: c.id },
       }),
       c.id,

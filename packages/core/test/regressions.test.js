@@ -506,6 +506,17 @@ test('a token registered through a source reaches the hub and is used', async ()
   assert.equal(pushed.length, 1, 'the hub actually sent a wake-up');
   assert.equal(pushed[0][0].to, 'ExponentPushToken[wired]');
 
+  // Android reads importance off the channel, not the message. A wake-up that
+  // names none lands on the default channel, where it can be held until the
+  // phone next leaves Doze - which looks exactly like the push never arriving
+  // until the app is opened by hand.
+  assert.equal(
+    pushed[0][0].channelId,
+    'alerts',
+    'the wake-up names the high-importance channel the app creates',
+  );
+  assert.equal(pushed[0][0].priority, 'high');
+
   manager.disconnectAll();
   await hub.stop();
   await new Promise((r) => pushServer.close(r));
