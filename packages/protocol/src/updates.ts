@@ -28,6 +28,16 @@ export interface UpdateCheck {
   latest?: ReleaseInfo;
   /** True only when `latest` is genuinely newer than `current`. */
   available: boolean;
+  /**
+   * Why the feed could not be read, when it could not be.
+   *
+   * `available: false` answers two very different questions - "you have the
+   * newest build" and "nobody could tell you" - and a caller that cannot
+   * separate them will happily report the first while meaning the second. That
+   * is not hypothetical: this check threw on every phone it ever ran on for
+   * two releases, and the app said "you are on the latest release" each time.
+   */
+  error?: string;
 }
 
 export interface CheckOptions {
@@ -103,15 +113,14 @@ export async function checkForUpdate(options: CheckOptions): Promise<UpdateCheck
 
   const current = currentVersion.replace(/^v/, '');
   if (!options.endpoint && !isValidRepository(repository)) {
-    return { current, available: false };
+    return { current, available: false, error: `"${repository}" is not an owner/repo pair` };
   }
 
   try {
-    const response = await fetchImpl(`${endpoint}?per_page=20`, {
-      headers: { accept: 'application/vnd.github+json' },
-      signal: AbortSignal.timeout(timeoutMs),
-    });
-    if (!response.ok) return { current, available: false };
+    const response = await fetchWithTimeout(fetchImpl, `${endpoint}?per_page=20`, timeoutMs);
+    if (!response.ok) {
+      return { current, available: false, error: `the release feed answered HTTP ${response.status}` };
+    }
 
     const releases = (await response.json()) as GithubRelease[];
     const candidates = releases
@@ -148,10 +157,42 @@ export async function checkForUpdate(options: CheckOptions): Promise<UpdateCheck
     if (!latest) return { current, available: false };
 
     return { current, latest, available: isNewer(latest.version, current) };
-  } catch {
-    // A failed check is not an error worth surfacing: the app works fine on
-    // the version it has, and the network may simply be unavailable.
-    return { current, available: false };
+  } catch (err) {
+    // Still not thrown: the app works fine on the version it has, and the
+    // network may simply be unavailable. But it is reported, so that a caller
+    // showing this to somebody can say which of the two happened.
+    return {
+      current,
+      available: false,
+      error: err instanceof Error ? err.message : String(err),
+    };
+  }
+}
+
+/**
+ * Fetches with a deadline, without assuming `AbortSignal.timeout`.
+ *
+ * That static is the obvious way to write this and it is absent from React
+ * Native: the runtime polyfills `AbortSignal` from the `abort-controller`
+ * package, which predates it. Calling it threw a `TypeError` inside the try
+ * below, which was caught and reported as "no update available" - so the phone
+ * app never once checked for an update, and said so in the reassuring
+ * direction. Node and browsers were fine, which is why it survived.
+ */
+async function fetchWithTimeout(
+  fetchImpl: typeof fetch,
+  url: string,
+  timeoutMs: number,
+): Promise<Response> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetchImpl(url, {
+      headers: { accept: 'application/vnd.github+json' },
+      signal: controller.signal,
+    });
+  } finally {
+    clearTimeout(timer);
   }
 }
 

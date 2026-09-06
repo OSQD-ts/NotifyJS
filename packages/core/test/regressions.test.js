@@ -33,7 +33,15 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import WebSocket from 'ws';
 
 import { Notifier, Store, CallOrchestrator, createLogStream } from '../dist/index.js';
-import { NotifyClient, memoryStorage, toBase64Url } from '@osqd/notifyjs-protocol';
+import {
+  NotifyClient,
+  PROTOCOL_VERSION,
+  SIG_PAIR,
+  canonical,
+  memoryStorage,
+  normalizePairingCode,
+  toBase64Url,
+} from '@osqd/notifyjs-protocol';
 import { nodeCrypto } from '@osqd/notifyjs-protocol/node';
 
 const REPO = fileURLToPath(new URL('../../..', import.meta.url));
@@ -1346,6 +1354,114 @@ test('a credential file survives a write that is interrupted', async () => {
 /* ------------------------------------------------------------------ */
 /* Dead sockets                                                        */
 /* ------------------------------------------------------------------ */
+
+test('a device whose app is frozen is woken by push, not counted as delivered', async () => {
+  // The failure this covers: an Android phone that has been backgrounded long
+  // enough for the OS to stop scheduling its JavaScript. The process is still
+  // alive and its networking library still answers WebSocket pings, so the hub
+  // saw a healthy socket, counted the device as reached, and skipped the push
+  // that was the only thing left that could have woken it. Every alert waited
+  // in the socket buffer until the app was opened by hand - which is exactly
+  // what "notifications only arrive when I reopen the app" is.
+  const pushes = [];
+  const pushService = createServer((req, res) => {
+    let body = '';
+    req.on('data', (c) => (body += c));
+    req.on('end', () => {
+      pushes.push(JSON.parse(body));
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end('{"data":[]}');
+    });
+  });
+  await new Promise((r) => pushService.listen(0, '127.0.0.1', r));
+
+  const dir = tmp('frozen');
+  const hub = new Notifier({
+    port: 0,
+    storeDir: dir,
+    dashboard: false,
+    logger: false,
+    // The resolver floors this at a second, so the hub sweeps every second and
+    // gives a device two and a half of them to speak for itself.
+    livenessIntervalMs: 1,
+    deviceWatchdog: { enabled: false },
+    push: {
+      enabled: true,
+      endpoint: `http://127.0.0.1:${pushService.address().port}/send`,
+      includeBody: true,
+    },
+    security: { connectionBurst: 500, connectionRefillPerSec: 100, maxConnectionsPerIp: 200 },
+  });
+  await hub.start();
+
+  // A phone spoken by hand rather than through NotifyClient: the point of the
+  // test is a client whose own timers have stopped, which a working client
+  // will not do for us.
+  const ws = new WebSocket(hub.url.replace('localhost', '127.0.0.1'));
+  const inbox = [];
+  const keys = await nodeCrypto.generateKeyPair();
+  // Signed and sent in the form the hub hashes, which is the form the real
+  // client normalises to before it signs anything.
+  const code = normalizePairingCode(hub.createPairingCode({ role: 'oncall' }).code);
+  const send = (msg) => ws.send(JSON.stringify({ v: PROTOCOL_VERSION, ...msg }));
+
+  const ready = new Promise((resolve, reject) => {
+    setTimeout(() => reject(new Error('the hub never said ready')), 5000).unref();
+    ws.on('message', async (raw) => {
+      const msg = JSON.parse(raw.toString());
+      inbox.push(msg);
+      if (msg.t === 'hello') {
+        send({
+          t: 'pair',
+          code,
+          publicKey: keys.publicKey,
+          name: 'frozen-phone',
+          platform: 'android',
+          sig: await nodeCrypto.sign(
+            keys,
+            canonical([SIG_PAIR, msg.serverId, msg.nonce, code, keys.publicKey, 'frozen-phone', 'android']),
+          ),
+        });
+      }
+      if (msg.t === 'ready') resolve();
+    });
+  });
+  await ready;
+
+  // Two frames written by the app itself, which is what separates it from its
+  // networking library: a keepalive, and a token to be woken on.
+  send({ t: 'ping', ts: Date.now() });
+  send({ t: 'push.register', token: 'ExponentPushToken[frozen]', provider: 'expo' });
+  await delay(200);
+
+  const awake = await hub.error({ title: 'while the app is running', channel: 'db' });
+  await delay(300);
+  assert.equal(awake.reached, 1, 'an app that is keeping alive counts as reached');
+  assert.equal(pushes.length, 0, 'and is not pushed to');
+
+  // The freeze. Nothing else changes: the socket stays open and `ws` goes on
+  // answering the hub's pings from a thread the OS never suspended.
+  await delay(3000);
+  assert.equal(hub.onlineDeviceIds().length, 1, 'the socket is still open');
+
+  const frozen = await hub.error({ title: 'while the app is frozen', channel: 'db' });
+  await delay(400);
+
+  assert.equal(frozen.reached, 0, 'a frozen app is not somebody the alert reached');
+  assert.equal(pushes.length, 1, 'so the wake-up push is sent');
+  assert.equal(pushes[0][0].to, 'ExponentPushToken[frozen]');
+
+  // Still written down the socket, so it is already there when the app thaws.
+  assert.ok(
+    inbox.some((m) => m.t === 'notification' && m.n.title === 'while the app is frozen'),
+    'the frame is delivered as well as pushed',
+  );
+
+  ws.close();
+  await hub.stop();
+  await new Promise((r) => pushService.close(r));
+  rmSync(dir, { recursive: true, force: true });
+});
 
 test('a device that stops answering is dropped, and one that answers is kept', async () => {
   // A session is removed on close or error, and a half-open socket produces

@@ -96,6 +96,65 @@ test('an unreachable feed is not an error', async () => {
   assert.equal(result.current, '0.1.0');
 });
 
+test('the check works on a runtime without AbortSignal.timeout', async () => {
+  // React Native polyfills AbortSignal from the `abort-controller` package,
+  // which predates the static `timeout()` helper. Reaching for it threw a
+  // TypeError inside the check's own catch, which reported the throw as "no
+  // update available" - so the phone app never checked for an update once, and
+  // said "you are on the latest release" while two releases behind.
+  const original = AbortSignal.timeout;
+  // eslint-disable-next-line no-extend-native
+  delete AbortSignal.timeout;
+  try {
+    let sawSignal = false;
+    const result = await checkForUpdate({
+      repository: 'x/y',
+      currentVersion: '0.1.0',
+      fetchImpl: async (_url, init) => {
+        sawSignal = Boolean(init?.signal);
+        return { ok: true, json: async () => [release('v0.2.0')] };
+      },
+    });
+
+    assert.equal(result.available, true, 'the update is found');
+    assert.equal(result.latest.tag, 'v0.2.0');
+    assert.equal(result.error, undefined, 'and nothing is reported as having gone wrong');
+    assert.ok(sawSignal, 'the request is still given a deadline to abort on');
+  } finally {
+    AbortSignal.timeout = original;
+  }
+});
+
+test('a check that could not be made is distinguishable from being up to date', async () => {
+  // The two share `available: false`, and a caller that cannot tell them apart
+  // shows a failure as reassurance - which is exactly how this went unnoticed.
+  const upToDate = await checkForUpdate({
+    repository: 'x/y',
+    currentVersion: '0.2.0',
+    fetchImpl: releaseFeed([release('v0.2.0')]),
+  });
+  assert.equal(upToDate.available, false);
+  assert.equal(upToDate.error, undefined, 'nothing went wrong; there is simply nothing newer');
+
+  const offline = await checkForUpdate({
+    repository: 'x/y',
+    currentVersion: '0.1.0',
+    fetchImpl: async () => {
+      throw new Error('offline');
+    },
+  });
+  assert.equal(offline.available, false);
+  assert.match(offline.error, /offline/, 'the reason is carried back to whoever asked');
+
+  const refused = await checkForUpdate({
+    repository: 'x/y',
+    currentVersion: '0.1.0',
+    fetchImpl: async () => ({ ok: false, status: 403 }),
+  });
+  assert.equal(refused.available, false);
+  assert.match(refused.error, /403/);
+});
+
 test('the platform asset is matched, and a missing one is not guessed at', () => {
   const info = {
     version: '0.2.0', tag: 'v0.2.0', notes: '', url: '', prerelease: false, publishedAt: 0,

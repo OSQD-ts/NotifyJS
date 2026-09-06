@@ -48,6 +48,8 @@ export function SettingsScreen({
   const [checking, setChecking] = useState(false);
   const [progress, setProgress] = useState<number | undefined>();
   const [updateError, setUpdateError] = useState<string | undefined>();
+  /** Why the check itself came back empty-handed, as opposed to finding nothing. */
+  const [checkError, setCheckError] = useState<string | undefined>();
 
   // Checked once on open rather than on a timer: an update is worth knowing
   // about, not worth polling for.
@@ -55,10 +57,14 @@ export function SettingsScreen({
     let cancelled = false;
     setChecking(true);
     findAppUpdate()
-      .then((found) => {
-        if (!cancelled) setUpdate(found);
+      .then(({ update: found, error }) => {
+        if (cancelled) return;
+        setUpdate(found);
+        setCheckError(error);
       })
-      .catch(() => {})
+      .catch((err) => {
+        if (!cancelled) setCheckError(err instanceof Error ? err.message : String(err));
+      })
       .finally(() => {
         if (!cancelled) setChecking(false);
       });
@@ -273,6 +279,10 @@ export function SettingsScreen({
                   : `Downloading ${Math.round(progress * 100)}%`}
               </Text>
             </TouchableOpacity>
+          ) : checkError ? (
+            <Text style={[styles.rowHint, { color: SEVERITY_COLORS.warning, padding: 14, paddingTop: 0 }]}>
+              Could not check for updates: {checkError}
+            </Text>
           ) : (
             <Text style={[styles.rowHint, { color: t.muted, padding: 14, paddingTop: 0 }]}>
               You are on the latest release.
@@ -302,7 +312,9 @@ export function SettingsScreen({
                   Full-screen alerts are off
                 </Text>
                 <Text style={[styles.rowHint, { color: t.muted }]}>
-                  Calls will appear as a banner instead of taking over the screen. Tap to allow.
+                  Calls still ring out loud and arrive with Answer and Decline - they just will not
+                  take over a locked screen. Tap to allow. Android switches this back off by itself
+                  on apps installed outside the Play Store, so it may need granting again.
                 </Text>
               </TouchableOpacity>
             ) : null}

@@ -52,3 +52,26 @@ export async function getPushToken(): Promise<string | undefined> {
     return undefined;
   }
 }
+
+/**
+ * Takes down the wake-up push for an alert the app has now handled itself.
+ *
+ * The hub pushes to a device it believes is not reading its socket and sends
+ * the alert down that socket regardless, so a phone that was asleep gets both:
+ * the push that woke it, and - once its JavaScript is running again - the real
+ * notification posted from the feed. Two notifications, one incident. The push
+ * carries the notification's id in its payload, which is what lets the second
+ * one replace the first rather than pile up beside it.
+ */
+export async function dismissPushFor(notificationId: string): Promise<void> {
+  try {
+    for (const presented of await Notifications.getPresentedNotificationsAsync()) {
+      const data = presented.request.content.data as { id?: unknown } | undefined;
+      if (data?.id === notificationId) {
+        await Notifications.dismissNotificationAsync(presented.request.identifier);
+      }
+    }
+  } catch {
+    // Leaving a duplicate on screen is not worth failing an alert over.
+  }
+}
