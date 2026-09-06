@@ -1175,6 +1175,9 @@ export class Notifier extends EventEmitter<NotifierEvents> {
       nonce: session.nonce,
       serverTime: Date.now(),
       handshakeTimeout: Math.floor(this.opts.security.handshakeTimeoutMs / 1000),
+      // Ask for proof of life on the same cadence the hub already sweeps on,
+      // so a device's silence and the hub's next look at it line up.
+      keepaliveMs: this.opts.livenessIntervalMs,
     });
 
     ws.on('message', (raw, isBinary) => {
@@ -1282,6 +1285,11 @@ export class Notifier extends EventEmitter<NotifierEvents> {
       session.error('unauthenticated', 'pair or auth first');
       return;
     }
+
+    // Written by the peer's own code, unlike a pong, so this is the timestamp
+    // that says the far end is still processing rather than merely connected.
+    session.appSeenAt = Date.now();
+    if (msg.t === 'ping') session.keepalives = true;
 
     // `ping` is a keepalive and says nothing about intent; everything else
     // here is the device or its user doing something.
@@ -1923,16 +1931,40 @@ export class Notifier extends EventEmitter<NotifierEvents> {
     });
   }
 
+  /**
+   * Writes a notification to every entitled socket, and reports which devices
+   * it actually reached.
+   *
+   * The two are not the same. A frozen app still holds an open socket that its
+   * networking library keeps answering pings on, so the frame is written and
+   * buffered and nobody reads it until the app is next opened - which is what
+   * made an alert arrive an hour late, all at once, on the phone it was for.
+   * It is still sent, because it costs nothing and is there the moment the app
+   * thaws; it is not counted, because counting it is what suppressed the push
+   * that would have woken the app in the first place.
+   */
   private deliver(n: Notification): string[] {
     const reached = new Set<string>();
     for (const session of this.sessions.values()) {
       if (session.state !== 'ready' || !session.device) continue;
       if (!this.allowed(session, n.channel, n.severity, n.to, false)) continue;
       session.send({ v: PROTOCOL_VERSION, t: 'notification', n });
+      if (!this.awake(session)) continue;
       // A device may hold several sockets; it is still one device reached.
       reached.add(session.device.id);
     }
     return [...reached];
+  }
+
+  /**
+   * Whether this session's peer is still running, not merely still connected.
+   *
+   * The deadline is the sweep interval with the same tolerance the client
+   * allows itself before it reconnects, so the two sides agree on when a
+   * connection has stopped meaning anything.
+   */
+  private awake(session: Session): boolean {
+    return session.awake(this.opts.livenessIntervalMs * KEEPALIVE_MISSES);
   }
 
   /**
@@ -1973,6 +2005,10 @@ export class Notifier extends EventEmitter<NotifierEvents> {
     for (const session of this.sessions.values()) {
       if (session.state !== 'ready' || !session.device) continue;
       if (seen.has(session.device.id)) continue;
+      // A rung spent ringing a phone whose app is frozen is a rung the person
+      // holding it never hears. Left out here so the ladder moves on and
+      // `pushCallToOffline` treats it as a device to wake.
+      if (!this.awake(session)) continue;
       if (!this.allowed(session, req.channel, req.severity, req.to, true)) continue;
       // A policy rung narrows further, on top of the call's own targeting.
       if (extra && !matchesTargeting(extra, session.device.id, session.device.role)) continue;
@@ -2126,6 +2162,16 @@ const MAX_SNOOZE_MS = 24 * 60 * 60_000;
  * would put a store write on the hot path of the noisiest device.
  */
 const DEVICE_TOUCH_MS = 30_000;
+
+/**
+ * Keepalives a device may miss before the hub stops counting it as reachable.
+ *
+ * Matches the client's own tolerance, so neither side declares the connection
+ * useless while the other still believes in it. Being wrong costs one push to
+ * a phone that was about to read the socket anyway; being right is the
+ * difference between a page arriving and a page arriving tomorrow.
+ */
+const KEEPALIVE_MISSES = 2.5;
 
 /** Null-prototyped: the key is derived from a request path. */
 const MIME: Record<string, string> = Object.assign(Object.create(null), {

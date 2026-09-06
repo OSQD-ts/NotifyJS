@@ -39,6 +39,14 @@ export interface HelloMsg extends Envelope {
   serverTime: number;
   /** Seconds the client has to complete pair/auth before it is disconnected. */
   handshakeTimeout: number;
+  /**
+   * How often the hub wants to hear a `ping` from this device, and the basis
+   * for how long either side waits before calling the connection dead.
+   *
+   * Absent from hubs that predate application-level keepalives; a client
+   * without it falls back to its own default rather than going quiet.
+   */
+  keepaliveMs?: number;
 }
 
 export interface PairedMsg extends Envelope {
@@ -232,6 +240,17 @@ export interface AdminMsg extends Envelope {
   args?: Record<string, unknown>;
 }
 
+/**
+ * Proof that this device's *application* is running, not merely that its
+ * socket is open.
+ *
+ * A WebSocket ping is answered by the peer's networking library, so it keeps
+ * coming back from a phone whose app the OS has frozen - the socket stays up,
+ * the hub counts the device as reached, and every alert waits in a buffer
+ * nobody is reading until the app is opened again. This frame is written by
+ * the client's own code, so it stops arriving the moment that code stops
+ * running, which is exactly when the hub should be reaching for push instead.
+ */
 export interface PingMsg extends Envelope {
   t: 'ping';
   ts: number;

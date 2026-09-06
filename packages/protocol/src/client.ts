@@ -15,6 +15,20 @@ import type {
 import type { Capability, CallRequest, Notification, WebPushKeys } from './types.js';
 
 /**
+ * How often a client sends `ping` when the hub does not say, and the unit the
+ * silence deadline is counted in.
+ */
+const DEFAULT_KEEPALIVE_MS = 30_000;
+
+/**
+ * Missed keepalives tolerated before the connection is treated as dead.
+ *
+ * Two and a half rather than one: a single lost frame on a phone changing
+ * cells is ordinary, and a reconnect costs a handshake and a replay.
+ */
+const KEEPALIVE_MISSES = 2.5;
+
+/**
  * The three things a client needs from its host platform. Supplying these is
  * the entire porting effort: the dashboard, the phone app and the CLI daemon
  * all run the identical handshake, reconnect and replay logic below.
@@ -130,6 +144,14 @@ export class NotifyClient {
    * sign, so the offset is known by the time it matters.
    */
   private clockOffset = 0;
+
+  /* --- application-level keepalive ----------------------------------- */
+  /**
+   * How often this client proves its own liveness, as the hub asked for it in
+   * `hello`. The default matches the hub's own, for a hub too old to say.
+   */
+  private keepaliveMs = DEFAULT_KEEPALIVE_MS;
+  private keepaliveTimer: ReturnType<typeof setInterval> | undefined;
 
   /* --- local watchdog: this device watching the hub ------------------- */
   private watchdogSpec: WatchdogSpec | undefined;
@@ -250,6 +272,7 @@ export class NotifyClient {
     this.closedByUs = true;
     // Deliberately leaving is not the service dying.
     this.disarmWatchdog();
+    this.stopKeepalive();
     this.serviceMissing = false;
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
     this.reconnectTimer = undefined;
@@ -283,6 +306,9 @@ export class NotifyClient {
       }
     }
 
+    // Whatever the last socket was proving liveness for is gone.
+    this.stopKeepalive();
+
     this.setStatus(this.backoff > 0 ? 'reconnecting' : 'connecting');
     const socket = this.opts.createSocket(this.opts.url);
     this.socket = socket;
@@ -301,6 +327,7 @@ export class NotifyClient {
       // A stale socket's close must not disturb the one that replaced it.
       if (this.socket !== socket) return;
       this.socket = undefined;
+      this.stopKeepalive();
       // Anything still waiting on this socket will never be answered.
       this.failPendingAdmin('the connection closed before the hub replied');
       if (this.closedByUs || this.status === 'revoked') return;
@@ -354,6 +381,13 @@ export class NotifyClient {
       case 'hello':
         this.hello = msg;
         this.clockOffset = msg.serverTime - Date.now();
+        // A hub that predates keepalives says nothing here, and the default
+        // stands. Floored, so a misconfigured hub cannot ask a phone to send a
+        // frame every few milliseconds.
+        this.keepaliveMs =
+          typeof msg.keepaliveMs === 'number' && msg.keepaliveMs >= 1_000
+            ? msg.keepaliveMs
+            : DEFAULT_KEEPALIVE_MS;
         await this.handshake(msg);
         return;
 
@@ -370,6 +404,7 @@ export class NotifyClient {
         this.backoff = 0;
         this.role = msg.role;
         this.capabilities = msg.capabilities;
+        this.startKeepalive();
         this.setStatus('ready');
         this.emit('ready', msg);
         return;
@@ -410,6 +445,9 @@ export class NotifyClient {
       }
 
       case 'beat':
+      case 'pong':
+        // Both exist only to be traffic: `noteHeardFrom` above has already
+        // taken what matters from them.
         return;
 
       case 'bye': {
@@ -573,6 +611,102 @@ export class NotifyClient {
     const waiters = [...this.adminWaiters.values()];
     this.adminWaiters.clear();
     for (const waiter of waiters) waiter.reject(new Error(reason));
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* Application-level keepalive                                         */
+  /* ------------------------------------------------------------------ */
+
+  /**
+   * Proves, from JavaScript, that this client is still running.
+   *
+   * The hub also pings at the WebSocket level, but that is answered by the
+   * networking library rather than by us - it keeps coming back from a phone
+   * whose app the OS has frozen, so the hub goes on believing the alerts it
+   * writes into the socket are being read. They are not: they sit in a buffer
+   * until the app is opened again. This frame is sent by the same thread that
+   * would handle a notification, so it stops the moment that handling would,
+   * and the hub can fall back to a push instead of talking to nobody.
+   *
+   * The same timer is what notices the hub has gone. A socket can be dead
+   * without being closed, and until now only the hub's optional watchdog spec
+   * would have raised it - and that only ever raised an alarm, never a
+   * reconnect.
+   */
+  private startKeepalive(): void {
+    this.stopKeepalive();
+    // Anything already received counts; the deadline is silence, not age.
+    if (!this.lastHeardAt) this.lastHeardAt = Date.now();
+
+    this.keepaliveTimer = setInterval(() => {
+      const silentFor = Date.now() - this.lastHeardAt;
+      if (silentFor > this.keepaliveMs * KEEPALIVE_MISSES) {
+        // Nothing has come back for several rounds, so the socket is dead
+        // whatever it claims. Reconnecting is the only thing that resyncs.
+        this.reconnectNow();
+        return;
+      }
+      this.send({ v: PROTOCOL_VERSION, t: 'ping', ts: Date.now() });
+    }, this.keepaliveMs);
+    // Never let a keepalive be the reason a process stays alive.
+    (this.keepaliveTimer as { unref?: () => void }).unref?.();
+  }
+
+  private stopKeepalive(): void {
+    if (this.keepaliveTimer) clearInterval(this.keepaliveTimer);
+    this.keepaliveTimer = undefined;
+  }
+
+  /**
+   * Drops the current socket and opens a new one immediately.
+   *
+   * Not `disconnect()` then `connect()`: that would mark the close as ours and
+   * stand the watchdog down, which is wrong for a connection we believe has
+   * already failed. The backoff is reset because this is a fresh diagnosis,
+   * not another failed attempt in a run of them.
+   */
+  private reconnectNow(): void {
+    if (this.closedByUs) return;
+    this.backoff = 0;
+    this.lastHeardAt = Date.now();
+    this.open();
+  }
+
+  /**
+   * Called when the host application comes back to life - a phone returning to
+   * the foreground, a laptop waking - to close the gap between "we are back"
+   * and "we noticed".
+   *
+   * Everything here is something a timer would eventually have done. The point
+   * is that on a suspended phone the timer very likely did not: a backoff of
+   * up to thirty seconds, or a keepalive interval, is measured against a clock
+   * the OS stopped scheduling, so the app can return to the foreground holding
+   * a socket that died an hour ago and a reconnect that was never going to
+   * fire.
+   */
+  resume(): void {
+    if (this.closedByUs) return;
+    // A device with no credentials, or one the hub has thrown out, reconnects
+    // to be told the same thing again. Only the UI can move either along.
+    if (this.status === 'unpaired' || this.status === 'revoked') return;
+    // A handshake already in flight is progress; restarting it is not.
+    if (this.status === 'connecting' || this.status === 'pairing') return;
+
+    // Not connected: retry now rather than waiting out a backoff that was
+    // computed for a phone that has since been picked up.
+    if (this.status !== 'ready') {
+      this.reconnectNow();
+      return;
+    }
+
+    // Connected, but nothing has been heard for longer than the hub promised.
+    if (Date.now() - this.lastHeardAt > this.keepaliveMs * KEEPALIVE_MISSES) {
+      this.reconnectNow();
+      return;
+    }
+
+    // Genuinely still connected, so just ask for anything missed.
+    this.sync();
   }
 
   /* ------------------------------------------------------------------ */

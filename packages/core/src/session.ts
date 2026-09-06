@@ -30,6 +30,25 @@ export class Session {
    */
   alive = true;
   /**
+   * When this peer's own code last spoke, as opposed to its networking library.
+   *
+   * `alive` above is answered by the library, so it stays true for a phone
+   * whose app the OS has frozen: the socket is open, the pongs come back, and
+   * the hub writes alert after alert into a buffer nobody is reading. This is
+   * the timestamp that separates the two, and it only moves for a frame the
+   * peer's application actually sent.
+   */
+  appSeenAt = Date.now();
+  /**
+   * Whether this peer sends application-level keepalives at all.
+   *
+   * Devices paired against an older build do not, and their silence means
+   * nothing - so until one proves otherwise it is judged the old way. Set by
+   * the first `ping` frame, which is the only thing on the wire that no
+   * networking library sends on its owner's behalf.
+   */
+  keepalives = false;
+  /**
    * Whether `Guard.promote()` has already accounted for this session.
    *
    * Tracked explicitly rather than inferred from `state`, which a close can
@@ -59,6 +78,19 @@ export class Session {
 
   get capabilities(): Capability[] {
     return this.role?.capabilities ?? [];
+  }
+
+  /**
+   * Whether anything sent down this socket would actually be read.
+   *
+   * A frozen app is not an offline one, and the difference decides whether the
+   * hub counts an alert as delivered or reaches for a push instead. Peers that
+   * do not keepalive are taken at face value, since there is nothing better to
+   * go on and calling them all asleep would push to every one of them.
+   */
+  awake(deadlineMs: number): boolean {
+    if (!this.keepalives) return true;
+    return Date.now() - this.appSeenAt <= deadlineMs;
   }
 
   /**

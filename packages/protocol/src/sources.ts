@@ -229,9 +229,18 @@ export class SourceManager {
     this.publish();
   }
 
-  /** Reconnects everything; used when the app returns to the foreground. */
+  /**
+   * Brings every source back up to date, for a host application that has just
+   * returned to life.
+   *
+   * This used to only ask for missed notifications, which is the one thing
+   * that helps least: a phone coming back from suspension is far more likely
+   * to be holding a socket that died while it slept, and a `sync` down a dead
+   * socket is written into nothing. Each client now decides for itself whether
+   * it needs a reconnect or merely a catch-up.
+   */
   syncAll(): void {
-    for (const client of this.clients.values()) client.sync();
+    for (const client of this.clients.values()) client.resume();
   }
 
   snoozeAll(durationMs: number): void {
