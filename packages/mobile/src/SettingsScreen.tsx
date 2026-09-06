@@ -312,7 +312,9 @@ export function SettingsScreen({
                   Full-screen alerts are off
                 </Text>
                 <Text style={[styles.rowHint, { color: t.muted }]}>
-                  Calls will appear as a banner instead of taking over the screen. Tap to allow.
+                  Calls still ring out loud and arrive with Answer and Decline - they just will not
+                  take over a locked screen. Tap to allow. Android switches this back off by itself
+                  on apps installed outside the Play Store, so it may need granting again.
                 </Text>
               </TouchableOpacity>
             ) : null}

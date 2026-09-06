@@ -5,7 +5,14 @@ import * as Linking from 'expo-linking';
 import * as Notifications from 'expo-notifications';
 import { parsePairingLink } from '@osqd/notifyjs-protocol';
 
-import { canUseFullScreen, dismissCall, openFullScreenSettings } from './modules/notifyjs-call';
+import {
+  canUseFullScreen,
+  dismissCall,
+  isBatteryOptimized,
+  openBatterySettings,
+  openFullScreenSettings,
+} from './modules/notifyjs-call';
+import { useOneTimePrompt } from './src/prompts';
 import { useSources } from './src/useSources';
 import { PairScreen } from './src/PairScreen';
 import { ScanScreen } from './src/ScanScreen';
@@ -49,25 +56,65 @@ export default function App() {
     void Notifications.requestPermissionsAsync();
   }, []);
 
+  const paired = loaded && sources.length > 0;
+
   /**
    * Android 14 withholds full-screen alerts from anything that is not a
    * dialler, and without them a call arriving on a locked phone is a banner
-   * the user will sleep through. Asked here rather than left as a warning in
+   * rather than a screen that takes over. Asked here rather than left to
    * Settings, because the person who needs it most is the one who never opens
-   * Settings. Only while it is still missing, so a granted phone never sees it.
+   * Settings.
+   *
+   * Asked *once*. Granting it does not necessarily make it stay granted: on a
+   * sideloaded build Google Play periodically re-revokes this permission,
+   * because the app has no Play listing declaring it as a calling app. A modal
+   * on every launch would therefore never stop, and would be asking the user
+   * to redo something that will be undone again - so the recurring reminder
+   * lives in Settings and this says plainly what to expect.
    */
+  const fullScreenPrompt = useOneTimePrompt('fullScreen');
   useEffect(() => {
-    if (Platform.OS !== 'android' || !loaded || sources.length === 0) return;
+    if (Platform.OS !== 'android' || !paired) return;
+    if (fullScreenPrompt.asked !== false) return;
     if (canUseFullScreen()) return;
+    fullScreenPrompt.markAsked();
     Alert.alert(
       'Let calls take over the screen',
-      'Android needs your permission before an alert can ring over a locked phone. Without it, calls arrive as an ordinary notification.',
+      'Android needs your permission before an alert can ring over a locked phone. Calls still ring out loud and arrive with Answer and Decline without it - they just will not take over the screen.\n\n' +
+        'Android may switch this back off by itself on a sideloaded app. Settings will tell you when it has.',
       [
         { text: 'Not now', style: 'cancel' },
         { text: 'Allow', onPress: openFullScreenSettings },
       ],
     );
-  }, [loaded, sources.length === 0]);
+  }, [paired, fullScreenPrompt]);
+
+  /**
+   * The other permission that decides whether this app works at all.
+   *
+   * While battery optimisation applies, Android suspends the app once the
+   * screen has been off for a while: the connection stops being read and
+   * alerts queue up until the phone is picked up, which is precisely the
+   * failure people report as "notifications only arrive when I open it". A
+   * warning in Settings was not enough for the same reason the one above is
+   * not - the person who needs it never goes looking. Once, for the same
+   * reason as above.
+   */
+  const batteryPrompt = useOneTimePrompt('battery');
+  useEffect(() => {
+    if (Platform.OS !== 'android' || !paired) return;
+    if (batteryPrompt.asked !== false) return;
+    if (!isBatteryOptimized()) return;
+    batteryPrompt.markAsked();
+    Alert.alert(
+      'Let alerts arrive while the screen is off',
+      'Android is allowed to suspend this app in the background, which holds alerts back until you next open it. Allowing it to run unrestricted is what makes a pager a pager.',
+      [
+        { text: 'Not now', style: 'cancel' },
+        { text: 'Settings', onPress: openBatterySettings },
+      ],
+    );
+  }, [paired, batteryPrompt]);
 
   /** Adds a source, surfacing failures instead of leaving a dead screen. */
   const addSource = useCallback(

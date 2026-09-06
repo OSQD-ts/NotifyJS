@@ -699,14 +699,9 @@ Two permissions decide whether any of this is reached, and both are surfaced
 rather than assumed:
 
 - **Full-screen alerts.** Android 14 made these a user-granted permission for
-  apps that are not the default dialer, and *withholds them by default*. Without
-  it a call arriving on a locked phone is an ordinary notification the user
-  sleeps through. The app checks (`canUseFullScreen()`), asks once on startup,
-  and repeats the offer in Settings until it is granted.
-- **Battery optimisation.** A foreground service keeps the process alive, but an
-  app Android is still optimising has its network suspended during long idle
-  stretches — which is exactly the night-time hour an alert matters most.
-  Settings warns when the app is optimised and links to the exclusion list.
+  apps that are not the default dialer, and *withholds them by default*. The app
+  checks (`canUseFullScreen()`), asks once on first run, and repeats the offer
+  in Settings.
 
   **Expect it to switch itself back off.** Google Play re-revokes this
   permission on any app it does not know to be a calling or alarm app, and a
@@ -724,8 +719,10 @@ rather than assumed:
   something Play would undo again.
 - **Battery optimisation.** A foreground service keeps the process alive, but an
   app Android is still optimising has its network suspended during long idle
-  stretches — which is exactly the night-time hour an alert matters most.
-  Settings warns when the app is optimised and links to the exclusion list.
+  stretches — which is exactly the night-time hour an alert matters most. The
+  app asks once on startup and repeats the offer in Settings, for the same
+  reason it asks about full-screen alerts there: a warning only helps someone
+  who goes looking for it, and the person this matters to never does.
 
 ### Staying connected while the app is closed
 
