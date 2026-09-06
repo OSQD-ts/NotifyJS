@@ -34,38 +34,55 @@ const MAX_APK_BYTES = 300 * 1024 * 1024;
 /** Read back in pieces so a large APK is never held in memory all at once. */
 const HASH_CHUNK_BYTES = 1024 * 1024;
 
+/** The outcome of looking for an update, including why there is not one. */
+export interface UpdateSearch {
+  update?: AppUpdate;
+  /**
+   * Set when nothing is on offer because the check did not work, rather than
+   * because this build is current.
+   *
+   * Kept apart because the screen shows one of them as reassurance. Reporting
+   * a failed check as "you are on the latest release" is how a phone sat two
+   * releases behind while telling its owner it was up to date.
+   */
+  error?: string;
+}
+
 /**
  * Looks for a newer APK.
  *
- * Returns undefined rather than throwing: a failed check means the phone keeps
- * running the build it has, which is a perfectly good outcome and not worth
- * interrupting anyone over.
+ * Never throws: a failed check means the phone keeps running the build it has,
+ * which is a perfectly good outcome and not worth interrupting anyone over. It
+ * is still reported, so the screen can say which happened.
  */
-export async function findAppUpdate(includePrerelease = false): Promise<AppUpdate | undefined> {
-  if (Platform.OS !== 'android') return undefined;
+export async function findAppUpdate(includePrerelease = false): Promise<UpdateSearch> {
+  if (Platform.OS !== 'android') return {};
 
   const result = await checkForUpdate({
     repository: REPOSITORY,
     currentVersion: currentVersion(),
     includePrerelease,
   });
-  if (!result.available || !result.latest) return undefined;
+  if (result.error) return { error: result.error };
+  if (!result.available || !result.latest) return {};
 
   const asset = findAsset(result.latest, /\.apk$/i);
-  if (!asset) return undefined;
-  if (asset.size > MAX_APK_BYTES) return undefined;
+  if (!asset) return { error: `${result.latest.tag} publishes no Android build` };
+  if (asset.size > MAX_APK_BYTES) return { error: `${asset.name} is implausibly large` };
 
   // A release with no checksum listing is not offered at all. Surfacing an
   // update the phone would then refuse to install is worse than staying quiet.
   const sums = result.latest.assets.find((a: ReleaseAsset) => a.name === CHECKSUM_ASSET);
-  if (!sums) return undefined;
+  if (!sums) return { error: `${result.latest.tag} publishes no checksums to verify against` };
 
   return {
-    release: result.latest,
-    assetUrl: asset.url,
-    assetName: asset.name,
-    sizeBytes: asset.size,
-    checksumUrl: sums.url,
+    update: {
+      release: result.latest,
+      assetUrl: asset.url,
+      assetName: asset.name,
+      sizeBytes: asset.size,
+      checksumUrl: sums.url,
+    },
   };
 }
 
