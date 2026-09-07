@@ -14,6 +14,17 @@ export interface CallAction {
   callId: string;
 }
 
+/**
+ * Why the app was asked to look at its connection.
+ *
+ * `alarm` is the periodic heartbeat, `network` a connection that has just come
+ * back. Carried for logging and for nothing else - both mean the same thing to
+ * the client, which is to resync.
+ */
+export interface WakeEvent {
+  reason: 'alarm' | 'network';
+}
+
 interface NotifyjsCallNative {
   showIncomingCall(options: IncomingCallOptions): void;
   dismissCall(id: string): void;
@@ -159,6 +170,24 @@ export function startWatching(hubName: string): void {
 
 export function stopWatching(): void {
   native?.stopWatching();
+}
+
+/**
+ * Fires when the app should check whether its connection still works.
+ *
+ * The client recovers a dead socket perfectly well on its own, but every one
+ * of its mechanisms for noticing is a JavaScript timer, and those are measured
+ * against a clock Android stops advancing while the phone dozes. So the socket
+ * dies overnight, the keepalive that would have caught it never runs, and the
+ * backlog only arrives when somebody picks the phone up.
+ *
+ * This is the missing input: an alarm that Doze still releases, and a callback
+ * for the network coming back. Neither carries any content - the alert itself
+ * still comes over the hub connection, which is the only thing that knows what
+ * was missed.
+ */
+export function addWakeListener(listener: (event: WakeEvent) => void): Subscription | undefined {
+  return emitter?.addListener<WakeEvent>('onWake', listener);
 }
 
 export const isSupported = native !== undefined;

@@ -33,6 +33,12 @@ object CallNotification {
   const val WATCH_CHANNEL_ID = "notifyjs_watching"
 
   /**
+   * Fixed, so a second restart replaces the standing reminder rather than
+   * stacking another one beside it.
+   */
+  const val RESUME_NOTIFICATION_ID = 0x0503
+
+  /**
    * Ordinary alerts get their own channels, separate from calls.
    *
    * A channel's sound is fixed once Android has created it, so the only way to
@@ -242,6 +248,57 @@ object CallNotification {
       androidx.core.app.NotificationManagerCompat.from(context).notify(id.hashCode(), notification)
     } catch (_: SecurityException) {
       /* POST_NOTIFICATIONS refused */
+    }
+  }
+
+  /**
+   * Offers to start alerting again after a restart took it away.
+   *
+   * On the silent alert channel: this is a state to notice next time the phone
+   * is picked up, not an incident, and waking somebody at 4am to tell them
+   * their pager rebooted is its own kind of failure. It stays put until acted
+   * on, because a dismissible reminder that alerting is off is a reminder that
+   * will be swiped away and forgotten.
+   */
+  fun showResume(context: Context, hubName: String) {
+    val launch = launchIntent(context, null) ?: return
+    val open = PendingIntent.getActivity(
+      context,
+      RESUME_NOTIFICATION_ID,
+      launch,
+      PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+    )
+
+    val notification = NotificationCompat.Builder(context, ALERT_SILENT_CHANNEL_ID)
+      .setSmallIcon(android.R.drawable.stat_notify_error)
+      .setContentTitle("NotifyJS is not watching")
+      .setContentText("Restarted, so alerts from $hubName are not arriving. Tap to resume.")
+      .setStyle(
+        NotificationCompat.BigTextStyle().bigText(
+          "The phone restarted, which closed the connection to $hubName. " +
+            "Alerts are not arriving until the app is opened once.",
+        ),
+      )
+      .setPriority(NotificationCompat.PRIORITY_DEFAULT)
+      .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+      .setCategory(NotificationCompat.CATEGORY_STATUS)
+      .setContentIntent(open)
+      .setOngoing(true)
+      .setAutoCancel(true)
+      .build()
+
+    try {
+      androidx.core.app.NotificationManagerCompat.from(context)
+        .notify(RESUME_NOTIFICATION_ID, notification)
+    } catch (_: SecurityException) {
+      /* POST_NOTIFICATIONS refused */
+    }
+  }
+
+  /** Taken down the moment watching actually starts, however that came about. */
+  fun cancelResume(context: Context) {
+    runCatching {
+      androidx.core.app.NotificationManagerCompat.from(context).cancel(RESUME_NOTIFICATION_ID)
     }
   }
 

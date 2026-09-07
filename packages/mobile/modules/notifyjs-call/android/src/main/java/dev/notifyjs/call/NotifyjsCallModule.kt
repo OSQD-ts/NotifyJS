@@ -42,7 +42,7 @@ class NotifyjsCallModule : Module() {
   override fun definition() = ModuleDefinition {
     Name("NotifyjsCall")
 
-    Events("onCallAction", "onSpeechDone")
+    Events("onCallAction", "onSpeechDone", "onWake")
 
     OnCreate {
       // Answer and Decline arrive on a broadcast receiver, which may well have
@@ -56,10 +56,18 @@ class NotifyjsCallModule : Module() {
           ),
         )
       }
+
+      // The alarm and the network callback both land here. Neither says
+      // anything about what happened - only that now is a good moment for the
+      // client to check whether its socket is still worth anything.
+      WatchEvents.listen { reason ->
+        sendEvent("onWake", mapOf("reason" to reason))
+      }
     }
 
     OnDestroy {
       CallEvents.stopListening()
+      WatchEvents.stopListening()
       CallRinger.stop()
       CallSpeaker.shutdown()
     }
