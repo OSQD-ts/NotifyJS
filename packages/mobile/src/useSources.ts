@@ -16,6 +16,7 @@ import {
 
 import {
   addCallActionListener,
+  addWakeListener,
   consumeAnsweredCall,
   dismissCall,
   showAlert,
@@ -199,6 +200,26 @@ export function useSources() {
     if (shouldWatch) startWatching('NotifyJS');
     else if (loaded) stopWatching();
   }, [loaded, shouldWatch]);
+
+  /**
+   * Resyncs when the OS says to, which is the only clock that keeps running.
+   *
+   * The service above keeps the process resident; it does not keep it
+   * scheduled. Once the phone dozes, `setInterval` and `setTimeout` are
+   * deferred against a clock that has stopped, so the client's keepalive never
+   * notices the socket a NAT dropped an hour ago and the backoff it queued
+   * never fires. Everything needed to recover was already there and simply had
+   * no reason to run - which is why this hands it one rather than adding any
+   * recovery logic of its own.
+   *
+   * `syncAll` is the whole response: it reconnects a client that is not ready,
+   * replaces one whose socket has gone quiet, and otherwise just asks for
+   * anything missed since the last ack.
+   */
+  useEffect(() => {
+    const sub = addWakeListener(() => manager.syncAll());
+    return () => sub?.remove();
+  }, [manager]);
 
   /**
    * Hands each hub a wake-up token for this phone.

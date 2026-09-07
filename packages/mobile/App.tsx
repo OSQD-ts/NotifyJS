@@ -12,7 +12,7 @@ import {
   openBatterySettings,
   openFullScreenSettings,
 } from './modules/notifyjs-call';
-import { useOneTimePrompt } from './src/prompts';
+import { useOneTimePrompt, useRecurringPrompt } from './src/prompts';
 import { useSources } from './src/useSources';
 import { PairScreen } from './src/PairScreen';
 import { ScanScreen } from './src/ScanScreen';
@@ -29,6 +29,14 @@ Notifications.setNotificationHandler({
     shouldSetBadge: false,
   }),
 });
+
+/**
+ * How long to leave battery optimisation alone after asking about it.
+ *
+ * Two weeks: long enough that nobody is nagged, short enough that a phone
+ * whose alerts are being held back is not left that way indefinitely.
+ */
+const BATTERY_REPROMPT_MS = 14 * 24 * 60 * 60 * 1000;
 
 type View_ = 'feed' | 'settings' | 'add' | 'scan';
 
@@ -97,10 +105,14 @@ export default function App() {
    * alerts queue up until the phone is picked up, which is precisely the
    * failure people report as "notifications only arrive when I open it". A
    * warning in Settings was not enough for the same reason the one above is
-   * not - the person who needs it never goes looking. Once, for the same
-   * reason as above.
+   * not - the person who needs it never goes looking.
+   *
+   * Unlike the full-screen prompt this one comes back, because unlike that one
+   * it can be answered for good: the exemption sticks once granted, and this
+   * stops asking the moment it is. A fortnight is long enough not to nag and
+   * short enough that a pager is never quietly broken for a month.
    */
-  const batteryPrompt = useOneTimePrompt('battery');
+  const batteryPrompt = useRecurringPrompt('battery', BATTERY_REPROMPT_MS);
   useEffect(() => {
     if (Platform.OS !== 'android' || !paired) return;
     if (batteryPrompt.asked !== false) return;
