@@ -260,7 +260,7 @@ object CallNotification {
    * on, because a dismissible reminder that alerting is off is a reminder that
    * will be swiped away and forgotten.
    */
-  fun showResume(context: Context, hubName: String) {
+  fun showResume(context: Context) {
     val launch = launchIntent(context, null) ?: return
     val open = PendingIntent.getActivity(
       context,
@@ -269,14 +269,18 @@ object CallNotification {
       PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
     )
 
+    // Deliberately naming no hub. The only name this side has is whatever was
+    // passed to `startWatching`, which is the app's own - so saying "alerts
+    // from X" here would tell somebody their alerts come from NotifyJS rather
+    // than from the server they actually configured.
     val notification = NotificationCompat.Builder(context, ALERT_SILENT_CHANNEL_ID)
       .setSmallIcon(android.R.drawable.stat_notify_error)
       .setContentTitle("NotifyJS is not watching")
-      .setContentText("Restarted, so alerts from $hubName are not arriving. Tap to resume.")
+      .setContentText("The phone restarted, so alerts are not arriving. Tap to resume.")
       .setStyle(
         NotificationCompat.BigTextStyle().bigText(
-          "The phone restarted, which closed the connection to $hubName. " +
-            "Alerts are not arriving until the app is opened once.",
+          "The phone restarted, which closed the connection to every hub this " +
+            "app watches. Alerts are not arriving until the app is opened once.",
         ),
       )
       .setPriority(NotificationCompat.PRIORITY_DEFAULT)

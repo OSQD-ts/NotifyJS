@@ -38,6 +38,6 @@ class BootReceiver : BroadcastReceiver() {
     if (!WatchState.isWanted(context)) return
 
     CallNotification.ensureChannels(context)
-    CallNotification.showResume(context, WatchState.hubName(context))
+    CallNotification.showResume(context)
   }
 }
