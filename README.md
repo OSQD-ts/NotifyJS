@@ -431,6 +431,7 @@ new Notifier({
   flood: { enabled: true, windowMs: 60_000, burst: 5 },
   webPush: { enabled: true, includeBody: false },
   ingest: { enabled: false }, // publishing over HTTP; see below
+  actions: { enabled: false }, // notification buttons; see below
   security: {
     maxConnectionsPerIp: 10, // raise this if devices share a NAT
     maxFailuresBeforeBan: 5,
@@ -598,6 +599,45 @@ store is refused without `--force`.
 The file is written `0600` and the command says what is in it, because a
 backup that can restore a hub necessarily contains its secrets — the VAPID
 private key above all. Treat it as you would a private key.
+
+## Acting on an alert
+
+A notification can carry buttons, and a device pressing one produces an event
+for the application that published it:
+
+```ts
+new Notifier({ actions: { enabled: true } });
+
+await notify.error({
+  title: 'Queue backed up',
+  actions: [{ id: 'drain', label: 'Drain it', style: 'danger' }],
+});
+
+notify.on('action', ({ actionId, notificationId, deviceName }) => {
+  if (actionId === 'drain') drainTheQueue();
+});
+```
+
+**The hub never fetches anything a notification names.** An action arrives as
+an event and your code decides what it means. A button whose target came from
+the alert would be a request-forgery primitive with the callback chosen by
+whoever could publish, which is the opposite of what this is for.
+
+Four things gate it, and each rules out a different way of getting something to
+run that nobody asked for:
+
+- It is **off until you enable it**. A hub that never wanted buttons has none.
+- The role needs **`notify.act`**, which no stock role carries — `notify.ack`
+  is not enough, and the stock `viewer` has that. It is a privileged
+  capability, so it cannot be granted by somebody who does not hold it.
+- The action must be one the notification **actually published**, so your code
+  only ever sees strings it chose itself.
+- Each action can be taken **once**. It is recorded on the notification rather
+  than in memory, so a restart does not offer it again — for an action that
+  restarts something, two devices pressing the same button is the difference
+  between a fix and an outage.
+
+Anything refused is written to the audit log with the reason.
 
 ## Snoozing
 

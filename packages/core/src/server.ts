@@ -142,6 +142,15 @@ export interface NotifierEvents {
   'device:revoked': [Device];
   notification: [Notification];
   ack: [{ notificationId: string; deviceId: string; action?: string }];
+  /**
+   * Somebody pressed one of a notification's buttons.
+   *
+   * Separate from `ack` because it means something different and an
+   * application will want to act on it rather than record it. Emitted only
+   * once per notification, for an action it published, from a device whose
+   * role carries `notify.act`.
+   */
+  action: [{ notificationId: string; actionId: string; deviceId: string; deviceName: string }];
   call: [CallEvent];
   'heartbeat:missed': [{ heartbeat: Heartbeat; overdueBy: number }];
   'heartbeat:recovered': [Heartbeat];
@@ -1864,13 +1873,7 @@ export class Notifier extends EventEmitter<NotifierEvents> {
     const offered = claimed ? this.declaredActions(ids) : undefined;
 
     for (const id of ids) {
-      const action = claimed && offered?.get(id)?.has(claimed) ? claimed : undefined;
-      if (claimed && !action) {
-        this.audit('ack.action.rejected', {
-          deviceId: session.device.id,
-          detail: { id, action: claimed },
-        });
-      }
+      const action = claimed ? this.takeAction(session, id, claimed, offered) : undefined;
       this.emit('ack', { notificationId: id, deviceId: session.device.id, action });
       // One acknowledgement is enough: a human has seen it, so stop retrying.
       const timer = this.ackWaiters.get(id);
@@ -1889,6 +1892,59 @@ export class Notifier extends EventEmitter<NotifierEvents> {
         if (updated) session.device = updated;
       }
     }
+  }
+
+  /**
+   * Decides whether a claimed action actually happened, and records it.
+   *
+   * Four things have to hold, and each rules out a different way of getting
+   * something to run that nobody asked for. The feature has to be on, because
+   * a hub that never wanted buttons should not have them. The role has to
+   * carry `notify.act`, which no stock role does - `notify.ack` is not enough,
+   * and the stock `viewer` has that. The notification has to have published
+   * the action, so an application only ever sees strings it chose itself. And
+   * nobody can have taken it already: for an action that restarts something,
+   * two devices pressing the same button is the difference between a fix and
+   * an outage.
+   *
+   * Recorded on the notification rather than in memory, so a restart does not
+   * make an action available for a second time.
+   */
+  private takeAction(
+    session: Session,
+    id: string,
+    claimed: string,
+    offered: Map<string, Set<string>> | undefined,
+  ): string | undefined {
+    const refuse = (reason: string): undefined => {
+      this.audit('ack.action.rejected', {
+        deviceId: session.deviceId,
+        detail: { id, action: claimed, reason },
+      });
+      return undefined;
+    };
+
+    if (!this.opts.actions.enabled) return refuse('actions are not enabled');
+    if (!session.role || !hasCapability(session.role, 'notify.act')) {
+      return refuse('role cannot act');
+    }
+    if (!offered?.get(id)?.has(claimed)) return refuse('the notification did not offer it');
+
+    const n = this.store.history().find((entry) => entry.id === id);
+    if (!n) return refuse('unknown notification');
+    if (n.actionTaken) return refuse(`already taken by ${n.actionTaken.deviceId}`);
+
+    n.actionTaken = { id: claimed, deviceId: session.device!.id, at: Date.now() };
+    this.store.touchHistory();
+
+    this.audit('ack.action', { deviceId: session.device!.id, detail: { id, action: claimed } });
+    this.emit('action', {
+      notificationId: id,
+      actionId: claimed,
+      deviceId: session.device!.id,
+      deviceName: session.device!.name,
+    });
+    return claimed;
   }
 
   /**

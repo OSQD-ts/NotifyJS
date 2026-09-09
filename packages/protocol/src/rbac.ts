@@ -120,6 +120,10 @@ export function inQuietHours(q: { start: number; end: number }, now: Date): bool
  * without buying anybody any safety.
  */
 export const PRIVILEGED_CAPABILITIES = [
+  // Acting on an alert reaches into whatever the embedding application does
+  // about it, so handing it out is the same kind of escalation as handing out
+  // the ability to raise one.
+  'notify.act',
   'notify.send',
   'call.place',
   'devices.manage',
