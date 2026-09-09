@@ -1220,7 +1220,19 @@ export class Notifier extends EventEmitter<NotifierEvents> {
       return;
     }
 
-    this.store.updateIngestToken(token.id, { lastUsedAt: Date.now() });
+    // Recorded coarsely, and deliberately.
+    //
+    // Every write here marks the store dirty, and a dirty store is rewritten
+    // whole - which is the exact cost this project already went out of its way
+    // to remove from the notification path, where it made sending one alert
+    // proportional to everything ever sent. An ingest token is the busiest
+    // publisher a hub has, so stamping it per request would put that cost back
+    // on the hottest path in the system. Minute resolution is no worse an
+    // answer to "when was this last used" and takes the write out of the loop.
+    const lastUsed = token.lastUsedAt ?? 0;
+    if (Date.now() - lastUsed > INGEST_LAST_USED_RESOLUTION_MS) {
+      this.store.updateIngestToken(token.id, { lastUsedAt: Date.now() });
+    }
 
     try {
       if (kind === 'call') {
@@ -2383,6 +2395,9 @@ function webPushTargets(
 
 /** Stamped in at bundle time; falls back for source checkouts. */
 const NOTIFYJS_VERSION = process.env.NOTIFYJS_VERSION ?? '0.1.0';
+
+/** How precisely an ingest token's last use is recorded. See `handleIngest`. */
+const INGEST_LAST_USED_RESOLUTION_MS = 60_000;
 
 const MAX_ACK_RETRIES = 20;
 

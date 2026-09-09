@@ -161,3 +161,20 @@ test('GET is refused, and the routes vanish when ingest is off', async () => {
 test('a token cannot be minted into a role that does not exist', () => {
   assert.throws(() => hub.createIngestToken({ role: 'nonexistent' }), /unknown role/);
 });
+
+test('a busy publisher does not rewrite the store on every request', async () => {
+  const busy = hub.createIngestToken({ role: 'admin', label: 'busy' });
+
+  await post('/api/notify', { title: 'first' }, busy.token);
+  const first = hub.ingestTokens().find((t) => t.id === busy.id).lastUsedAt;
+  assert.ok(first > 0, 'the first use is recorded');
+
+  // Every write marks the store dirty and a dirty store is rewritten whole,
+  // so stamping this per request would put a full rewrite on the busiest path
+  // the hub has.
+  for (let i = 0; i < 5; i += 1) {
+    await post('/api/notify', { title: `burst ${i}` }, busy.token);
+  }
+  const after = hub.ingestTokens().find((t) => t.id === busy.id).lastUsedAt;
+  assert.equal(after, first, 'a burst inside the resolution window writes once');
+});
