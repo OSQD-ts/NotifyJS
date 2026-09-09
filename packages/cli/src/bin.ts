@@ -24,6 +24,7 @@ Usage
   notifyjs call <message>         Ring the on-call devices and speak a message
   notifyjs devices                List devices known to the hub
   notifyjs code [options]         Mint a pairing code (requires an admin device)
+  notifyjs token <cmd> [options]  Manage HTTP publishing tokens (create/list/revoke)
   notifyjs cert [options]         Generate a self-signed TLS certificate
   notifyjs watch <name> [options] Expect a check-in, and alert when it stops
   notifyjs checkin <name>         Record a check-in for a watched job
@@ -46,6 +47,8 @@ serve options
   --tls-cert <file>        Certificate for wss:// (see: notifyjs cert)
   --tls-key <file>         Private key for wss://
   --no-qr                  Do not print a QR code for the pairing link
+  --ingest                 Accept alerts over HTTP from token holders
+  --ingest-insecure        Allow ingest tokens over plain HTTP from off-box
   --no-web-push            Do not send encrypted pushes to browsers
   --web-push-subject <uri> mailto: or https: URI identifying you to a push
                            service (required by RFC 8292)
@@ -103,6 +106,8 @@ async function main(): Promise<void> {
       return placeCall(rest);
     case 'devices':
       return devices(rest);
+    case 'token':
+      return await token(rest);
     case 'code':
       return code(rest);
     case 'cert':
@@ -150,6 +155,8 @@ async function serve(argv: string[]): Promise<void> {
       'web-push-subject': { type: 'string' },
       push: { type: 'boolean', default: false },
       'push-body': { type: 'boolean', default: false },
+      ingest: { type: 'boolean', default: false },
+      'ingest-insecure': { type: 'boolean', default: false },
     },
     allowNegative: true,
   });
@@ -175,6 +182,13 @@ async function serve(argv: string[]): Promise<void> {
     // Without this the Expo transport has no switch on the command line at
     // all, so a hub started with `notifyjs serve` could never wake the phone
     // app - the one client that has no Web Push to fall back on.
+    // Publishing over HTTP. Off unless asked for: it is the one way into this
+    // hub that does not sign a per-connection nonce, so it should never appear
+    // because somebody accepted a default.
+    ingest: {
+      enabled: values.ingest,
+      allowInsecure: values['ingest-insecure'],
+    },
     push: {
       enabled: values.push,
       includeBody: values['push-body'],
@@ -513,6 +527,67 @@ async function devices(argv: string[]): Promise<void> {
     );
   }
   client.disconnect();
+}
+
+/**
+ * Mints, lists and revokes the bearer tokens that let something publish over
+ * HTTP. Over the protocol rather than by editing the store, because a running
+ * hub holds the store in memory and would write straight over a second
+ * process's changes.
+ */
+async function token(argv: string[]): Promise<void> {
+  const sub = argv[0] && !argv[0].startsWith('-') ? argv.shift() : 'list';
+  const { values, options } = common(argv, {
+    role: { type: 'string' },
+    label: { type: 'string' },
+    id: { type: 'string' },
+  });
+  const client = makeClient(options);
+  const done = ready(client);
+  await client.connect();
+  await done;
+
+  try {
+    if (sub === 'create') {
+      const issued = await client.admin('ingest.create', {
+        role: (values.role as string) ?? 'viewer',
+        label: values.label as string | undefined,
+      });
+      // On its own line and nowhere else: this is the only time the hub will
+      // ever say it, and it is the sort of thing people pipe into a file.
+      process.stdout.write(`${issued.token}\n`);
+      process.stderr.write(
+        `id: ${issued.id}\nrole: ${(values.role as string) ?? 'viewer'}\n` +
+          `This token is shown once. The hub stores only its hash.\n`,
+      );
+      return;
+    }
+
+    if (sub === 'revoke') {
+      const id = (values.id as string) ?? argv[0];
+      if (!id) throw new Error('which token? pass --id <id>');
+      const { revoked } = await client.admin('ingest.revoke', { id });
+      process.stdout.write(revoked ? `revoked ${id}\n` : `no live token with id ${id}\n`);
+      return;
+    }
+
+    if (sub !== 'list') throw new Error(`unknown token command: ${sub}`);
+
+    const { tokens } = await client.admin('ingest.list');
+    if (tokens.length === 0) {
+      process.stdout.write('no ingest tokens\n');
+      return;
+    }
+    for (const t of tokens) {
+      const state = t.revokedAt ? 'revoked' : 'live   ';
+      const used = t.lastUsedAt ? new Date(t.lastUsedAt).toLocaleString() : 'never';
+      process.stdout.write(
+        `${state}  ${t.id.padEnd(18)} ${t.role.padEnd(10)} ${(t.label ?? '-').padEnd(20)} used: ${used}\n`,
+      );
+    }
+  } finally {
+    client.disconnect();
+  }
 }
 
 async function code(argv: string[]): Promise<void> {

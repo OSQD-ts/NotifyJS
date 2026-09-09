@@ -9,6 +9,7 @@ import {
 import { join } from 'node:path';
 import type { Heartbeat } from './watchdog.js';
 import type { EscalationPolicy } from '@osqd/notifyjs-protocol';
+import type { IngestToken } from './ingest.js';
 import {
   defaultRoles,
   pairingCodeHash,
@@ -67,7 +68,15 @@ function unsafeKey(key: string): boolean {
 const MAX_BANS = 10_000;
 
 /** The string-keyed maps in a store document, all restored the same way. */
-const COLLECTIONS = ['devices', 'roles', 'codes', 'bans', 'heartbeats', 'policies'] as const;
+const COLLECTIONS = [
+  'devices',
+  'roles',
+  'codes',
+  'bans',
+  'heartbeats',
+  'policies',
+  'ingestTokens',
+] as const;
 
 export interface BanRecord {
   ip: string;
@@ -88,6 +97,11 @@ interface StoreData {
   bans: Record<string, BanRecord>;
   heartbeats: Record<string, Heartbeat>;
   policies: Record<string, EscalationPolicy>;
+  /**
+   * HTTP publishing credentials. Absent from stores written before ingest
+   * existed, which `COLLECTIONS` restores to an empty object on load.
+   */
+  ingestTokens: Record<string, IngestToken>;
   /**
    * The hub's VAPID keypair, generated on first use.
    *
@@ -204,6 +218,7 @@ export class Store {
       bans: {},
       heartbeats: {},
       policies: {},
+      ingestTokens: {},
     });
 
     if (!existsSync(this.file)) return { data: fresh(), recoveredFrom: undefined };
@@ -538,6 +553,39 @@ export class Store {
 
   policies(): EscalationPolicy[] {
     return Object.values(this.data.policies ?? {});
+  }
+
+  /* ----------------------------- ingest tokens ---------------------- */
+
+  /**
+   * Every token, revoked ones included.
+   *
+   * Revoked tokens are kept rather than deleted: an audit entry naming a token
+   * that no longer exists is a dead end, and the id is what makes "this alert
+   * came from CI" answerable months later. Callers that are authenticating a
+   * request must skip them, which `findIngestToken` does.
+   */
+  ingestTokens(): IngestToken[] {
+    return Object.values(this.data.ingestTokens ?? {});
+  }
+
+  ingestToken(id: string): IngestToken | undefined {
+    return own(this.data.ingestTokens, id);
+  }
+
+  addIngestToken(token: IngestToken): void {
+    if (unsafeKey(token.id)) return;
+    this.data.ingestTokens[token.id] = token;
+    this.markDirty();
+  }
+
+  updateIngestToken(id: string, patch: Partial<IngestToken>): IngestToken | undefined {
+    const existing = own(this.data.ingestTokens, id);
+    if (!existing || unsafeKey(id)) return undefined;
+    const next = { ...existing, ...patch };
+    this.data.ingestTokens[id] = next;
+    this.markDirty();
+    return next;
   }
 
   putPolicy(policy: EscalationPolicy): void {

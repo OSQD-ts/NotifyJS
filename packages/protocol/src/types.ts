@@ -284,6 +284,22 @@ export interface CallResult {
   attempted: string[];
 }
 
+/**
+ * An HTTP publishing credential, as an operator sees it.
+ *
+ * Deliberately without the hash. A hash is not a secret, but it is also not
+ * useful to anybody outside the hub, and shipping it to every admin client
+ * invites somebody to try to verify a guess offline.
+ */
+export interface IngestTokenSummary {
+  id: string;
+  role: string;
+  label?: string;
+  createdAt: number;
+  lastUsedAt?: number;
+  revokedAt?: number;
+}
+
 export interface PairingCode {
   /** SHA-256 of the normalised code. The plaintext code is never stored. */
   hash: string;

@@ -43,7 +43,14 @@ import { nodeCrypto } from '@osqd/notifyjs-protocol/node';
 
 import { resolveOptions, type NotifierOptions, type ResolvedOptions } from './options.js';
 import { Store } from './store.js';
-import { Guard, normalizeIp, uniformDelay } from './guard.js';
+import { Guard, MessageLimiter, normalizeIp, uniformDelay } from './guard.js';
+import {
+  bearerFrom,
+  findIngestToken,
+  mintIngestToken,
+  tokenMay,
+  type IngestToken,
+} from './ingest.js';
 import { Session } from './session.js';
 import { CallOrchestrator, type CallEvent, type CallStep, type CallTarget } from './calls.js';
 import { Watchdog, formatDuration, type Heartbeat, type HeartbeatSpec } from './watchdog.js';
@@ -165,6 +172,8 @@ export class Notifier extends EventEmitter<NotifierEvents> {
   /** deviceId -> sessions. A device may legitimately hold more than one. */
   private readonly byDevice = new Map<string, Set<Session>>();
   private readonly ackWaiters = new Map<string, NodeJS.Timeout>();
+  /** Per-token publish limiters, created on first use and dropped on revoke. */
+  private readonly ingestLimiters = new Map<string, MessageLimiter>();
 
   /** Pushes proof of life so a quiet hub still produces observable traffic. */
   private beatTimer: NodeJS.Timeout | undefined;
@@ -1041,6 +1050,11 @@ export class Notifier extends EventEmitter<NotifierEvents> {
       return;
     }
 
+    if (url.pathname === '/api/notify' || url.pathname === '/api/call') {
+      await this.handleIngest(req, res, url.pathname === '/api/call' ? 'call' : 'notify');
+      return;
+    }
+
     if (!this.dashboardRoot) {
       res.writeHead(404, { 'content-type': 'text/plain' });
       res.end('dashboard disabled');
@@ -1128,6 +1142,242 @@ export class Notifier extends EventEmitter<NotifierEvents> {
     } catch {
       return false;
     }
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* HTTP ingest                                                         */
+  /* ------------------------------------------------------------------ */
+
+  /**
+   * Publishing without speaking the protocol.
+   *
+   * The hub's own clients sign a per-connection nonce, which is a better
+   * credential than anything that fits in a header. This exists because the
+   * things most worth being paged by - a monitoring system, a CI job, a cron
+   * line - will never implement that handshake, and a pager nothing can reach
+   * is not a pager.
+   *
+   * Every check that guards a socket applies here too: the ban list and per-IP
+   * limiter run first, the token resolves to a role, and the role decides what
+   * may be published. What is *not* shared is the trust: this path is off
+   * until enabled, and refuses a cleartext connection from off-box outright.
+   */
+  private async handleIngest(
+    req: IncomingMessage,
+    res: ServerResponse,
+    kind: 'notify' | 'call',
+  ): Promise<void> {
+    const send = (code: number, body: Record<string, unknown>) => {
+      res.writeHead(code, { 'content-type': 'application/json' });
+      res.end(JSON.stringify(body));
+    };
+
+    if (!this.opts.ingest.enabled) {
+      // 404 rather than 403: a disabled feature should not confirm it exists.
+      res.writeHead(404, { 'content-type': 'text/plain' }).end('not found');
+      return;
+    }
+
+    if (req.method !== 'POST') {
+      send(405, { error: 'method_not_allowed', message: 'POST a JSON body' });
+      return;
+    }
+
+    const startedAt = Date.now();
+    const ip = this.clientIp(req);
+    if (this.guard.bannedFor(ip) > 0) {
+      send(403, { error: 'banned', message: 'this address is refused' });
+      return;
+    }
+
+    // A bearer token on a cleartext link off-box is readable by every hop it
+    // crosses. Loopback is exempt because there is no hop, which is what makes
+    // a hub behind a local reverse proxy workable without weakening this.
+    if (!this.opts.tls && !this.opts.ingest.allowInsecure && !isLoopback(ip)) {
+      send(421, {
+        error: 'insecure_transport',
+        message: 'refusing a bearer token over plain HTTP; use wss/TLS or set ingest.allowInsecure',
+      });
+      return;
+    }
+
+    const offered = bearerFrom(req.headers.authorization);
+    if (!offered) {
+      res.setHeader('www-authenticate', 'Bearer');
+      send(401, { error: 'unauthenticated', message: 'Authorization: Bearer <token>' });
+      return;
+    }
+
+    const token = findIngestToken(this.store.ingestTokens(), offered);
+    if (!token) {
+      // Charged against the IP exactly like a failed handshake, so guessing
+      // tokens over HTTP runs into the same wall as guessing them over a
+      // socket rather than being an unmetered oracle.
+      this.guard.fail(ip);
+      // Same floor a failed handshake gets, so a wrong token and an unknown one
+      // take indistinguishable time to be refused.
+      await uniformDelay(startedAt, this.opts.security.uniformFailureMs);
+      res.setHeader('www-authenticate', 'Bearer');
+      send(401, { error: 'unauthenticated', message: 'unknown or revoked token' });
+      return;
+    }
+
+    if (!this.ingestLimiter(token.id).allow()) {
+      send(429, { error: 'rate_limited', message: 'too many requests for this token' });
+      return;
+    }
+
+    const role = this.store.role(token.role);
+    const needed: Capability = kind === 'call' ? 'call.place' : 'notify.send';
+    if (!tokenMay(role, needed)) {
+      this.audit('ingest.forbidden', { detail: { token: token.id, kind } });
+      send(403, { error: 'forbidden', message: `role '${token.role}' cannot ${needed}` });
+      return;
+    }
+
+    let body: Record<string, unknown>;
+    try {
+      body = await readJsonBody(req, this.opts.ingest.maxBodyBytes);
+    } catch (err) {
+      const tooLarge = err instanceof Error && err.message === 'too_large';
+      if (tooLarge) {
+        // The peer is still sending, and nothing here will read the rest of
+        // it. Saying so lets the connection end cleanly after the response
+        // rather than being reset underneath it.
+        res.setHeader('connection', 'close');
+      }
+      send(tooLarge ? 413 : 400, {
+        error: tooLarge ? 'payload_too_large' : 'bad_request',
+        message: tooLarge ? 'body exceeds the configured limit' : 'body must be a JSON object',
+      });
+      if (tooLarge) res.once('finish', () => req.destroy());
+      return;
+    }
+
+    this.store.updateIngestToken(token.id, { lastUsedAt: Date.now() });
+
+    try {
+      if (kind === 'call') {
+        const message = typeof body.message === 'string' ? body.message : '';
+        if (!message) {
+          send(400, { error: 'bad_request', message: 'call requires a message' });
+          return;
+        }
+        // Held open for the whole ring, which is what makes the outcome worth
+        // having: the caller learns whether a person actually answered rather
+        // than only that the hub accepted the request. Bounded by the call's
+        // own `ringSeconds` and its escalation ladder, so a client posting
+        // here wants a generous read timeout.
+        const result = await this.call({
+          message,
+          from: typeof body.from === 'string' ? body.from : `token:${token.label ?? token.id}`,
+          channel: typeof body.channel === 'string' ? body.channel : undefined,
+          severity: coerceSeverity(body.severity, 'critical'),
+          policy: typeof body.policy === 'string' ? body.policy : undefined,
+        });
+        this.audit('ingest.call', {
+          detail: { token: token.id, id: result.callId, outcome: result.outcome },
+        });
+        send(200, {
+          ok: true,
+          callId: result.callId,
+          outcome: result.outcome,
+          deviceName: result.deviceName,
+          attempted: result.attempted.length,
+        });
+        return;
+      }
+
+      const title = typeof body.title === 'string' ? body.title.trim() : '';
+      if (!title) {
+        send(400, { error: 'bad_request', message: 'notify requires a title' });
+        return;
+      }
+
+      // Built field by field rather than spread: the body is attacker-shaped,
+      // and spreading it would let a caller set fields this endpoint has no
+      // business exposing - `seq` and `ts` among them, which decide replay
+      // ordering for every device.
+      const result = await this.notify({
+        title,
+        body: typeof body.body === 'string' ? body.body : undefined,
+        channel: typeof body.channel === 'string' ? body.channel : undefined,
+        severity: coerceSeverity(body.severity, 'info'),
+        tags: Array.isArray(body.tags)
+          ? body.tags.filter((t): t is string => typeof t === 'string').slice(0, 20)
+          : undefined,
+        data: isPlainObject(body.data) ? body.data : undefined,
+        requireAck: body.requireAck === true,
+        ttl: typeof body.ttl === 'number' && Number.isFinite(body.ttl) ? body.ttl : undefined,
+        dedupeKey: typeof body.dedupeKey === 'string' ? body.dedupeKey : undefined,
+        resolveKey: typeof body.resolveKey === 'string' ? body.resolveKey : undefined,
+      });
+
+      this.audit('ingest.notify', {
+        detail: { token: token.id, id: result.id, channel: result.channel },
+      });
+      send(202, {
+        ok: true,
+        id: result.id,
+        seq: result.seq,
+        reached: result.reached,
+        coalesced: result.coalesced === true,
+      });
+    } catch (err) {
+      this.opts.logger('an ingested request could not be published', {
+        error: err instanceof Error ? err.message : String(err),
+      });
+      send(400, { error: 'rejected', message: err instanceof Error ? err.message : 'rejected' });
+    }
+  }
+
+  /**
+   * One limiter per token, created on first use.
+   *
+   * Keyed on the token rather than the IP: a CI runner publishes from a
+   * different address on every job, and a shared NAT would otherwise have one
+   * noisy publisher throttle everybody behind it.
+   */
+  private ingestLimiter(id: string): MessageLimiter {
+    let limiter = this.ingestLimiters.get(id);
+    if (!limiter) {
+      limiter = new MessageLimiter(this.opts.ingest.ratePerMinute, 60_000);
+      this.ingestLimiters.set(id, limiter);
+    }
+    return limiter;
+  }
+
+  /**
+   * Mints a token. The plaintext is returned exactly once - only its hash is
+   * kept - so a caller that does not record it has to issue another.
+   */
+  createIngestToken(input: { role: string; label?: string }): { id: string; token: string } {
+    if (!this.store.role(input.role)) throw new Error(`unknown role: ${input.role}`);
+    const { id, token, hash } = mintIngestToken();
+    this.store.addIngestToken({
+      id,
+      hash,
+      role: input.role,
+      label: input.label,
+      createdAt: Date.now(),
+    });
+    this.audit('ingest.token.created', { detail: { token: id, role: input.role } });
+    return { id, token };
+  }
+
+  /** Revokes a token. Kept, not deleted, so the audit trail still resolves. */
+  revokeIngestToken(id: string): boolean {
+    const existing = this.store.ingestToken(id);
+    if (!existing || existing.revokedAt) return false;
+    this.store.updateIngestToken(id, { revokedAt: Date.now() });
+    this.ingestLimiters.delete(id);
+    this.audit('ingest.token.revoked', { detail: { token: id } });
+    return true;
+  }
+
+  /** Tokens, without their hashes - there is nothing useful in a hash here. */
+  ingestTokens(): Array<Omit<IngestToken, 'hash'>> {
+    return this.store.ingestTokens().map(({ hash: _hash, ...rest }) => rest);
   }
 
   private clientIp(req: IncomingMessage): string {
@@ -1749,6 +1999,19 @@ export class Notifier extends EventEmitter<NotifierEvents> {
           return reply(true, { codes: this.pairingCodes() });
         case 'pair.revoke':
           return reply(true, { revoked: this.revokePairingCode(String(args.hash)) });
+        case 'ingest.create': {
+          // Gated exactly like a pairing code, and for the same reason: a
+          // token publishes with its role's permissions, so minting one into
+          // a role you do not hold is privilege escalation with an extra step.
+          const wanted = String(args.role ?? 'viewer');
+          this.assertMayGrantRole(session, role, wanted);
+          const label = typeof args.label === 'string' ? args.label.slice(0, 120) : undefined;
+          return reply(true, this.createIngestToken({ role: wanted, label }));
+        }
+        case 'ingest.list':
+          return reply(true, { tokens: this.ingestTokens() });
+        case 'ingest.revoke':
+          return reply(true, { revoked: this.revokeIngestToken(String(args.id)) });
         case 'roles.list':
           return reply(true, { roles: this.roles() });
         case 'roles.upsert':
@@ -2202,6 +2465,13 @@ const ADMIN_CAPABILITY: Record<string, Capability> = Object.assign(Object.create
   'pair.create': 'devices.manage',
   'pair.list': 'devices.manage',
   'pair.revoke': 'devices.manage',
+  // Minting a publishing credential is managing who may reach this hub, which
+  // is the same authority that mints pairing codes. Listing is kept at the
+  // same level rather than a softer one: the labels say what publishes here,
+  // which is exactly the map an attacker would want first.
+  'ingest.create': 'devices.manage',
+  'ingest.list': 'devices.manage',
+  'ingest.revoke': 'devices.manage',
   'roles.list': 'notify.receive',
   'roles.upsert': 'roles.manage',
   'roles.delete': 'roles.manage',
@@ -2320,6 +2590,64 @@ function sanitizeChannel(value: unknown): string {
 }
 
 /** IPv4 or IPv6 literal, for deciding whether a proxy header is believable. */
+/**
+ * Whether an address is this machine.
+ *
+ * Loopback is the one case where a bearer token on a cleartext connection is
+ * not exposed to anything: there is no hop between the caller and the hub. It
+ * is what lets a reverse proxy terminate TLS in front of a hub bound to
+ * localhost without having to relax the rule for everybody.
+ */
+function isLoopback(ip: string): boolean {
+  return ip === '127.0.0.1' || ip === '::1' || ip.startsWith('127.');
+}
+
+/** A JSON object and nothing else - arrays and null are not payloads. */
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+/**
+ * Reads a JSON body, refusing to buffer more than it was told to.
+ *
+ * The limit is enforced as the bytes arrive rather than after: waiting for
+ * `end` before checking the length is how an unauthenticated caller gets the
+ * hub to hold an arbitrary amount of memory for them. The socket is destroyed
+ * on breach, because a peer that is still sending has not stopped just because
+ * a promise rejected.
+ */
+async function readJsonBody(
+  req: IncomingMessage,
+  maxBytes: number,
+): Promise<Record<string, unknown>> {
+  const chunks: Buffer[] = [];
+  let size = 0;
+
+  await new Promise<void>((resolve, reject) => {
+    req.on('data', (chunk: Buffer) => {
+      size += chunk.length;
+      if (size > maxBytes) {
+        // Paused rather than destroyed. Destroying here does stop the
+        // buffering, but it also tears down the socket before the 413 can be
+        // written - so the caller sees a connection reset and has no idea why
+        // their alert vanished. Pausing applies backpressure just as well and
+        // leaves the connection alive long enough to say what went wrong; the
+        // handler closes it once the response is out.
+        req.pause();
+        reject(new Error('too_large'));
+        return;
+      }
+      chunks.push(chunk);
+    });
+    req.on('end', () => resolve());
+    req.on('error', (err) => reject(err));
+  });
+
+  const parsed: unknown = JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}');
+  if (!isPlainObject(parsed)) throw new Error('not an object');
+  return parsed;
+}
+
 function isIpAddress(value: string): boolean {
   if (/^\d{1,3}(\.\d{1,3}){3}$/.test(value)) {
     return value.split('.').every((part) => Number(part) <= 255);

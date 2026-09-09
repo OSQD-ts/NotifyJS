@@ -6,6 +6,7 @@ import type {
   Device,
   EscalationPolicy,
   Heartbeat,
+  IngestTokenSummary,
   Notification,
   PairingCode,
   Role,
@@ -312,6 +313,9 @@ export type AdminOp =
   | 'policies.list'
   | 'policies.upsert'
   | 'policies.delete'
+  | 'ingest.create'
+  | 'ingest.list'
+  | 'ingest.revoke'
   | 'metrics';
 
 /**
@@ -347,6 +351,13 @@ export interface AdminData {
   'policies.list': { policies: EscalationPolicy[] };
   'policies.upsert': { policies: EscalationPolicy[] };
   'policies.delete': { deleted: boolean };
+  /**
+   * The plaintext token, returned exactly once. The hub keeps only its hash,
+   * so a caller that does not record this has to mint another.
+   */
+  'ingest.create': { id: string; token: string };
+  'ingest.list': { tokens: IngestTokenSummary[] };
+  'ingest.revoke': { revoked: boolean };
   metrics: { text: string };
   'audit.tail': { events: AuditEvent[] };
   history: { notifications: Notification[] };

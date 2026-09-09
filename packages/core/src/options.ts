@@ -75,6 +75,30 @@ export interface FloodOptions {
 }
 
 /**
+ * Publishing over HTTP, off by default and deliberately so.
+ *
+ * Every other publisher proves itself by signing a per-connection nonce, and
+ * nothing reusable crosses the wire. A bearer token is weaker than that: it is
+ * replayable, it sits in somebody's CI settings, and it travels in a header.
+ * That is a real trade against the rest of this design - so it is opt-in, the
+ * token carries only a role's permissions rather than being all-powerful, and
+ * it is refused outright over plain HTTP to anything but a loopback address.
+ */
+export interface IngestOptions {
+  enabled: boolean;
+  /**
+   * Accept tokens over a non-TLS connection from somewhere other than this
+   * machine. A bearer token on a cleartext link is readable by every hop it
+   * crosses, so this stays off and the hub answers 421 instead.
+   */
+  allowInsecure: boolean;
+  /** Largest request body accepted, in bytes. */
+  maxBodyBytes: number;
+  /** Requests per minute per token, before the hub starts refusing. */
+  ratePerMinute: number;
+}
+
+/**
  * Wake-up pushes, off by default and deliberately so.
  *
  * A device only receives while its socket is open, which on a phone means
@@ -207,6 +231,8 @@ export interface NotifierOptions {
   flood?: Partial<FloodOptions>;
   /** Wake-up pushes for devices that are not connected. See `PushOptions`. */
   push?: Partial<PushOptions>;
+  /** Publishing over HTTP with a bearer token. See `IngestOptions`. */
+  ingest?: Partial<IngestOptions>;
   /** Encrypted pushes to browsers, including iOS. See `WebPushOptions`. */
   webPush?: Partial<WebPushOptions>;
   security?: Partial<SecurityOptions>;
@@ -224,6 +250,7 @@ export interface ResolvedOptions
       | 'dashboardDir'
       | 'flood'
       | 'push'
+      | 'ingest'
       | 'webPush'
       | 'publicUrl'
       | 'metricsToken'
@@ -237,6 +264,7 @@ export interface ResolvedOptions
   security: SecurityOptions;
   flood: FloodOptions;
   push: PushOptions;
+  ingest: IngestOptions;
   webPush: WebPushOptions;
   deviceWatchdog: DeviceWatchdogOptions;
   logger: (line: string, meta?: Record<string, unknown>) => void;
@@ -283,6 +311,15 @@ export function resolveOptions(o: NotifierOptions = {}): ResolvedOptions {
       burst: 5,
       alwaysDeliver: ['critical'],
       ...o.flood,
+    },
+    ingest: {
+      enabled: false,
+      allowInsecure: false,
+      // Enough for a verbose Alertmanager group, far short of anything worth
+      // buffering from an unauthenticated caller.
+      maxBodyBytes: 64 * 1024,
+      ratePerMinute: 120,
+      ...o.ingest,
     },
     push: {
       enabled: false,
