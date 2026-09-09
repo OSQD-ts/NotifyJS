@@ -2,7 +2,6 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { AppState, Platform } from 'react-native';
 import * as Device from 'expo-device';
 import * as Network from 'expo-network';
-import * as Notifications from 'expo-notifications';
 import {
   SourceManager,
   defaultPreferences,
@@ -25,7 +24,6 @@ import {
   stopWatching,
 } from '../modules/notifyjs-call';
 import { nobleCrypto } from './crypto';
-import { dismissPushFor, getPushToken } from './push';
 import { secureStorage } from './storage';
 
 const PREFS_KEY = 'notifyjs_preferences';
@@ -112,9 +110,6 @@ export function useSources() {
           entry.notification.body ?? `${entry.sourceLabel} · ${entry.notification.channel}`,
           { sound: prefsRef.current.sound, vibrate: prefsRef.current.vibrate },
         );
-        // If a wake-up push is what brought the app back, its notification is
-        // still on screen saying the same thing as the one just posted.
-        void dismissPushFor(entry.notification.id);
       }),
 
       manager.on('call', (entry) => {
@@ -221,53 +216,6 @@ export function useSources() {
     return () => sub?.remove();
   }, [manager]);
 
-  /**
-   * Hands each hub a wake-up token for this phone.
-   *
-   * Without this the whole push path is inert: the hub filters its wake-ups to
-   * devices that have registered a token, and no device ever had. The feature
-   * shipped complete on both sides of the wire and unconnected in the middle,
-   * so a phone whose app had been swiped away simply heard nothing.
-   *
-   * Registered per source, because each subscription is a separate identity
-   * with its own device record on its own hub. Re-registered whenever a source
-   * comes back to ready, since Expo rotates tokens and a hub only keeps the
-   * most recent one it was told about.
-   */
-  const registeredRef = useRef(new Set<string>());
-  const readyIds = sources
-    .filter((s) => s.status === 'ready')
-    .map((s) => s.id)
-    .sort()
-    .join(',');
-
-  useEffect(() => {
-    const ready = new Set(readyIds ? readyIds.split(',') : []);
-    // A source that dropped should register again when it returns.
-    for (const id of registeredRef.current) {
-      if (!ready.has(id)) registeredRef.current.delete(id);
-    }
-
-    const pending = [...ready].filter((id) => !registeredRef.current.has(id));
-    if (pending.length === 0) return;
-
-    let cancelled = false;
-    void (async () => {
-      // Resolves to undefined on a simulator, or when the user declined
-      // notification permission - both ordinary outcomes, not failures.
-      const token = await getPushToken();
-      if (cancelled || !token) return;
-      for (const id of pending) {
-        registeredRef.current.add(id);
-        manager.registerPush(id, token);
-      }
-    })();
-
-    return () => {
-      cancelled = true;
-    };
-  }, [manager, readyIds]);
-
   const savePrefs = useCallback(
     async (patch: Partial<ClientPreferences>) => {
       const next = normalizePreferences({ ...prefsRef.current, ...patch }, prefsRef.current.deviceName);
@@ -279,22 +227,6 @@ export function useSources() {
   );
 
   const clearFeed = useCallback(() => setFeed([]), []);
-
-  /**
-   * A wake-up push is a nudge, not the alert itself.
-   *
-   * The hub sends one only for a device it believes is not reading its socket,
-   * and deliberately puts nothing in the payload beyond what arrived - the
-   * real content comes over the connection. So the one thing that has to
-   * happen when a push lands is the thing nothing here used to do: get the
-   * connection back and ask for what was missed. Without this the push woke
-   * the app, the app looked at a socket that had died while it slept, and the
-   * feed stayed exactly as empty as before.
-   */
-  useEffect(() => {
-    const sub = Notifications.addNotificationReceivedListener(() => manager.syncAll());
-    return () => sub.remove();
-  }, [manager]);
 
   /**
    * An Answer that started the app arrives as an intent extra, not an event -

@@ -271,9 +271,15 @@ export interface SnoozeMsg extends Envelope {
  */
 export interface PushRegisterMsg extends Envelope {
   t: 'push.register';
-  /** An Expo push token, or a Web Push subscription endpoint. Empty clears it. */
+  /** A Web Push subscription endpoint. Empty clears it. */
   token: string;
-  provider: 'expo' | 'webpush';
+  /**
+   * Only Web Push remains. Kept as a field rather than dropped so a hub can
+   * still recognise - and ignore - a registration from a client built before
+   * the Expo transport was removed, instead of storing a token nothing can
+   * ever deliver to.
+   */
+  provider: 'webpush';
   /** Required for `webpush`, meaningless for `expo`. */
   keys?: WebPushKeys;
 }

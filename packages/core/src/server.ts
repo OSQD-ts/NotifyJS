@@ -56,7 +56,6 @@ import { CallOrchestrator, type CallEvent, type CallStep, type CallTarget } from
 import { Watchdog, formatDuration, type Heartbeat, type HeartbeatSpec } from './watchdog.js';
 import { Metrics } from './metrics.js';
 import { FloodControl, summaryTitle, type FloodSummary } from './flood.js';
-import { PushSender } from './push.js';
 import { WebPushSender, generateVapidKeys } from './webpush.js';
 import { renderQr } from './qr.js';
 
@@ -164,7 +163,6 @@ export class Notifier extends EventEmitter<NotifierEvents> {
   private readonly guard: Guard;
   private readonly calls: CallOrchestrator;
   private readonly flood: FloodControl;
-  private readonly push: PushSender;
   private readonly webPush: WebPushSender;
   private readonly watchdog: Watchdog;
   private readonly metrics = new Metrics();
@@ -209,24 +207,6 @@ export class Notifier extends EventEmitter<NotifierEvents> {
       this.audit(`call.${e.type}`, { detail: { callId: e.callId } });
     });
     this.flood = new FloodControl(this.opts.flood, (summary) => this.releaseSummary(summary));
-    this.push = new PushSender(
-      this.opts.push,
-      this.opts.logger,
-      (ok, count) => this.metrics.pushed(ok, count),
-      // A token the push service says is dead is worse than no token: it costs
-      // a request on every alert and never wakes anybody. Clearing it also
-      // makes `pushToken` mean what it claims - a device we can still reach.
-      (deviceId) => {
-        const updated = this.store.updateDevice(deviceId, {
-          pushToken: undefined,
-          pushProvider: undefined,
-        });
-        if (!updated) return;
-        for (const session of this.byDevice.get(deviceId) ?? []) session.device = updated;
-        this.audit('push.unreachable', { deviceId });
-      },
-    );
-
     // The same retirement rule as above, and the same reason for it: an
     // endpoint a push service answers 404 or 410 for will never deliver again,
     // and nothing else in the system would ever notice.
@@ -454,8 +434,8 @@ export class Notifier extends EventEmitter<NotifierEvents> {
    * currently connected. No-op unless push is explicitly enabled.
    */
   private async pushToOffline(n: Notification, deliveredTo: string[]): Promise<void> {
-    if (!this.push.enabled && !this.webPush.enabled) return;
-    const online = new Set(this.opts.push.evenWhenOnline ? [] : deliveredTo);
+    if (!this.webPush.enabled) return;
+    const online = new Set(this.opts.webPush.evenWhenOnline ? [] : deliveredTo);
 
     const targets = this.store.devices().filter((device) => {
       if (!device.pushToken || device.status !== 'active') return false;
@@ -472,23 +452,14 @@ export class Notifier extends EventEmitter<NotifierEvents> {
       });
     });
 
-    // Who may be woken is one question and how to reach them is another. The
-    // filter above answers the first for every transport at once, which is
-    // what keeps a device from being reachable by one route and not the other
-    // after somebody edits a role.
-    const { expo, web } = splitByProvider(targets);
-
-    await Promise.all([
-      this.push.notify(expo, n),
-      this.webPush.send(web, {
-        title: `${n.severity.toUpperCase()}: ${n.title}`,
-        body: this.opts.push.includeBody ? (n.body ?? n.channel) : n.channel,
-        // The notification id, so a repeat of the same alert replaces the one
-        // already on screen rather than stacking beside it.
-        tag: n.id,
-        severity: n.severity,
-      }),
-    ]);
+    await this.webPush.send(webPushTargets(targets), {
+      title: `${n.severity.toUpperCase()}: ${n.title}`,
+      body: this.opts.webPush.includeBody ? (n.body ?? n.channel) : n.channel,
+      // The notification id, so a repeat of the same alert replaces the one
+      // already on screen rather than stacking beside it.
+      tag: n.id,
+      severity: n.severity,
+    });
   }
 
   /* ------------------------------------------------------------------ */
@@ -764,7 +735,7 @@ export class Notifier extends EventEmitter<NotifierEvents> {
   }
 
   private async pushCallToOffline(req: CallRequest, ringing: string[]): Promise<void> {
-    if (!this.push.enabled && !this.webPush.enabled) return;
+    if (!this.webPush.enabled) return;
     const online = new Set(ringing);
     const targets = this.store.devices().filter((device) => {
       if (!device.pushToken || device.status !== 'active' || online.has(device.id)) return false;
@@ -780,17 +751,12 @@ export class Notifier extends EventEmitter<NotifierEvents> {
       });
     });
 
-    const { expo, web } = splitByProvider(targets);
-
-    await Promise.all([
-      this.push.call(expo, req),
-      this.webPush.send(web, {
-        title: `Incoming alert from ${req.from}`,
-        body: this.opts.push.includeBody ? req.message : 'Open to answer',
-        tag: req.id,
-        severity: req.severity,
-      }),
-    ]);
+    await this.webPush.send(webPushTargets(targets), {
+      title: `Incoming alert from ${req.from}`,
+      body: this.opts.webPush.includeBody ? req.message : 'Open to answer',
+      tag: req.id,
+      severity: req.severity,
+    });
   }
 
   private beat(): void {
@@ -1887,7 +1853,29 @@ export class Notifier extends EventEmitter<NotifierEvents> {
     // past 200 characters already. A cap that truncates one is worse than no
     // cap - it stores an endpoint that looks fine and 404s forever.
     const token = typeof msg.token === 'string' ? msg.token.slice(0, 2048) : '';
-    const provider = msg.provider === 'webpush' ? 'webpush' : 'expo';
+
+    // Web Push is the only transport left. A client built before the Expo one
+    // was removed still registers its token here, and storing it would leave a
+    // device that reads as reachable in `devices list`, is counted as a push
+    // target, and silently receives nothing - which is the exact failure this
+    // hub already refuses a keyless subscription over. Cleared rather than
+    // ignored, so a phone upgrading across the change does not keep a dead
+    // token on its record forever.
+    if (token && msg.provider !== 'webpush') {
+      const cleared = this.store.updateDevice(session.device.id, {
+        pushToken: undefined,
+        pushProvider: undefined,
+        pushKeys: undefined,
+      });
+      if (cleared) session.device = cleared;
+      this.audit('push.rejected', { deviceId: session.device.id });
+      this.opts.logger('ignored a wake-up token for a transport this hub no longer has', {
+        deviceId: session.device.id,
+      });
+      return;
+    }
+
+    const provider = 'webpush' as const;
 
     if (!token) {
       const cleared = this.store.updateDevice(session.device.id, {
@@ -2371,32 +2359,26 @@ function validWebPushKeys(keys: unknown): WebPushKeys | undefined {
 }
 
 /**
- * Sorts push-eligible devices by how they are actually reached.
+ * Narrows push-eligible devices to the ones Web Push can actually reach.
  *
- * A device carries one provider, and the two senders want different shapes:
- * Expo takes the whole `Device` and reads `pushToken` itself, Web Push needs
- * the endpoint and the subscription keys unpacked. Anything claiming
- * `webpush` without keys is dropped rather than passed on - it cannot be
- * encrypted to, so handing it to the sender would only produce a failure
- * further from the cause.
+ * There used to be two transports to sort between. With Expo gone there is
+ * one, so the only question left is whether a device carries a subscription
+ * that can be encrypted to. Anything claiming `webpush` without keys is
+ * dropped here rather than passed on - it cannot be encrypted to, so handing
+ * it to the sender would only produce a failure further from the cause. A
+ * token left behind by the old Expo path is ignored for a plainer reason:
+ * nothing can deliver to it any more.
  */
-function splitByProvider(devices: Device[]): {
-  expo: Device[];
-  web: Array<{ deviceId: string; endpoint: string; keys: WebPushKeys }>;
-} {
-  const expo: Device[] = [];
-  const web: Array<{ deviceId: string; endpoint: string; keys: WebPushKeys }> = [];
-
+function webPushTargets(
+  devices: Device[],
+): Array<{ deviceId: string; endpoint: string; keys: WebPushKeys }> {
+  const targets: Array<{ deviceId: string; endpoint: string; keys: WebPushKeys }> = [];
   for (const device of devices) {
-    if (device.pushProvider === 'webpush') {
-      if (device.pushToken && device.pushKeys) {
-        web.push({ deviceId: device.id, endpoint: device.pushToken, keys: device.pushKeys });
-      }
-      continue;
-    }
-    expo.push(device);
+    if (device.pushProvider !== 'webpush') continue;
+    if (!device.pushToken || !device.pushKeys) continue;
+    targets.push({ deviceId: device.id, endpoint: device.pushToken, keys: device.pushKeys });
   }
-  return { expo, web };
+  return targets;
 }
 
 /** Stamped in at bundle time; falls back for source checkouts. */

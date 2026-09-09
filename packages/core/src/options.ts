@@ -99,42 +99,34 @@ export interface IngestOptions {
 }
 
 /**
- * Wake-up pushes, off by default and deliberately so.
+ * Web Push - for browsers, for an iPhone on its home screen, and now the only
+ * way this hub wakes a device that is not connected.
  *
- * A device only receives while its socket is open, which on a phone means
- * while the app is running. Enabling this lets the hub ask a push service to
- * wake a device that is not connected - and that means the notification title
- * leaves your infrastructure and passes through Expo, Apple or Google. That is
- * a real trade against the rest of this design, so it is opt-in and the body
- * is withheld unless you ask for it.
- */
-export interface PushOptions {
-  enabled: boolean;
-  /** Expo's push endpoint. Override to route through your own relay. */
-  endpoint: string;
-  /** Include the notification body, not just its title. */
-  includeBody: boolean;
-  /** Also push when a device *is* connected. Usually redundant. */
-  evenWhenOnline: boolean;
-}
-
-/**
- * Web Push, for browsers - which is also what reaches an iPhone.
+ * It is on by default, which nothing else that leaves the hub is, and the
+ * reason is the payload: it is encrypted to a key the browser generated
+ * (RFC 8291), so the push service forwards bytes it cannot read. The service
+ * is also the browser vendor's own rather than one this project picked, and
+ * nothing is sent until somebody has clicked "enable" in a specific browser -
+ * a stronger opt-in than any server flag.
  *
- * Separate from `PushOptions`, and on by default, because it is a different
- * bargain. The Expo path hands a third party your notification title, so it
- * stays off until you decide otherwise. Here the payload is encrypted to a key
- * the browser generated (RFC 8291): the push service forwards bytes it cannot
- * read, and it is the browser's own vendor rather than a service this project
- * picked. Nothing is ever sent until somebody has clicked "enable" in a
- * specific browser, which is a stronger opt-in than a server flag.
- *
- * `includeBody` and `evenWhenOnline` are deliberately shared with
- * `PushOptions`: they are decisions about what leaves the hub, and having them
- * answer differently per transport is how one of them ends up forgotten.
+ * That is the bargain the Expo transport could not make, and why it is gone:
+ * it handed a third party the notification title in the clear on every alert.
  */
 export interface WebPushOptions {
   enabled: boolean;
+  /**
+   * Include the notification body, not just its title.
+   *
+   * Used to live on the Expo options and be shared with this one, on the
+   * reasoning that what leaves the hub should be answered once. With the Expo
+   * transport gone there is only one push transport left, so the decision
+   * lives where it applies. It matters less here than it did there: the
+   * payload is encrypted to the browser's own key, so the push service
+   * forwards bytes it cannot read either way.
+   */
+  includeBody: boolean;
+  /** Also push when a device *is* connected. Usually redundant. */
+  evenWhenOnline: boolean;
   /**
    * The VAPID `sub` claim - a `mailto:` or `https:` URI identifying whoever
    * runs this hub, which a push service uses to contact you if it becomes a
@@ -229,8 +221,6 @@ export interface NotifierOptions {
   deviceWatchdog?: Partial<DeviceWatchdogOptions>;
   /** Collapses repeated identical alerts. See `FloodOptions`. */
   flood?: Partial<FloodOptions>;
-  /** Wake-up pushes for devices that are not connected. See `PushOptions`. */
-  push?: Partial<PushOptions>;
   /** Publishing over HTTP with a bearer token. See `IngestOptions`. */
   ingest?: Partial<IngestOptions>;
   /** Encrypted pushes to browsers, including iOS. See `WebPushOptions`. */
@@ -249,7 +239,6 @@ export interface ResolvedOptions
       | 'logger'
       | 'dashboardDir'
       | 'flood'
-      | 'push'
       | 'ingest'
       | 'webPush'
       | 'publicUrl'
@@ -263,7 +252,6 @@ export interface ResolvedOptions
   metricsToken?: string;
   security: SecurityOptions;
   flood: FloodOptions;
-  push: PushOptions;
   ingest: IngestOptions;
   webPush: WebPushOptions;
   deviceWatchdog: DeviceWatchdogOptions;
@@ -321,15 +309,10 @@ export function resolveOptions(o: NotifierOptions = {}): ResolvedOptions {
       ratePerMinute: 120,
       ...o.ingest,
     },
-    push: {
-      enabled: false,
-      endpoint: 'https://exp.host/--/api/v2/push/send',
-      includeBody: false,
-      evenWhenOnline: false,
-      ...o.push,
-    },
     webPush: {
       enabled: true,
+      includeBody: false,
+      evenWhenOnline: false,
       subject: 'https://github.com/OSQD-ts/NotifyJS',
       // Four hours. Long enough to survive a closed laptop over lunch, short
       // enough that a pager alert never arrives stale enough to mislead.

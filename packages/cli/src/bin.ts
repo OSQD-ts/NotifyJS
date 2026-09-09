@@ -50,13 +50,9 @@ serve options
   --ingest                 Accept alerts over HTTP from token holders
   --ingest-insecure        Allow ingest tokens over plain HTTP from off-box
   --no-web-push            Do not send encrypted pushes to browsers
+  --web-push-body          Include the alert body in the encrypted push
   --web-push-subject <uri> mailto: or https: URI identifying you to a push
                            service (required by RFC 8292)
-  --push                   Wake the phone app through Expo when its socket is
-                           closed. Off by default: alert titles travel through
-                           Expo and then Apple or Google
-  --push-body              Include the notification body in that push, not
-                           just its title
   --admin-code             Also print an admin pairing code on start
 
 cert options
@@ -153,8 +149,7 @@ async function serve(argv: string[]): Promise<void> {
       qr: { type: 'boolean', default: true },
       'web-push': { type: 'boolean', default: true },
       'web-push-subject': { type: 'string' },
-      push: { type: 'boolean', default: false },
-      'push-body': { type: 'boolean', default: false },
+      'web-push-body': { type: 'boolean', default: false },
       ingest: { type: 'boolean', default: false },
       'ingest-insecure': { type: 'boolean', default: false },
     },
@@ -178,20 +173,7 @@ async function serve(argv: string[]): Promise<void> {
     webPush: {
       enabled: values['web-push'],
       ...(values['web-push-subject'] ? { subject: values['web-push-subject'] } : {}),
-    },
-    // Without this the Expo transport has no switch on the command line at
-    // all, so a hub started with `notifyjs serve` could never wake the phone
-    // app - the one client that has no Web Push to fall back on.
-    // Publishing over HTTP. Off unless asked for: it is the one way into this
-    // hub that does not sign a per-connection nonce, so it should never appear
-    // because somebody accepted a default.
-    ingest: {
-      enabled: values.ingest,
-      allowInsecure: values['ingest-insecure'],
-    },
-    push: {
-      enabled: values.push,
-      includeBody: values['push-body'],
+      includeBody: values['web-push-body'],
     },
     dashboardDir: values['dashboard-dir'],
     publicUrl: values['public-url'],

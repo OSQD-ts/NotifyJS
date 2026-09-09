@@ -110,7 +110,7 @@ export interface Device {
    * check stays `device.pushToken`.
    */
   pushToken?: string;
-  pushProvider?: 'expo' | 'webpush';
+  pushProvider?: 'webpush';
   /**
    * Web Push only: the keys the browser generated for this subscription.
    *

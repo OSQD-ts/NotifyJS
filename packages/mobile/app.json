@@ -16,8 +16,7 @@
       "bundleIdentifier": "dev.notifyjs.app",
       "infoPlist": {
         "UIBackgroundModes": [
-          "audio",
-          "remote-notification"
+          "audio"
         ],
         "NSAppTransportSecurity": {
           "NSAllowsLocalNetworking": true
@@ -47,13 +46,6 @@
     },
     "plugins": [
       "expo-secure-store",
-      [
-        "expo-notifications",
-        {
-          "icon": "./assets/notification-icon.png",
-          "color": "#1b3fb8"
-        }
-      ],
       [
         "expo-camera",
         {

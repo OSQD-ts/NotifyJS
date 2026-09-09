@@ -1,8 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Alert, AppState, Platform, StyleSheet, View } from 'react-native';
+import { Alert, AppState, PermissionsAndroid, Platform, StyleSheet, View } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
 import * as Linking from 'expo-linking';
-import * as Notifications from 'expo-notifications';
 import { parsePairingLink } from '@osqd/notifyjs-protocol';
 
 import {
@@ -20,15 +19,6 @@ import { FeedScreen } from './src/FeedScreen';
 import { CallScreen } from './src/CallScreen';
 import { SettingsScreen } from './src/SettingsScreen';
 import { useTheme } from './src/theme';
-
-/** Alerts should surface even while the app is in the foreground. */
-Notifications.setNotificationHandler({
-  handleNotification: async () => ({
-    shouldShowAlert: true,
-    shouldPlaySound: true,
-    shouldSetBadge: false,
-  }),
-});
 
 /**
  * How long to leave battery optimisation alone after asking about it.
@@ -60,8 +50,22 @@ export default function App() {
   const [snoozedUntil, setSnoozedUntil] = useState(0);
   const [pendingUrl, setPendingUrl] = useState<string | undefined>();
 
+  /**
+   * Asks for permission to post notifications.
+   *
+   * Still needed even though nothing goes through a notifications library any
+   * more: every alert this app raises is posted natively, and Android refuses
+   * those too without POST_NOTIFICATIONS - silently, as a caught
+   * SecurityException, which is the worst way for a pager to fail. Asked
+   * through React Native rather than a package, since one permission call was
+   * all that package was still doing here.
+   *
+   * The permission only exists from API 33; below that, posting is allowed and
+   * there is nothing to request.
+   */
   useEffect(() => {
-    void Notifications.requestPermissionsAsync();
+    if (Platform.OS !== 'android' || Number(Platform.Version) < 33) return;
+    void PermissionsAndroid.request('android.permission.POST_NOTIFICATIONS' as never);
   }, []);
 
   const paired = loaded && sources.length > 0;
