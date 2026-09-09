@@ -832,32 +832,53 @@ socket buffer and land all at once when the app is next opened, which is the
 The hub cannot see that from the transport, so devices prove their own liveness
 instead: the client sends a `ping` from the same thread that would handle a
 notification, which stops the instant that handling would. A device that goes
-quiet is no longer counted as delivered-to, and the hub reaches for a wake-up
-push instead — the frame is still written to the socket, so it is there the
-moment the app thaws, and the push takes itself down once the app has posted
-the real thing. Devices paired against an older build do not send `ping`, and
-are judged the old way rather than pushed to constantly.
+quiet is no longer counted as delivered-to. The frame is still written to the
+socket, so it is there the moment the app thaws. Devices paired against an
+older build do not send `ping`, and are judged the old way rather than treated
+as asleep constantly.
 
-The same timer works in the other direction: a client that has heard nothing
-for several rounds reconnects rather than sitting on a socket that died while
-the phone slept, and a phone returning to the foreground repairs its
-connections instead of asking a dead one for what it missed.
+That leaves the phone itself to notice. Every mechanism the client had for
+doing so was a JavaScript timer, and a timer is measured against a clock
+Android stops advancing once the processor sleeps — so a socket dropped by a
+NAT at two in the morning was not noticed until somebody picked the phone up.
+Three things now supply the missing signal, and none of them involves anybody
+else's servers:
+
+- A **Doze-proof alarm**, which Android releases roughly every nine minutes
+  even while the device is idle. It wakes the app, holds the processor long
+  enough for a handshake, and asks each hub for anything missed. Nine minutes
+  is the floor the OS grants, so that is the worst case for noticing a
+  connection that died overnight — while the phone is awake, the client's own
+  thirty-second keepalive finds it first.
+- A **network callback**, because walking out of the house swaps Wi-Fi for
+  cellular and the socket does not survive it. Nothing announces that; TCP sits
+  on the dead connection for minutes. This recovers in about a second.
+- A **boot receiver**, so a phone that restarts starts watching again on its
+  own. It used to be unable to do more than ask you to open the app, because
+  the connection lived inside the UI; it does not any more.
+
+Exempting the app from **battery optimisation** is what lets it keep network
+access through Doze at all, and the app asks for it — again after a fortnight
+if it is still not granted, since unlike the full-screen permission this one
+stays answered once you answer it.
 
 **The one case this cannot cover:** if you *force-stop* the app from Android
 settings, the system delivers nothing to it at all until you open it again —
-that is an OS rule no app can work around, and only a Firebase Cloud Messaging
-push can wake an app in that state. Adding FCM means a Firebase project and
-sending alert titles through Google, which is the trade this project otherwise
-avoids. If you need coverage for force-stopped phones, pair a machine running
-`notifyjs listen` as an always-on second target.
+that is an OS rule no app can work around, and only a push through Google's own
+channel can wake an app in that state. The Expo transport that once did this
+has been removed: it sent alert titles in the clear through a third party on
+every alert, which is the trade this project exists to avoid. If you need
+coverage for force-stopped phones, pair a machine running `notifyjs listen` as
+an always-on second target.
 
 iOS needs CallKit and PushKit for the equivalent, which is not implemented — the
 in-app call screen is what runs there. The protocol needs no changes for it; the
 `call` frame already carries everything a native call UI wants.
 
-A phone only holds the socket while the app is alive. Turn on push wake-ups
-(above) for alerts that must arrive when the app has been swiped away, or pair
-a machine that stays up (`notifyjs listen`) as a backup target.
+A phone holds the socket while its process is alive, and the foreground
+service, the alarm and the boot receiver are what keep it that way. For the
+cases none of them cover — a force-stopped app, a phone that is off — pair a
+machine that stays up (`notifyjs listen`) as a backup target.
 
 ## Testing
 
