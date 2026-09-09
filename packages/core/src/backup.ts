@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 /**
@@ -37,8 +37,14 @@ const HISTORY_FILE = 'history.jsonl';
 const AUDIT_FILE = 'audit.jsonl';
 
 function readLines(path: string): string[] {
-  if (!existsSync(path)) return [];
-  return readFileSync(path, 'utf8').split('\n').filter((line) => line.trim() !== '');
+  // Read and handle the absence, rather than asking first and then reading:
+  // between the two answers the file can appear or vanish, and the version
+  // that asks is the one that throws on the race.
+  try {
+    return readFileSync(path, 'utf8').split('\n').filter((line) => line.trim() !== '');
+  } catch {
+    return [];
+  }
 }
 
 /**
@@ -57,7 +63,12 @@ export function exportStore(
   options: { history?: boolean } = {},
 ): BackupDocument {
   const file = join(dir, STORE_FILE);
-  if (!existsSync(file)) {
+
+  let raw: string;
+  try {
+    raw = readFileSync(file, 'utf8');
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
     // Worth spelling out: a hub keeps its document in memory and writes it on
     // a timer, so a directory belonging to a hub that has never flushed looks
     // exactly like a directory belonging to no hub at all.
@@ -66,7 +77,7 @@ export function exportStore(
     );
   }
 
-  const store = JSON.parse(readFileSync(file, 'utf8')) as Record<string, unknown>;
+  const store = JSON.parse(raw) as Record<string, unknown>;
   if (!store || typeof store !== 'object' || Array.isArray(store)) {
     throw new Error(`${file} is not a store document`);
   }
@@ -123,11 +134,20 @@ export function importStore(
 
   mkdirSync(dir, { recursive: true, mode: 0o700 });
   const file = join(dir, STORE_FILE);
-  if (existsSync(file) && !options.force) {
+
+  // `wx` fails if the file is already there, which is the same refusal as
+  // asking first - except it cannot be raced. Asking and then writing leaves a
+  // window in which the store appears between the two, and the guard that
+  // exists to stop an accidental overwrite quietly does not.
+  try {
+    writeFileSync(file, JSON.stringify(doc.store), {
+      mode: 0o600,
+      flag: options.force ? 'w' : 'wx',
+    });
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
     throw new Error(`${file} already exists; pass --force to replace it`);
   }
-
-  writeFileSync(file, JSON.stringify(doc.store), { mode: 0o600 });
 
   // Only when the backup carried them. A restore that silently emptied an
   // existing history would be a second, quieter kind of data loss.
