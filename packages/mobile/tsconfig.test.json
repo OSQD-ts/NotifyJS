@@ -1,0 +1,19 @@
+{
+  // The pure logic only. Everything else in this package reaches for React
+  // Native or a native module on import, which `node --test` cannot load - so
+  // emitting the whole package would produce tests that fail on the import
+  // line rather than on anything they assert.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "declaration": false,
+    "outDir": "dist-test",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "rootDir": "src"
+  },
+  // The inherited `include` would pull the whole package back in, and with
+  // it every React Native import this is trying to avoid.
+  "include": [],
+  "files": ["src/state.ts"]
+}

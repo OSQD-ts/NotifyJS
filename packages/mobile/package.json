@@ -8,7 +8,9 @@
     "start": "expo start",
     "android": "expo run:android",
     "ios": "expo run:ios",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "pretest": "tsc -p tsconfig.test.json",
+    "test": "node --test test/*.test.js"
   },
   "dependencies": {
     "@noble/ed25519": "^2.1.0",
