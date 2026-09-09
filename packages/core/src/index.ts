@@ -27,8 +27,17 @@ export {
 export type { AlertSink, CaptureOptions, HttpErrorOptions, LogStreamOptions } from './adapters.js';
 export { FloodControl } from './flood.js';
 export {
+  BACKUP_VERSION,
+  backupSecrets,
+  exportStore,
+  importStore,
+  isBackup,
+  type BackupDocument,
+} from './backup.js';
+export {
   bearerFrom,
   findIngestToken,
+  isLoopback,
   ingestTokenHash,
   mintIngestToken,
   INGEST_TOKEN_PREFIX,

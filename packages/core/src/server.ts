@@ -47,6 +47,7 @@ import { Guard, MessageLimiter, normalizeIp, uniformDelay } from './guard.js';
 import {
   bearerFrom,
   findIngestToken,
+  isLoopback,
   mintIngestToken,
   tokenMay,
   type IngestToken,
@@ -141,6 +142,15 @@ export interface NotifierEvents {
   'device:revoked': [Device];
   notification: [Notification];
   ack: [{ notificationId: string; deviceId: string; action?: string }];
+  /**
+   * Somebody pressed one of a notification's buttons.
+   *
+   * Separate from `ack` because it means something different and an
+   * application will want to act on it rather than record it. Emitted only
+   * once per notification, for an action it published, from a device whose
+   * role carries `notify.act`.
+   */
+  action: [{ notificationId: string; actionId: string; deviceId: string; deviceName: string }];
   call: [CallEvent];
   'heartbeat:missed': [{ heartbeat: Heartbeat; overdueBy: number }];
   'heartbeat:recovered': [Heartbeat];
@@ -1159,7 +1169,17 @@ export class Notifier extends EventEmitter<NotifierEvents> {
     // A bearer token on a cleartext link off-box is readable by every hop it
     // crosses. Loopback is exempt because there is no hop, which is what makes
     // a hub behind a local reverse proxy workable without weakening this.
-    if (!this.opts.tls && !this.opts.ingest.allowInsecure && !isLoopback(ip)) {
+    //
+    // Decided from the socket's own address, never from `clientIp()`. That
+    // helper honours `X-Forwarded-For` when `trustProxy` is set, and that
+    // header is written by the caller - so deriving "is this request on-box"
+    // from it lets a remote caller answer the question itself and skip the
+    // very refusal this is. Worse, it filters the wrong population: behind the
+    // reverse proxy this exemption exists for, an honest client forwards its
+    // real address and is refused, while anyone adding
+    // `X-Forwarded-For: 127.0.0.1` is waved through.
+    const peer = normalizeIp(req.socket.remoteAddress ?? undefined);
+    if (!this.opts.tls && !this.opts.ingest.allowInsecure && !isLoopback(peer)) {
       send(421, {
         error: 'insecure_transport',
         message: 'refusing a bearer token over plain HTTP; use wss/TLS or set ingest.allowInsecure',
@@ -1187,6 +1207,14 @@ export class Notifier extends EventEmitter<NotifierEvents> {
       send(401, { error: 'unauthenticated', message: 'unknown or revoked token' });
       return;
     }
+
+    // A valid token clears the failure counter, exactly as a completed
+    // handshake does. Charging failures without ever crediting a success was
+    // the asymmetry: a publisher with proven-valid credentials went on
+    // accumulating toward a ban, and a ban here is the same ban the WebSocket
+    // handshake honours - so a script left running with a stale token could
+    // lock out a phone that merely shares its NAT.
+    this.guard.succeed(ip);
 
     if (!this.ingestLimiter(token.id).allow()) {
       send(429, { error: 'rate_limited', message: 'too many requests for this token' });
@@ -1220,7 +1248,19 @@ export class Notifier extends EventEmitter<NotifierEvents> {
       return;
     }
 
-    this.store.updateIngestToken(token.id, { lastUsedAt: Date.now() });
+    // Recorded coarsely, and deliberately.
+    //
+    // Every write here marks the store dirty, and a dirty store is rewritten
+    // whole - which is the exact cost this project already went out of its way
+    // to remove from the notification path, where it made sending one alert
+    // proportional to everything ever sent. An ingest token is the busiest
+    // publisher a hub has, so stamping it per request would put that cost back
+    // on the hottest path in the system. Minute resolution is no worse an
+    // answer to "when was this last used" and takes the write out of the loop.
+    const lastUsed = token.lastUsedAt ?? 0;
+    if (Date.now() - lastUsed > INGEST_LAST_USED_RESOLUTION_MS) {
+      this.store.updateIngestToken(token.id, { lastUsedAt: Date.now() });
+    }
 
     try {
       if (kind === 'call') {
@@ -1820,8 +1860,21 @@ export class Notifier extends EventEmitter<NotifierEvents> {
       return;
     }
     const ids = Array.isArray(msg.ids) ? msg.ids.slice(0, 500) : [];
+
+    // An action is a claim about which button was pressed, and it was believed
+    // without being checked. Applications are told to branch on it - the
+    // README's own example does - so an unvalidated value is a way to reach
+    // whatever that branch does: on a notification that declared no actions at
+    // all, with any string, from any device holding `notify.ack`, which the
+    // stock `viewer` role has. Checked against what the notification actually
+    // offered, so the only actions that reach an application are ones it
+    // published itself.
+    const claimed = typeof msg.action === 'string' ? msg.action.slice(0, 128) : undefined;
+    const offered = claimed ? this.declaredActions(ids) : undefined;
+
     for (const id of ids) {
-      this.emit('ack', { notificationId: id, deviceId: session.device.id, action: msg.action });
+      const action = claimed ? this.takeAction(session, id, claimed, offered) : undefined;
+      this.emit('ack', { notificationId: id, deviceId: session.device.id, action });
       // One acknowledgement is enough: a human has seen it, so stop retrying.
       const timer = this.ackWaiters.get(id);
       if (timer) {
@@ -1839,6 +1892,76 @@ export class Notifier extends EventEmitter<NotifierEvents> {
         if (updated) session.device = updated;
       }
     }
+  }
+
+  /**
+   * Decides whether a claimed action actually happened, and records it.
+   *
+   * Four things have to hold, and each rules out a different way of getting
+   * something to run that nobody asked for. The feature has to be on, because
+   * a hub that never wanted buttons should not have them. The role has to
+   * carry `notify.act`, which no stock role does - `notify.ack` is not enough,
+   * and the stock `viewer` has that. The notification has to have published
+   * the action, so an application only ever sees strings it chose itself. And
+   * nobody can have taken it already: for an action that restarts something,
+   * two devices pressing the same button is the difference between a fix and
+   * an outage.
+   *
+   * Recorded on the notification rather than in memory, so a restart does not
+   * make an action available for a second time.
+   */
+  private takeAction(
+    session: Session,
+    id: string,
+    claimed: string,
+    offered: Map<string, Set<string>> | undefined,
+  ): string | undefined {
+    const refuse = (reason: string): undefined => {
+      this.audit('ack.action.rejected', {
+        deviceId: session.deviceId,
+        detail: { id, action: claimed, reason },
+      });
+      return undefined;
+    };
+
+    if (!this.opts.actions.enabled) return refuse('actions are not enabled');
+    if (!session.role || !hasCapability(session.role, 'notify.act')) {
+      return refuse('role cannot act');
+    }
+    if (!offered?.get(id)?.has(claimed)) return refuse('the notification did not offer it');
+
+    const n = this.store.history().find((entry) => entry.id === id);
+    if (!n) return refuse('unknown notification');
+    if (n.actionTaken) return refuse(`already taken by ${n.actionTaken.deviceId}`);
+
+    n.actionTaken = { id: claimed, deviceId: session.device!.id, at: Date.now() };
+    this.store.touchHistory();
+
+    this.audit('ack.action', { deviceId: session.device!.id, detail: { id, action: claimed } });
+    this.emit('action', {
+      notificationId: id,
+      actionId: claimed,
+      deviceId: session.device!.id,
+      deviceName: session.device!.name,
+    });
+    return claimed;
+  }
+
+  /**
+   * The action ids each of these notifications actually published.
+   *
+   * Built once per acknowledgement rather than per id: history is bounded, but
+   * a device may acknowledge up to five hundred ids in one frame and scanning
+   * the log for each of them would make that frame quadratic.
+   */
+  private declaredActions(ids: string[]): Map<string, Set<string>> {
+    const wanted = new Set(ids);
+    const found = new Map<string, Set<string>>();
+    for (const n of this.store.history()) {
+      if (!wanted.has(n.id) || !n.actions?.length) continue;
+      found.set(n.id, new Set(n.actions.map((a) => a.id)));
+    }
+    return found;
   }
 
   /** A device offering (or withdrawing) a wake-up token for itself. */
@@ -2384,6 +2507,9 @@ function webPushTargets(
 /** Stamped in at bundle time; falls back for source checkouts. */
 const NOTIFYJS_VERSION = process.env.NOTIFYJS_VERSION ?? '0.1.0';
 
+/** How precisely an ingest token's last use is recorded. See `handleIngest`. */
+const INGEST_LAST_USED_RESOLUTION_MS = 60_000;
+
 const MAX_ACK_RETRIES = 20;
 
 /** A pairing code is meant to be redeemed now, not next week. */
@@ -2572,18 +2698,6 @@ function sanitizeChannel(value: unknown): string {
 }
 
 /** IPv4 or IPv6 literal, for deciding whether a proxy header is believable. */
-/**
- * Whether an address is this machine.
- *
- * Loopback is the one case where a bearer token on a cleartext connection is
- * not exposed to anything: there is no hop between the caller and the hub. It
- * is what lets a reverse proxy terminate TLS in front of a hub bound to
- * localhost without having to relax the rule for everybody.
- */
-function isLoopback(ip: string): boolean {
-  return ip === '127.0.0.1' || ip === '::1' || ip.startsWith('127.');
-}
-
 /** A JSON object and nothing else - arrays and null are not payloads. */
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);

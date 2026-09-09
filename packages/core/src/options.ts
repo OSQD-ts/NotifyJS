@@ -75,6 +75,25 @@ export interface FloodOptions {
 }
 
 /**
+ * Acting on a notification, off by default.
+ *
+ * A notification can carry buttons, and a device pressing one produces an
+ * `action` event for the application that published it. That is a far bigger
+ * thing than an acknowledgement: acknowledging says a person saw an alert,
+ * acting asks the system that raised it to do something. So it is opt-in, it
+ * needs its own capability that no stock role carries, and each action can be
+ * taken once.
+ *
+ * The hub never fetches anything a notification names. An action is delivered
+ * as an event and the application decides what it means - anything else would
+ * be a request forgery primitive with the callback chosen by whoever could
+ * publish.
+ */
+export interface ActionsOptions {
+  enabled: boolean;
+}
+
+/**
  * Publishing over HTTP, off by default and deliberately so.
  *
  * Every other publisher proves itself by signing a per-connection nonce, and
@@ -223,6 +242,8 @@ export interface NotifierOptions {
   flood?: Partial<FloodOptions>;
   /** Publishing over HTTP with a bearer token. See `IngestOptions`. */
   ingest?: Partial<IngestOptions>;
+  /** Acting on a notification's buttons. See `ActionsOptions`. */
+  actions?: Partial<ActionsOptions>;
   /** Encrypted pushes to browsers, including iOS. See `WebPushOptions`. */
   webPush?: Partial<WebPushOptions>;
   security?: Partial<SecurityOptions>;
@@ -240,6 +261,7 @@ export interface ResolvedOptions
       | 'dashboardDir'
       | 'flood'
       | 'ingest'
+      | 'actions'
       | 'webPush'
       | 'publicUrl'
       | 'metricsToken'
@@ -253,6 +275,7 @@ export interface ResolvedOptions
   security: SecurityOptions;
   flood: FloodOptions;
   ingest: IngestOptions;
+  actions: ActionsOptions;
   webPush: WebPushOptions;
   deviceWatchdog: DeviceWatchdogOptions;
   logger: (line: string, meta?: Record<string, unknown>) => void;
@@ -300,6 +323,7 @@ export function resolveOptions(o: NotifierOptions = {}): ResolvedOptions {
       alwaysDeliver: ['critical'],
       ...o.flood,
     },
+    actions: { enabled: false, ...o.actions },
     ingest: {
       enabled: false,
       allowInsecure: false,

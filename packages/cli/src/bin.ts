@@ -4,11 +4,18 @@ import { networkInterfaces } from 'node:os';
 import { createInterface } from 'node:readline/promises';
 import WebSocket from 'ws';
 
-import { Notifier, type Severity } from '@osqd/notifyjs';
+import {
+  Notifier,
+  backupSecrets,
+  exportStore,
+  importStore,
+  isBackup,
+  type Severity,
+} from '@osqd/notifyjs';
 import { NotifyClient, isPairingCodeValid } from '@osqd/notifyjs-protocol';
 import { nodeCrypto } from '@osqd/notifyjs-protocol/node';
 
-import { readFileSync } from 'node:fs';
+import { readFileSync, writeFileSync } from 'node:fs';
 import { fileStorage, defaultPath } from './storage.js';
 import { generateSelfSigned } from './cert.js';
 import { apply as applyUpdate, check as checkUpdate } from './selfupdate.js';
@@ -25,6 +32,8 @@ Usage
   notifyjs devices                List devices known to the hub
   notifyjs code [options]         Mint a pairing code (requires an admin device)
   notifyjs token <cmd> [options]  Manage HTTP publishing tokens (create/list/revoke)
+  notifyjs export [options]       Write this hub's state to a backup file
+  notifyjs import --from <file>   Restore a hub from a backup file
   notifyjs cert [options]         Generate a self-signed TLS certificate
   notifyjs watch <name> [options] Expect a check-in, and alert when it stops
   notifyjs checkin <name>         Record a check-in for a watched job
@@ -70,6 +79,18 @@ send / call options
   --channel <name>         Channel to publish on (default default)
   --body <text>            Longer body text
 
+token options
+  --role <name>            Role a created token publishes with (default viewer)
+  --label <text>           What it is for, so two tokens can be told apart
+  --id <id>                Which token to revoke
+
+export / import options
+  --data <dir>             Hub state directory (default .notifyjs)
+  --out <file>             Write the backup here rather than to stdout
+  --from <file>            Backup to restore
+  --history                Include the alert and audit logs
+  --force                  Replace an existing store when restoring
+
 update options
   --check                  Report what is available without installing
   --prerelease             Include the rolling "latest" build from main
@@ -102,6 +123,10 @@ async function main(): Promise<void> {
       return placeCall(rest);
     case 'devices':
       return devices(rest);
+    case 'export':
+      return await backup(['export', ...rest]);
+    case 'import':
+      return await backup(['import', ...rest]);
     case 'token':
       return await token(rest);
     case 'code':
@@ -170,6 +195,13 @@ async function serve(argv: string[]): Promise<void> {
     name: values['hub-name'],
     storeDir: values.data,
     dashboard: values.dashboard,
+    // Publishing over HTTP. Off unless asked for: it is the one way into this
+    // hub that does not sign a per-connection nonce, so it should never appear
+    // because somebody accepted a default.
+    ingest: {
+      enabled: values.ingest,
+      allowInsecure: values['ingest-insecure'],
+    },
     webPush: {
       enabled: values['web-push'],
       ...(values['web-push-subject'] ? { subject: values['web-push-subject'] } : {}),
@@ -517,6 +549,65 @@ async function devices(argv: string[]): Promise<void> {
  * hub holds the store in memory and would write straight over a second
  * process's changes.
  */
+/**
+ * Copies a hub's identity out of, and back into, a directory.
+ *
+ * Offline on purpose. A restorable backup contains the hub's secrets, and a
+ * running hub holds this document in memory - so exporting over the protocol
+ * would hand secrets to whoever holds an admin credential, and importing into
+ * a live hub would be written straight back over.
+ */
+async function backup(argv: string[]): Promise<void> {
+  const sub = argv[0] && !argv[0].startsWith('-') ? argv.shift() : 'export';
+  const { values } = common(argv, {
+    data: { type: 'string' },
+    out: { type: 'string' },
+    from: { type: 'string' },
+    history: { type: 'boolean' },
+    force: { type: 'boolean' },
+  });
+  // The same default `serve` uses, so `notifyjs export` next to a hub started
+  // with no arguments finds it.
+  const dir = (values.data as string) ?? '.notifyjs';
+
+  if (sub === 'export') {
+    const doc = exportStore(dir, { history: values.history as boolean });
+    const json = JSON.stringify(doc, null, 2);
+    const out = values.out as string | undefined;
+    if (!out) {
+      process.stdout.write(json + '\n');
+    } else {
+      // 0600, and said out loud: this file is enough to impersonate the hub.
+      writeFileSync(out, json + '\n', { mode: 0o600 });
+      process.stderr.write(
+        `wrote ${out}\n\nThis file contains:\n` +
+          backupSecrets(doc).map((s) => `  - ${s}\n`).join('') +
+          `\nKeep it as you would a private key.\n`,
+      );
+    }
+    return;
+  }
+
+  if (sub !== 'import') throw new Error(`unknown backup command: ${sub}`);
+
+  const from = values.from as string | undefined;
+  if (!from) throw new Error('which file? pass --from <file>');
+  const doc = JSON.parse(readFileSync(from, 'utf8')) as unknown;
+  if (!isBackup(doc)) throw new Error(`${from} is not a NotifyJS backup`);
+
+  const { restoredHistory, restoredAudit } = importStore(dir, doc, {
+    force: values.force as boolean,
+  });
+  process.stdout.write(
+    `restored into ${dir}\n` +
+      (restoredHistory || restoredAudit
+        ? `  ${restoredHistory} history entries, ${restoredAudit} audit entries\n`
+        : '  store only (the backup carried no history)\n') +
+      `\nStart the hub now. Devices paired against this store keep working;\n` +
+      `nothing needs re-pairing.\n`,
+  );
+}
+
 async function token(argv: string[]): Promise<void> {
   const sub = argv[0] && !argv[0].startsWith('-') ? argv.shift() : 'list';
   const { values, options } = common(argv, {

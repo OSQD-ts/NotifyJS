@@ -429,7 +429,9 @@ new Notifier({
   metrics: true,             // serve Prometheus counters at /metrics
   metricsToken: undefined,   // require a bearer token on /metrics
   flood: { enabled: true, windowMs: 60_000, burst: 5 },
-  push: { enabled: false },
+  webPush: { enabled: true, includeBody: false },
+  ingest: { enabled: false }, // publishing over HTTP; see below
+  actions: { enabled: false }, // notification buttons; see below
   security: {
     maxConnectionsPerIp: 10, // raise this if devices share a NAT
     maxFailuresBeforeBan: 5,
@@ -473,17 +475,26 @@ notify.on('banned', ({ ip, until }) => alertSecurity(ip));
 ## Reaching a phone whose app is closed
 
 A device receives while its socket is open, which on a phone means while the
-app is running. Opt in to wake-ups for the rest of the time:
+app is running. Three things now cover the rest of the time, and none of them
+involves a third party reading your alerts.
 
-```ts
-new Notifier({ push: { enabled: true } });
-```
+The **foreground service** keeps the app's process alive off screen, so the
+socket survives. A **Doze-proof alarm** and a **network callback** give it a
+reason to run when Android has stopped scheduling its timers — a socket
+dropped by a NAT overnight is noticed within about nine minutes, and a Wi-Fi
+to cellular handover recovers in about a second. And after a reboot the
+**boot receiver** starts it again on its own, with nobody opening the app.
 
-The phone registers a token after pairing, and the hub wakes devices that are
-not connected. Alert titles pass through Expo and then Apple or Google in the
-clear, which is why it is off by default and the body is withheld unless you
-pass `includeBody: true`. Point `endpoint` at your own relay to keep it
-in-house.
+For a device that is genuinely not running — swiped away, force-stopped —
+Web Push is the wake-up, and it is described below.
+
+> **Expo push was removed.** It sent your notification's title, and its body
+> if you allowed it, in the clear through `exp.host` and then Apple or Google,
+> on every alert. It was off by default, which is an honest way to ship a bad
+> bargain but does not make it a good one. If you are upgrading, `push: {}` is
+> no longer a valid option and a phone still offering an Expo token has it
+> refused and cleared rather than stored — a token nothing can deliver to
+> would leave a device reading as reachable while silently receiving nothing.
 
 ## The dashboard as a real client, and iPhones
 
@@ -503,8 +514,8 @@ tap *Enable alerts*. That is the whole setup: no App Store, no Apple Developer
 account, no native build. Lock-screen calls still need the Android app; alerts
 do not.
 
-Unlike the Expo path above, this one is **on by default**, because it is a
-different bargain. The hub encrypts each payload to a key the browser
+This is **on by default**, which nothing else that leaves the hub is, and the
+payload is why. The hub encrypts each payload to a key the browser
 generated ([RFC 8291](https://www.rfc-editor.org/rfc/rfc8291)) and signs the
 request with its own key ([RFC 8292](https://www.rfc-editor.org/rfc/rfc8292)):
 Mozilla, Google and Apple forward bytes they cannot read. It is the browser's
@@ -518,6 +529,115 @@ identifying you; RFC 8292 requires one, and Apple rejects a push without it.
 The keypair is generated on first use and kept in `store.json`. Do not delete
 it: a browser stores the key inside the subscription it created, so a new one
 silently stops every existing subscription from delivering.
+
+## Publishing over HTTP
+
+Everything above publishes by speaking the protocol: pair a device, sign the
+hub's nonce, send. That is the stronger scheme and it stays the default — but
+it means the only things that can page you are programs written against this
+project. Alertmanager, Grafana, Sentry, an uptime checker and a line of `curl`
+in a cron job all speak one protocol between them, and it is not this one.
+
+```ts
+new Notifier({ ingest: { enabled: true } });
+```
+
+```
+notifyjs serve --ingest
+notifyjs token create --role oncall --label ci   # prints the token once
+```
+
+```bash
+curl -X POST https://hub.example.com/api/notify \
+  -H "Authorization: Bearer njs_..." \
+  -H 'content-type: application/json' \
+  -d '{"title":"Disk 91%","severity":"warning","channel":"infra"}'
+```
+
+`POST /api/call` takes `{ "message": ... }` and holds the request open for the
+whole ring, so the response tells you whether a person actually answered.
+
+The token is treated as the weaker credential it is. Only its hash is stored.
+It carries a role rather than being all-powerful, so it can never do more than
+a device in the same role — and minting one for a role you do not hold is
+refused, because that is privilege escalation with an extra step. Failed
+attempts are charged against the IP by the same limiter that meters
+handshakes.
+
+Two refusals worth knowing. The feature is off until you turn it on, and
+answers `404` rather than `403` while it is off, because a feature nobody
+enabled should not confirm it exists. And a bearer token on a cleartext link
+is readable by every hop it crosses, so a non-loopback request over plain HTTP
+is refused with `421` unless you pass `--ingest-insecure`. Terminating TLS in
+a reverse proxy in front of a hub bound to localhost is the intended shape.
+
+`notifyjs token list` shows what can publish and when each token was last
+used; `notifyjs token revoke --id <id>` stops one immediately.
+
+## Backing a hub up, and moving it
+
+Losing the store directory is the one unrecoverable failure here. The
+`serverId` is part of every auth signature, so a hub that comes back with a
+new one is a hub every paired device fails to authenticate against at once,
+and the only way out is re-pairing every phone by hand.
+
+```
+notifyjs export --data .notifyjs --out hub-backup.json   # stop the hub first
+notifyjs import --from hub-backup.json --data /new/path
+```
+
+A device paired against the original authenticates against the restored hub
+with nothing re-paired. Add `--history` to carry the alert log across as well;
+without it you get the identity and the devices, which is what moving a hub
+actually needs.
+
+Both commands read and write files directly, so **stop the hub first**: a
+running one holds the document in memory, would write over an import, and has
+not necessarily flushed what an export would read. Restoring over an existing
+store is refused without `--force`.
+
+The file is written `0600` and the command says what is in it, because a
+backup that can restore a hub necessarily contains its secrets — the VAPID
+private key above all. Treat it as you would a private key.
+
+## Acting on an alert
+
+A notification can carry buttons, and a device pressing one produces an event
+for the application that published it:
+
+```ts
+new Notifier({ actions: { enabled: true } });
+
+await notify.error({
+  title: 'Queue backed up',
+  actions: [{ id: 'drain', label: 'Drain it', style: 'danger' }],
+});
+
+notify.on('action', ({ actionId, notificationId, deviceName }) => {
+  if (actionId === 'drain') drainTheQueue();
+});
+```
+
+**The hub never fetches anything a notification names.** An action arrives as
+an event and your code decides what it means. A button whose target came from
+the alert would be a request-forgery primitive with the callback chosen by
+whoever could publish, which is the opposite of what this is for.
+
+Four things gate it, and each rules out a different way of getting something to
+run that nobody asked for:
+
+- It is **off until you enable it**. A hub that never wanted buttons has none.
+- The role needs **`notify.act`**, which no stock role carries — `notify.ack`
+  is not enough, and the stock `viewer` has that. It is a privileged
+  capability, so it cannot be granted by somebody who does not hold it.
+- The action must be one the notification **actually published**, so your code
+  only ever sees strings it chose itself.
+- Each action can be taken **once**. It is recorded on the notification rather
+  than in memory, so a restart does not offer it again — for an action that
+  restarts something, two devices pressing the same button is the difference
+  between a fix and an outage.
+
+Anything refused is written to the audit log with the reason.
 
 ## Snoozing
 
@@ -752,32 +872,53 @@ socket buffer and land all at once when the app is next opened, which is the
 The hub cannot see that from the transport, so devices prove their own liveness
 instead: the client sends a `ping` from the same thread that would handle a
 notification, which stops the instant that handling would. A device that goes
-quiet is no longer counted as delivered-to, and the hub reaches for a wake-up
-push instead — the frame is still written to the socket, so it is there the
-moment the app thaws, and the push takes itself down once the app has posted
-the real thing. Devices paired against an older build do not send `ping`, and
-are judged the old way rather than pushed to constantly.
+quiet is no longer counted as delivered-to. The frame is still written to the
+socket, so it is there the moment the app thaws. Devices paired against an
+older build do not send `ping`, and are judged the old way rather than treated
+as asleep constantly.
 
-The same timer works in the other direction: a client that has heard nothing
-for several rounds reconnects rather than sitting on a socket that died while
-the phone slept, and a phone returning to the foreground repairs its
-connections instead of asking a dead one for what it missed.
+That leaves the phone itself to notice. Every mechanism the client had for
+doing so was a JavaScript timer, and a timer is measured against a clock
+Android stops advancing once the processor sleeps — so a socket dropped by a
+NAT at two in the morning was not noticed until somebody picked the phone up.
+Three things now supply the missing signal, and none of them involves anybody
+else's servers:
+
+- A **Doze-proof alarm**, which Android releases roughly every nine minutes
+  even while the device is idle. It wakes the app, holds the processor long
+  enough for a handshake, and asks each hub for anything missed. Nine minutes
+  is the floor the OS grants, so that is the worst case for noticing a
+  connection that died overnight — while the phone is awake, the client's own
+  thirty-second keepalive finds it first.
+- A **network callback**, because walking out of the house swaps Wi-Fi for
+  cellular and the socket does not survive it. Nothing announces that; TCP sits
+  on the dead connection for minutes. This recovers in about a second.
+- A **boot receiver**, so a phone that restarts starts watching again on its
+  own. It used to be unable to do more than ask you to open the app, because
+  the connection lived inside the UI; it does not any more.
+
+Exempting the app from **battery optimisation** is what lets it keep network
+access through Doze at all, and the app asks for it — again after a fortnight
+if it is still not granted, since unlike the full-screen permission this one
+stays answered once you answer it.
 
 **The one case this cannot cover:** if you *force-stop* the app from Android
 settings, the system delivers nothing to it at all until you open it again —
-that is an OS rule no app can work around, and only a Firebase Cloud Messaging
-push can wake an app in that state. Adding FCM means a Firebase project and
-sending alert titles through Google, which is the trade this project otherwise
-avoids. If you need coverage for force-stopped phones, pair a machine running
-`notifyjs listen` as an always-on second target.
+that is an OS rule no app can work around, and only a push through Google's own
+channel can wake an app in that state. The Expo transport that once did this
+has been removed: it sent alert titles in the clear through a third party on
+every alert, which is the trade this project exists to avoid. If you need
+coverage for force-stopped phones, pair a machine running `notifyjs listen` as
+an always-on second target.
 
 iOS needs CallKit and PushKit for the equivalent, which is not implemented — the
 in-app call screen is what runs there. The protocol needs no changes for it; the
 `call` frame already carries everything a native call UI wants.
 
-A phone only holds the socket while the app is alive. Turn on push wake-ups
-(above) for alerts that must arrive when the app has been swiped away, or pair
-a machine that stays up (`notifyjs listen`) as a backup target.
+A phone holds the socket while its process is alive, and the foreground
+service, the alarm and the boot receiver are what keep it that way. For the
+cases none of them cover — a force-stopped app, a phone that is off — pair a
+machine that stays up (`notifyjs listen`) as a backup target.
 
 ## Testing
 

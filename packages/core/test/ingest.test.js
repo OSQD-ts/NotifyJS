@@ -4,7 +4,7 @@ import { rmSync, mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { Notifier, INGEST_TOKEN_PREFIX } from '../dist/index.js';
+import { Notifier, INGEST_TOKEN_PREFIX, isLoopback } from '../dist/index.js';
 
 let hub;
 let storeDir;
@@ -160,4 +160,119 @@ test('GET is refused, and the routes vanish when ingest is off', async () => {
 
 test('a token cannot be minted into a role that does not exist', () => {
   assert.throws(() => hub.createIngestToken({ role: 'nonexistent' }), /unknown role/);
+});
+
+test('a busy publisher does not rewrite the store on every request', async () => {
+  const busy = hub.createIngestToken({ role: 'admin', label: 'busy' });
+
+  await post('/api/notify', { title: 'first' }, busy.token);
+  const first = hub.ingestTokens().find((t) => t.id === busy.id).lastUsedAt;
+  assert.ok(first > 0, 'the first use is recorded');
+
+  // Every write marks the store dirty and a dirty store is rewritten whole,
+  // so stamping this per request would put a full rewrite on the busiest path
+  // the hub has.
+  for (let i = 0; i < 5; i += 1) {
+    await post('/api/notify', { title: `burst ${i}` }, busy.token);
+  }
+  const after = hub.ingestTokens().find((t) => t.id === busy.id).lastUsedAt;
+  assert.equal(after, first, 'a burst inside the resolution window writes once');
+});
+
+test('a forwarded header cannot talk the hub out of requiring TLS', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'notifyjs-xff-'));
+  // `trustProxy` is what the README tells operators to set behind a reverse
+  // proxy, and it makes `X-Forwarded-For` decide `clientIp()`. The transport
+  // check must not be one of the things that header gets to decide.
+  const proxied = new Notifier({
+    port: 0,
+    storeDir: dir,
+    dashboard: false,
+    logger: false,
+    ingest: { enabled: true },
+    security: { trustProxy: true, uniformFailureMs: 5, maxFailuresBeforeBan: 1000 },
+  });
+  await proxied.start();
+  const issued = proxied.createIngestToken({ role: 'admin', label: 'proxied' });
+
+  try {
+    // The request really is on loopback here, so it is allowed either way -
+    // this only shows the endpoint is reachable in this configuration.
+    const direct = await fetch(`${proxied.dashboardUrl}/api/notify`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        authorization: `Bearer ${issued.token}`,
+      },
+      body: JSON.stringify({ title: 'from the socket' }),
+    });
+    assert.equal(direct.status, 202);
+
+    // Claiming to be somewhere else must not change the answer either way:
+    // the decision comes from the socket, which is still loopback.
+    const spoofed = await fetch(`${proxied.dashboardUrl}/api/notify`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        authorization: `Bearer ${issued.token}`,
+        'x-forwarded-for': '203.0.113.9',
+      },
+      body: JSON.stringify({ title: 'claims to be remote' }),
+    });
+    assert.equal(spoofed.status, 202, 'the header does not make a local request remote');
+
+    // And the inverse, which is the one that matters: a caller claiming to be
+    // loopback must not be able to skip the cleartext refusal. Verified
+    // through the helper the handler now uses, since a genuinely off-box
+    // request cannot be made from inside this test.
+    assert.equal(isLoopback('127.0.0.1'), true);
+    assert.equal(isLoopback('::1'), true);
+    assert.equal(isLoopback('203.0.113.9'), false, 'a forwarded claim is not loopback');
+  } finally {
+    await proxied.stop();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a valid token clears the failure counter it would otherwise ban on', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'notifyjs-ban-'));
+  const strict = new Notifier({
+    port: 0,
+    storeDir: dir,
+    dashboard: false,
+    logger: false,
+    ingest: { enabled: true },
+    // Ban on the third failure, so the arithmetic below is easy to follow.
+    security: { uniformFailureMs: 1, maxFailuresBeforeBan: 3, failureWindowMs: 60_000 },
+  });
+  await strict.start();
+  const good = strict.createIngestToken({ role: 'admin', label: 'good' }).token;
+  const url = `${strict.dashboardUrl}/api/notify`;
+
+  const attempt = async (bearer) =>
+    (
+      await fetch(url, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', authorization: `Bearer ${bearer}` },
+        body: JSON.stringify({ title: 'x' }),
+      })
+    ).status;
+
+  try {
+    assert.equal(await attempt('njs_wrong'), 401);
+    assert.equal(await attempt('njs_wrong'), 401);
+    // A success in between must reset the count, the way a completed
+    // handshake does - otherwise a publisher holding a valid token still walks
+    // into a ban, and that ban locks out every device sharing the address.
+    assert.equal(await attempt(good), 202);
+    assert.equal(await attempt('njs_wrong'), 401);
+    assert.equal(await attempt('njs_wrong'), 401);
+
+    // Still serving the valid token: without the reset the two failures either
+    // side of the success would have added up to a ban by now.
+    assert.equal(await attempt(good), 202, 'a valid token still works');
+  } finally {
+    await strict.stop();
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

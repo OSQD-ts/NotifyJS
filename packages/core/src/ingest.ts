@@ -118,3 +118,19 @@ export function findIngestToken(
 export function tokenMay(role: Role | undefined, capability: Capability): boolean {
   return role ? hasCapability(role, capability) : false;
 }
+
+/**
+ * Whether an address is this machine.
+ *
+ * Loopback is the one case where a bearer token on a cleartext connection is
+ * not exposed to anything: there is no hop between the caller and the hub. It
+ * is what lets a reverse proxy terminate TLS in front of a hub bound to
+ * localhost without having to relax the rule for everybody.
+ *
+ * Must only ever be given a socket's own address. Passing it a value derived
+ * from `X-Forwarded-For` would let a caller decide for itself whether it is
+ * on-box, which is the whole thing the rule above is there to stop.
+ */
+export function isLoopback(ip: string): boolean {
+  return ip === '127.0.0.1' || ip === '::1' || ip.startsWith('127.');
+}

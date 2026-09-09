@@ -38,6 +38,15 @@ export function coerceSeverity(value: unknown, fallback: Severity = 'info'): Sev
 export const CAPABILITIES = [
   'notify.receive',
   'notify.ack',
+  /**
+   * Pressing one of a notification's action buttons.
+   *
+   * Separate from `notify.ack` deliberately. Acknowledging says a person saw
+   * an alert; acting on one asks the system that raised it to *do* something,
+   * and those do not deserve the same permission. No stock role carries this -
+   * `admin` implies it, and anything else has to be granted on purpose.
+   */
+  'notify.act',
   'notify.send',
   'call.receive',
   'call.place',
@@ -161,6 +170,15 @@ export interface Notification {
   /** Arbitrary structured payload passed through untouched to clients. */
   data?: Record<string, unknown>;
   actions?: NotificationAction[];
+  /**
+   * Set once somebody has pressed one of `actions`.
+   *
+   * Recorded on the notification rather than held in memory so it survives a
+   * restart, and so a second device cannot take the same action after the
+   * first already did - which, for an action that restarts something, is the
+   * difference between a fix and an outage.
+   */
+  actionTaken?: { id: string; deviceId: string; at: number };
   /** Keep re-delivering until some device acknowledges it. */
   requireAck?: boolean;
   /** Milliseconds after `ts` past which the notification is dropped undelivered. */

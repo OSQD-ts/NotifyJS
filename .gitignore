@@ -25,3 +25,17 @@ packages/desktop/assets/
 
 # electron-builder's output: installers are release artifacts, not sources.
 packages/desktop/release/
+
+# Local agent instructions
+CLAUDE.md
+.claude/
+
+# Emitted only so `node --test` can load the mobile package's pure logic.
+packages/mobile/dist-test/
+
+# tsc pointed at this package without an explicit `include` emits JavaScript
+# next to every source file it can reach. That output is not the app - Metro
+# bundles the TypeScript - and committing it once was enough.
+packages/mobile/App.js
+packages/mobile/src/*.js
+packages/mobile/modules/notifyjs-call/index.js

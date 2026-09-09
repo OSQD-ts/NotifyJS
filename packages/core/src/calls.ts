@@ -272,12 +272,19 @@ export class CallOrchestrator {
   /** A ringing device dropped off the network; treat it as an unanswered leg. */
   dropped(deviceId: string): void {
     for (const call of [...this.active.values()]) {
-      if (!call.ringing.has(deviceId)) continue;
+      // The device that answered is checked first, and deliberately before the
+      // ringing test: `answer()` empties `ringing`, so an answerer never
+      // appears in it and this branch used to sit below a guard that always
+      // skipped it. The case it exists for is the real one - a phone
+      // force-quit mid-call never sends `call.ended` - and with the check in
+      // the wrong order the record was left for the fifteen-minute reaper to
+      // find instead of being released the moment the socket closed.
       if (call.answeredBy?.deviceId === deviceId) {
         this.clearTimer(call);
         this.active.delete(call.request.id);
         continue;
       }
+      if (!call.ringing.has(deviceId)) continue;
       this.decline(call.request.id, deviceId);
     }
   }

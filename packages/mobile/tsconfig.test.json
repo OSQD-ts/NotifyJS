@@ -1,0 +1,27 @@
+{
+  // Standalone, and deliberately not extending `./tsconfig.json`.
+  //
+  // That config extends `expo/tsconfig.base`, which only resolves once this
+  // package's own dependencies are installed - and they are not installed in
+  // the job that runs the tests, because `packages/mobile` is not a workspace
+  // and the root `npm ci` knows nothing about it. Inheriting it made
+  // `npm test` fail at the repository root in CI while passing on a machine
+  // that happened to have run the app.
+  //
+  // Nothing here needs Expo's settings anyway: the one file this compiles
+  // imports types and nothing else.
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022"],
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "strict": true,
+    "skipLibCheck": true,
+    "noEmit": false,
+    "declaration": false,
+    "outDir": "dist-test",
+    "rootDir": "src"
+  },
+  "include": [],
+  "files": ["src/state.ts"]
+}

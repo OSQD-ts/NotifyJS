@@ -128,6 +128,8 @@ export class Store {
   private readonly auditFile: string;
   private saveTimer: NodeJS.Timeout | undefined;
   private dirty = false;
+  /** Stops a failed final write from arming a timer nothing will service. */
+  private closed = false;
 
   /**
    * History and audit are append-only logs, not part of the JSON document.
@@ -302,12 +304,26 @@ export class Store {
     }
 
     if (!this.dirty) return;
-    this.dirty = false;
     const tmp = `${this.file}.tmp`;
-    // Write-then-rename: a crash mid-write leaves the previous store intact
-    // rather than a half-serialised file that would fail to parse on boot.
-    writeFileSync(tmp, JSON.stringify(this.data), { mode: 0o600 });
-    renameSync(tmp, this.file);
+    try {
+      // Write-then-rename: a crash mid-write leaves the previous store intact
+      // rather than a half-serialised file that would fail to parse on boot.
+      writeFileSync(tmp, JSON.stringify(this.data), { mode: 0o600 });
+      renameSync(tmp, this.file);
+      // Cleared only once it is actually on disk. Clearing it first meant a
+      // failed write was never retried: the store went on reporting itself
+      // clean while memory and disk disagreed, and a device paired in that
+      // window was gone after a restart.
+      this.dirty = false;
+    } catch {
+      // The two writes above this one already refuse to take the process down
+      // over a failed append. This one had no such guard, and it is reached
+      // from a `setTimeout`, so a full disk or a read-only mount raised an
+      // uncaught exception from a timer and killed the hub - the one outcome a
+      // pager must not have. Left dirty and tried again instead; the moment
+      // the disk comes back, the pending state is written.
+      if (!this.closed) this.scheduleDrain();
+    }
   }
 
   /** Appends buffered lines in one syscall, or drops them if the disk is gone. */
@@ -335,6 +351,7 @@ export class Store {
   close(): void {
     if (this.saveTimer) clearTimeout(this.saveTimer);
     this.saveTimer = undefined;
+    this.closed = true;
     this.flush();
   }
 

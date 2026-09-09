@@ -41,3 +41,15 @@ android {
     abortOnError false
   }
 }
+
+dependencies {
+  // `useCoreDependencies()` brings in expo-modules-core, which is enough for a
+  // module that only speaks the Expo API. This one also extends
+  // HeadlessJsTaskService so the watch service can start JavaScript itself,
+  // and that class lives in React Native proper.
+  //
+  // compileOnly, not implementation: the app already ships React Native, and
+  // packaging a second copy into this library is how you get duplicate-class
+  // failures at merge time.
+  compileOnly 'com.facebook.react:react-android'
+}
