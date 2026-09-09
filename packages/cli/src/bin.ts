@@ -183,6 +183,13 @@ async function serve(argv: string[]): Promise<void> {
     name: values['hub-name'],
     storeDir: values.data,
     dashboard: values.dashboard,
+    // Publishing over HTTP. Off unless asked for: it is the one way into this
+    // hub that does not sign a per-connection nonce, so it should never appear
+    // because somebody accepted a default.
+    ingest: {
+      enabled: values.ingest,
+      allowInsecure: values['ingest-insecure'],
+    },
     webPush: {
       enabled: values['web-push'],
       ...(values['web-push-subject'] ? { subject: values['web-push-subject'] } : {}),

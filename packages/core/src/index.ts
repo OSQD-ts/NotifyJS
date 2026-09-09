@@ -37,6 +37,7 @@ export {
 export {
   bearerFrom,
   findIngestToken,
+  isLoopback,
   ingestTokenHash,
   mintIngestToken,
   INGEST_TOKEN_PREFIX,

@@ -4,7 +4,7 @@ import { rmSync, mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { Notifier, INGEST_TOKEN_PREFIX } from '../dist/index.js';
+import { Notifier, INGEST_TOKEN_PREFIX, isLoopback } from '../dist/index.js';
 
 let hub;
 let storeDir;
@@ -177,4 +177,59 @@ test('a busy publisher does not rewrite the store on every request', async () =>
   }
   const after = hub.ingestTokens().find((t) => t.id === busy.id).lastUsedAt;
   assert.equal(after, first, 'a burst inside the resolution window writes once');
+});
+
+test('a forwarded header cannot talk the hub out of requiring TLS', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'notifyjs-xff-'));
+  // `trustProxy` is what the README tells operators to set behind a reverse
+  // proxy, and it makes `X-Forwarded-For` decide `clientIp()`. The transport
+  // check must not be one of the things that header gets to decide.
+  const proxied = new Notifier({
+    port: 0,
+    storeDir: dir,
+    dashboard: false,
+    logger: false,
+    ingest: { enabled: true },
+    security: { trustProxy: true, uniformFailureMs: 5, maxFailuresBeforeBan: 1000 },
+  });
+  await proxied.start();
+  const issued = proxied.createIngestToken({ role: 'admin', label: 'proxied' });
+
+  try {
+    // The request really is on loopback here, so it is allowed either way -
+    // this only shows the endpoint is reachable in this configuration.
+    const direct = await fetch(`${proxied.dashboardUrl}/api/notify`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        authorization: `Bearer ${issued.token}`,
+      },
+      body: JSON.stringify({ title: 'from the socket' }),
+    });
+    assert.equal(direct.status, 202);
+
+    // Claiming to be somewhere else must not change the answer either way:
+    // the decision comes from the socket, which is still loopback.
+    const spoofed = await fetch(`${proxied.dashboardUrl}/api/notify`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        authorization: `Bearer ${issued.token}`,
+        'x-forwarded-for': '203.0.113.9',
+      },
+      body: JSON.stringify({ title: 'claims to be remote' }),
+    });
+    assert.equal(spoofed.status, 202, 'the header does not make a local request remote');
+
+    // And the inverse, which is the one that matters: a caller claiming to be
+    // loopback must not be able to skip the cleartext refusal. Verified
+    // through the helper the handler now uses, since a genuinely off-box
+    // request cannot be made from inside this test.
+    assert.equal(isLoopback('127.0.0.1'), true);
+    assert.equal(isLoopback('::1'), true);
+    assert.equal(isLoopback('203.0.113.9'), false, 'a forwarded claim is not loopback');
+  } finally {
+    await proxied.stop();
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

@@ -47,6 +47,7 @@ import { Guard, MessageLimiter, normalizeIp, uniformDelay } from './guard.js';
 import {
   bearerFrom,
   findIngestToken,
+  isLoopback,
   mintIngestToken,
   tokenMay,
   type IngestToken,
@@ -1159,7 +1160,17 @@ export class Notifier extends EventEmitter<NotifierEvents> {
     // A bearer token on a cleartext link off-box is readable by every hop it
     // crosses. Loopback is exempt because there is no hop, which is what makes
     // a hub behind a local reverse proxy workable without weakening this.
-    if (!this.opts.tls && !this.opts.ingest.allowInsecure && !isLoopback(ip)) {
+    //
+    // Decided from the socket's own address, never from `clientIp()`. That
+    // helper honours `X-Forwarded-For` when `trustProxy` is set, and that
+    // header is written by the caller - so deriving "is this request on-box"
+    // from it lets a remote caller answer the question itself and skip the
+    // very refusal this is. Worse, it filters the wrong population: behind the
+    // reverse proxy this exemption exists for, an honest client forwards its
+    // real address and is refused, while anyone adding
+    // `X-Forwarded-For: 127.0.0.1` is waved through.
+    const peer = normalizeIp(req.socket.remoteAddress ?? undefined);
+    if (!this.opts.tls && !this.opts.ingest.allowInsecure && !isLoopback(peer)) {
       send(421, {
         error: 'insecure_transport',
         message: 'refusing a bearer token over plain HTTP; use wss/TLS or set ingest.allowInsecure',
@@ -2623,18 +2634,6 @@ function sanitizeChannel(value: unknown): string {
 }
 
 /** IPv4 or IPv6 literal, for deciding whether a proxy header is believable. */
-/**
- * Whether an address is this machine.
- *
- * Loopback is the one case where a bearer token on a cleartext connection is
- * not exposed to anything: there is no hop between the caller and the hub. It
- * is what lets a reverse proxy terminate TLS in front of a hub bound to
- * localhost without having to relax the rule for everybody.
- */
-function isLoopback(ip: string): boolean {
-  return ip === '127.0.0.1' || ip === '::1' || ip.startsWith('127.');
-}
-
 /** A JSON object and nothing else - arrays and null are not payloads. */
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
