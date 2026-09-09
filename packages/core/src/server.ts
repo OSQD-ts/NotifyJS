@@ -1199,6 +1199,14 @@ export class Notifier extends EventEmitter<NotifierEvents> {
       return;
     }
 
+    // A valid token clears the failure counter, exactly as a completed
+    // handshake does. Charging failures without ever crediting a success was
+    // the asymmetry: a publisher with proven-valid credentials went on
+    // accumulating toward a ban, and a ban here is the same ban the WebSocket
+    // handshake honours - so a script left running with a stale token could
+    // lock out a phone that merely shares its NAT.
+    this.guard.succeed(ip);
+
     if (!this.ingestLimiter(token.id).allow()) {
       send(429, { error: 'rate_limited', message: 'too many requests for this token' });
       return;

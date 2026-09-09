@@ -233,3 +233,46 @@ test('a forwarded header cannot talk the hub out of requiring TLS', async () => 
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('a valid token clears the failure counter it would otherwise ban on', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'notifyjs-ban-'));
+  const strict = new Notifier({
+    port: 0,
+    storeDir: dir,
+    dashboard: false,
+    logger: false,
+    ingest: { enabled: true },
+    // Ban on the third failure, so the arithmetic below is easy to follow.
+    security: { uniformFailureMs: 1, maxFailuresBeforeBan: 3, failureWindowMs: 60_000 },
+  });
+  await strict.start();
+  const good = strict.createIngestToken({ role: 'admin', label: 'good' }).token;
+  const url = `${strict.dashboardUrl}/api/notify`;
+
+  const attempt = async (bearer) =>
+    (
+      await fetch(url, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', authorization: `Bearer ${bearer}` },
+        body: JSON.stringify({ title: 'x' }),
+      })
+    ).status;
+
+  try {
+    assert.equal(await attempt('njs_wrong'), 401);
+    assert.equal(await attempt('njs_wrong'), 401);
+    // A success in between must reset the count, the way a completed
+    // handshake does - otherwise a publisher holding a valid token still walks
+    // into a ban, and that ban locks out every device sharing the address.
+    assert.equal(await attempt(good), 202);
+    assert.equal(await attempt('njs_wrong'), 401);
+    assert.equal(await attempt('njs_wrong'), 401);
+
+    // Still serving the valid token: without the reset the two failures either
+    // side of the success would have added up to a ban by now.
+    assert.equal(await attempt(good), 202, 'a valid token still works');
+  } finally {
+    await strict.stop();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
