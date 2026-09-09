@@ -79,6 +79,18 @@ send / call options
   --channel <name>         Channel to publish on (default default)
   --body <text>            Longer body text
 
+token options
+  --role <name>            Role a created token publishes with (default viewer)
+  --label <text>           What it is for, so two tokens can be told apart
+  --id <id>                Which token to revoke
+
+export / import options
+  --data <dir>             Hub state directory (default .notifyjs)
+  --out <file>             Write the backup here rather than to stdout
+  --from <file>            Backup to restore
+  --history                Include the alert and audit logs
+  --force                  Replace an existing store when restoring
+
 update options
   --check                  Report what is available without installing
   --prerelease             Include the rolling "latest" build from main
