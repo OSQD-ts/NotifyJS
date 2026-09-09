@@ -818,9 +818,11 @@ export class NotifyClient {
    * browser while nothing of ours is running - including an iPhone, where a
    * home-screen web app is the only way in without a native build.
    *
-   * Separate from `registerPush` rather than another argument to it: this one
-   * cannot work without the keys, and a signature where the keys are optional
-   * is one where forgetting them compiles.
+   * It takes the subscription whole rather than an endpoint and optional keys,
+   * because a signature where the keys are optional is one where forgetting
+   * them compiles - and a subscription that cannot be encrypted to is not a
+   * subscription. This used to sit beside a second registration method for the
+   * Expo transport, which is gone.
    */
   registerWebPush(subscription: { endpoint: string; keys: WebPushKeys }): void {
     this.send({
