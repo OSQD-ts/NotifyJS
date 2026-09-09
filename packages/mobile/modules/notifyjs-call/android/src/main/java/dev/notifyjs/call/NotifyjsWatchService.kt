@@ -2,7 +2,6 @@ package dev.notifyjs.call
 
 import android.app.Notification
 import android.app.PendingIntent
-import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
@@ -11,6 +10,9 @@ import android.os.IBinder
 import android.os.PowerManager
 import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
+import com.facebook.react.HeadlessJsTaskService
+import com.facebook.react.bridge.Arguments
+import com.facebook.react.jstasks.HeadlessJsTaskConfig
 
 /**
  * Keeps the app's process alive so its WebSocket survives.
@@ -22,10 +24,15 @@ import androidx.core.app.ServiceCompat
  * doing something the user asked for", and the persistent notification is the
  * price Android charges for it.
  *
- * The service holds no state and does no work. Its entire job is to exist, so
- * that the JavaScript runtime holding the connection is not killed.
+ * It also starts that runtime. Keeping a process alive is no use if there is
+ * nothing running in it, and `registerRootComponent` only registers a
+ * component - so a process Android started for its own reasons had a
+ * JavaScript context with no mounted tree and no connection to anything. As a
+ * headless task service this starts `NotifyjsWatch`, which connects through
+ * the same singleton the UI subscribes to, so the phone reconnects after a
+ * reboot without anybody opening the app.
  */
-class NotifyjsWatchService : Service() {
+class NotifyjsWatchService : HeadlessJsTaskService() {
   companion object {
     const val NOTIFICATION_ID = 0x0501
     const val ACTION_START = "dev.notifyjs.call.WATCH_START"
@@ -71,6 +78,29 @@ class NotifyjsWatchService : Service() {
 
   override fun onBind(intent: Intent?): IBinder? = null
 
+  /**
+   * The JavaScript side of watching.
+   *
+   * No timeout, because this task's whole purpose is to outlast the moment it
+   * was started in. Allowed in the foreground so that the app being open is
+   * not a reason to skip it - the task is idempotent, and whichever of the two
+   * arrives first, both end up on the same `hub` singleton.
+   */
+  override fun getTaskConfig(intent: Intent?): HeadlessJsTaskConfig =
+    HeadlessJsTaskConfig("NotifyjsWatch", Arguments.createMap(), 0, true)
+
+  /**
+   * Deliberately does not stop the service.
+   *
+   * The base class stops itself once its tasks finish, which is right for a
+   * service that exists to run one job. This one exists to keep a process
+   * alive: the task returning means the connection is established, which is
+   * the point at which stopping would undo everything.
+   */
+  override fun onHeadlessJsTaskFinish(taskId: Int) {
+    // Intentionally empty.
+  }
+
   override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
     if (intent?.action == ACTION_STOP) {
       // Before the service goes: an alarm outlives the process that set it, so
@@ -115,6 +145,14 @@ class NotifyjsWatchService : Service() {
     // moment there is no alarm pending any more.
     WatchAlarm.schedule(this)
     NetworkWatch.start(this)
+
+    // The base class's onStartCommand is what actually starts the JavaScript
+    // task, so overriding this method without calling up would leave a service
+    // that keeps a process alive and runs nothing in it - which is the exact
+    // failure this service was changed to fix. Its return value is discarded
+    // deliberately: it answers for a service that stops when its task is done,
+    // and this one does not.
+    super.onStartCommand(intent, flags, startId)
 
     // If Android does reclaim us under memory pressure, come back.
     return START_STICKY

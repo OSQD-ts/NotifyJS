@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 
+import { promptIsFresh } from './state';
 import { secureStorage } from './storage';
 
 /**
@@ -85,11 +86,7 @@ export function useRecurringPrompt(
     void (async () => {
       const stored = await secureStorage().get(`${ASKED_PREFIX}${key}`);
       if (cancelled) return;
-      const at = Number(stored);
-      // Anything unreadable - including the bare '1' written by the one-time
-      // version of this prompt before it grew a cooldown - counts as long ago,
-      // so an upgraded install asks once more and then settles into the cycle.
-      setAsked(Number.isFinite(at) && at > 0 && Date.now() - at < cooldownMs);
+      setAsked(promptIsFresh(stored, cooldownMs, Date.now()));
     })();
     return () => {
       cancelled = true;
