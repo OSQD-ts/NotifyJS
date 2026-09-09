@@ -429,7 +429,8 @@ new Notifier({
   metrics: true,             // serve Prometheus counters at /metrics
   metricsToken: undefined,   // require a bearer token on /metrics
   flood: { enabled: true, windowMs: 60_000, burst: 5 },
-  push: { enabled: false },
+  webPush: { enabled: true, includeBody: false },
+  ingest: { enabled: false }, // publishing over HTTP; see below
   security: {
     maxConnectionsPerIp: 10, // raise this if devices share a NAT
     maxFailuresBeforeBan: 5,
@@ -473,17 +474,26 @@ notify.on('banned', ({ ip, until }) => alertSecurity(ip));
 ## Reaching a phone whose app is closed
 
 A device receives while its socket is open, which on a phone means while the
-app is running. Opt in to wake-ups for the rest of the time:
+app is running. Three things now cover the rest of the time, and none of them
+involves a third party reading your alerts.
 
-```ts
-new Notifier({ push: { enabled: true } });
-```
+The **foreground service** keeps the app's process alive off screen, so the
+socket survives. A **Doze-proof alarm** and a **network callback** give it a
+reason to run when Android has stopped scheduling its timers — a socket
+dropped by a NAT overnight is noticed within about nine minutes, and a Wi-Fi
+to cellular handover recovers in about a second. And after a reboot the
+**boot receiver** starts it again on its own, with nobody opening the app.
 
-The phone registers a token after pairing, and the hub wakes devices that are
-not connected. Alert titles pass through Expo and then Apple or Google in the
-clear, which is why it is off by default and the body is withheld unless you
-pass `includeBody: true`. Point `endpoint` at your own relay to keep it
-in-house.
+For a device that is genuinely not running — swiped away, force-stopped —
+Web Push is the wake-up, and it is described below.
+
+> **Expo push was removed.** It sent your notification's title, and its body
+> if you allowed it, in the clear through `exp.host` and then Apple or Google,
+> on every alert. It was off by default, which is an honest way to ship a bad
+> bargain but does not make it a good one. If you are upgrading, `push: {}` is
+> no longer a valid option and a phone still offering an Expo token has it
+> refused and cleared rather than stored — a token nothing can deliver to
+> would leave a device reading as reachable while silently receiving nothing.
 
 ## The dashboard as a real client, and iPhones
 
@@ -503,8 +513,8 @@ tap *Enable alerts*. That is the whole setup: no App Store, no Apple Developer
 account, no native build. Lock-screen calls still need the Android app; alerts
 do not.
 
-Unlike the Expo path above, this one is **on by default**, because it is a
-different bargain. The hub encrypts each payload to a key the browser
+This is **on by default**, which nothing else that leaves the hub is, and the
+payload is why. The hub encrypts each payload to a key the browser
 generated ([RFC 8291](https://www.rfc-editor.org/rfc/rfc8291)) and signs the
 request with its own key ([RFC 8292](https://www.rfc-editor.org/rfc/rfc8292)):
 Mozilla, Google and Apple forward bytes they cannot read. It is the browser's
@@ -518,6 +528,76 @@ identifying you; RFC 8292 requires one, and Apple rejects a push without it.
 The keypair is generated on first use and kept in `store.json`. Do not delete
 it: a browser stores the key inside the subscription it created, so a new one
 silently stops every existing subscription from delivering.
+
+## Publishing over HTTP
+
+Everything above publishes by speaking the protocol: pair a device, sign the
+hub's nonce, send. That is the stronger scheme and it stays the default — but
+it means the only things that can page you are programs written against this
+project. Alertmanager, Grafana, Sentry, an uptime checker and a line of `curl`
+in a cron job all speak one protocol between them, and it is not this one.
+
+```ts
+new Notifier({ ingest: { enabled: true } });
+```
+
+```
+notifyjs serve --ingest
+notifyjs token create --role oncall --label ci   # prints the token once
+```
+
+```bash
+curl -X POST https://hub.example.com/api/notify \
+  -H "Authorization: Bearer njs_..." \
+  -H 'content-type: application/json' \
+  -d '{"title":"Disk 91%","severity":"warning","channel":"infra"}'
+```
+
+`POST /api/call` takes `{ "message": ... }` and holds the request open for the
+whole ring, so the response tells you whether a person actually answered.
+
+The token is treated as the weaker credential it is. Only its hash is stored.
+It carries a role rather than being all-powerful, so it can never do more than
+a device in the same role — and minting one for a role you do not hold is
+refused, because that is privilege escalation with an extra step. Failed
+attempts are charged against the IP by the same limiter that meters
+handshakes.
+
+Two refusals worth knowing. The feature is off until you turn it on, and
+answers `404` rather than `403` while it is off, because a feature nobody
+enabled should not confirm it exists. And a bearer token on a cleartext link
+is readable by every hop it crosses, so a non-loopback request over plain HTTP
+is refused with `421` unless you pass `--ingest-insecure`. Terminating TLS in
+a reverse proxy in front of a hub bound to localhost is the intended shape.
+
+`notifyjs token list` shows what can publish and when each token was last
+used; `notifyjs token revoke --id <id>` stops one immediately.
+
+## Backing a hub up, and moving it
+
+Losing the store directory is the one unrecoverable failure here. The
+`serverId` is part of every auth signature, so a hub that comes back with a
+new one is a hub every paired device fails to authenticate against at once,
+and the only way out is re-pairing every phone by hand.
+
+```
+notifyjs export --data .notifyjs --out hub-backup.json   # stop the hub first
+notifyjs import --from hub-backup.json --data /new/path
+```
+
+A device paired against the original authenticates against the restored hub
+with nothing re-paired. Add `--history` to carry the alert log across as well;
+without it you get the identity and the devices, which is what moving a hub
+actually needs.
+
+Both commands read and write files directly, so **stop the hub first**: a
+running one holds the document in memory, would write over an import, and has
+not necessarily flushed what an export would read. Restoring over an existing
+store is refused without `--force`.
+
+The file is written `0600` and the command says what is in it, because a
+backup that can restore a hub necessarily contains its secrets — the VAPID
+private key above all. Treat it as you would a private key.
 
 ## Snoozing
 
