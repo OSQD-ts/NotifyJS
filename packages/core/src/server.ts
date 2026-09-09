@@ -1832,8 +1832,27 @@ export class Notifier extends EventEmitter<NotifierEvents> {
       return;
     }
     const ids = Array.isArray(msg.ids) ? msg.ids.slice(0, 500) : [];
+
+    // An action is a claim about which button was pressed, and it was believed
+    // without being checked. Applications are told to branch on it - the
+    // README's own example does - so an unvalidated value is a way to reach
+    // whatever that branch does: on a notification that declared no actions at
+    // all, with any string, from any device holding `notify.ack`, which the
+    // stock `viewer` role has. Checked against what the notification actually
+    // offered, so the only actions that reach an application are ones it
+    // published itself.
+    const claimed = typeof msg.action === 'string' ? msg.action.slice(0, 128) : undefined;
+    const offered = claimed ? this.declaredActions(ids) : undefined;
+
     for (const id of ids) {
-      this.emit('ack', { notificationId: id, deviceId: session.device.id, action: msg.action });
+      const action = claimed && offered?.get(id)?.has(claimed) ? claimed : undefined;
+      if (claimed && !action) {
+        this.audit('ack.action.rejected', {
+          deviceId: session.device.id,
+          detail: { id, action: claimed },
+        });
+      }
+      this.emit('ack', { notificationId: id, deviceId: session.device.id, action });
       // One acknowledgement is enough: a human has seen it, so stop retrying.
       const timer = this.ackWaiters.get(id);
       if (timer) {
@@ -1851,6 +1870,23 @@ export class Notifier extends EventEmitter<NotifierEvents> {
         if (updated) session.device = updated;
       }
     }
+  }
+
+  /**
+   * The action ids each of these notifications actually published.
+   *
+   * Built once per acknowledgement rather than per id: history is bounded, but
+   * a device may acknowledge up to five hundred ids in one frame and scanning
+   * the log for each of them would make that frame quadratic.
+   */
+  private declaredActions(ids: string[]): Map<string, Set<string>> {
+    const wanted = new Set(ids);
+    const found = new Map<string, Set<string>>();
+    for (const n of this.store.history()) {
+      if (!wanted.has(n.id) || !n.actions?.length) continue;
+      found.set(n.id, new Set(n.actions.map((a) => a.id)));
+    }
+    return found;
   }
 
   /** A device offering (or withdrawing) a wake-up token for itself. */
