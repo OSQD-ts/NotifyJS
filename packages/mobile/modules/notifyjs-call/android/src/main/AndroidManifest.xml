@@ -39,6 +39,14 @@
       android:exported="false" />
 
     <!--
+      Restores the ongoing notification when it is swiped away. Not exported:
+      only this app's own delete intent may ask for it back.
+    -->
+    <receiver
+      android:name=".WatchNotificationReceiver"
+      android:exported="false" />
+
+    <!--
       Notices that a restart has left the phone not alerting. Exported because
       BOOT_COMPLETED and MY_PACKAGE_REPLACED are system broadcasts and will not
       reach a receiver that is not; both are protected, so only the system can

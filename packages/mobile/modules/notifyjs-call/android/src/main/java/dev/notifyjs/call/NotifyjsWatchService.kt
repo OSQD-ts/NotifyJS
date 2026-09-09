@@ -2,6 +2,7 @@ package dev.notifyjs.call
 
 import android.app.Notification
 import android.app.PendingIntent
+import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
@@ -37,6 +38,92 @@ class NotifyjsWatchService : HeadlessJsTaskService() {
     const val NOTIFICATION_ID = 0x0501
     const val ACTION_START = "dev.notifyjs.call.WATCH_START"
     const val ACTION_STOP = "dev.notifyjs.call.WATCH_STOP"
+    const val ACTION_DISMISSED = "dev.notifyjs.call.WATCH_DISMISSED"
+
+    /**
+     * Builds the ongoing notification.
+     *
+     * On the companion rather than the instance so the receiver that restores
+     * a dismissed one produces exactly the same notification, rather than a
+     * near-copy that drifts the first time either is edited.
+     */
+    fun notification(context: Context, hubName: String): Notification {
+      val launch = CallNotification.launchIntent(context, null)
+      val open = launch?.let {
+        PendingIntent.getActivity(
+          context,
+          0,
+          it,
+          PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
+      }
+
+      // Says so when Android is entitled to hold alerts back. The ongoing
+      // notification is the one place this can be stated without interrupting
+      // anybody, and it is where somebody wondering "is my pager working?"
+      // actually looks.
+      val restricted = batteryOptimized(context)
+
+      return NotificationCompat.Builder(context, CallNotification.WATCH_CHANNEL_ID)
+        .setSmallIcon(android.R.drawable.stat_notify_sync)
+        .setContentTitle(if (restricted) "Alerts may be delayed" else "Listening for alerts")
+        .setContentText(
+          if (restricted) {
+            "Battery optimisation is on, so Android can hold alerts back. Open NotifyJS to fix."
+          } else {
+            "Connected to $hubName"
+          },
+        )
+        .setPriority(NotificationCompat.PRIORITY_MIN)
+        // Holds below Android 13. From 13 the system lets a foreground
+        // service's notification be swiped away regardless, which is why the
+        // delete intent below exists.
+        .setOngoing(true)
+        .setShowWhen(false)
+        .setContentIntent(open)
+        // Puts it back if it is dismissed.
+        //
+        // This notification is not decoration: it is the only thing telling
+        // somebody their pager is running, and Android 13 made it dismissible
+        // with no flag to say otherwise. Swiping it away does not stop the
+        // service, so what it produces is a phone that is still watching and
+        // no longer says so - and the next time alerting really does stop,
+        // there is no missing notification to notice.
+        //
+        // Deliberately not a fight the user cannot win: the receiver checks
+        // `WatchState` first, so turning watching off in Settings takes the
+        // notification with it and it stays gone.
+        .setDeleteIntent(
+          PendingIntent.getBroadcast(
+            context,
+            NOTIFICATION_ID,
+            Intent(context, WatchNotificationReceiver::class.java).setAction(ACTION_DISMISSED),
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+          ),
+        )
+        .build()
+    }
+
+    /**
+     * Whether Android may suspend this app while the screen is off.
+     *
+     * Doze and this API both arrived in API 23; below that there is nothing to
+     * be exempted from, so an older phone is never restricted.
+     */
+    private fun batteryOptimized(context: Context): Boolean {
+      if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return false
+      val power = context.getSystemService(Context.POWER_SERVICE) as? PowerManager ?: return false
+      return runCatching { !power.isIgnoringBatteryOptimizations(context.packageName) }
+        .getOrDefault(false)
+    }
+
+    /** Makes a dismissed notification visible again. */
+    fun repost(context: Context) {
+      runCatching {
+        androidx.core.app.NotificationManagerCompat.from(context)
+          .notify(NOTIFICATION_ID, notification(context, WatchState.hubName(context)))
+      }
+    }
 
     fun start(context: Context, hubName: String) {
       // Recorded before the service is asked for, not after it succeeds: this
@@ -196,50 +283,27 @@ class NotifyjsWatchService : HeadlessJsTaskService() {
     }
   }
 
-  /**
-   * Whether Android may suspend this app while the screen is off.
-   *
-   * Doze and this API both arrived in API 23; below that there is nothing to
-   * be exempted from, so an older phone is never restricted.
-   */
-  private fun batteryOptimized(): Boolean {
-    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return false
-    val power = getSystemService(Context.POWER_SERVICE) as? PowerManager ?: return false
-    return runCatching { !power.isIgnoringBatteryOptimizations(packageName) }.getOrDefault(false)
-  }
+  private fun buildNotification(): Notification = notification(this, hubName)
 
-  private fun buildNotification(): Notification {
-    val launch = CallNotification.launchIntent(this, null)
-    val open = launch?.let {
-      PendingIntent.getActivity(
-        this,
-        0,
-        it,
-        PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
-      )
-    }
+}
 
-    // Says so when Android is entitled to hold alerts back. The ongoing
-    // notification is the one place this can be stated without interrupting
-    // anybody, and it is where somebody wondering "is my pager working?"
-    // actually looks. Re-evaluated whenever watching restarts rather than
-    // live, which is enough for a setting that changes by hand.
-    val restricted = batteryOptimized()
+/**
+ * Restores the ongoing notification after it has been swiped away.
+ *
+ * A broadcast rather than a service start: this arrives while the app is in
+ * the background, where starting a service is restricted, and a receiver is
+ * always allowed to run. The service is still in the foreground - dismissing
+ * its notification does not stop it - so re-posting under the same id simply
+ * makes it visible again.
+ */
+class WatchNotificationReceiver : BroadcastReceiver() {
+  override fun onReceive(context: Context, intent: Intent?) {
+    if (intent?.action != NotifyjsWatchService.ACTION_DISMISSED) return
+    // The one thing that must not be overridden: somebody who turned watching
+    // off is not arguing with a notification that keeps coming back.
+    if (!WatchState.isWanted(context)) return
 
-    return NotificationCompat.Builder(this, CallNotification.WATCH_CHANNEL_ID)
-      .setSmallIcon(android.R.drawable.stat_notify_sync)
-      .setContentTitle(if (restricted) "Alerts may be delayed" else "Listening for alerts")
-      .setContentText(
-        if (restricted) {
-          "Battery optimisation is on, so Android can hold alerts back. Open NotifyJS to fix."
-        } else {
-          "Connected to $hubName"
-        },
-      )
-      .setPriority(NotificationCompat.PRIORITY_MIN)
-      .setOngoing(true)
-      .setShowWhen(false)
-      .setContentIntent(open)
-      .build()
+    CallNotification.ensureChannels(context)
+    NotifyjsWatchService.repost(context)
   }
 }
