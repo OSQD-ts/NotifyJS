@@ -77,6 +77,7 @@ class HubClient {
   private readonly listeners = new Set<() => void>();
   private readonly storage = secureStorage();
   private starting: Promise<void> | undefined;
+  private wired = false;
   private teardown: Array<() => void> = [];
 
   /**
@@ -145,12 +146,31 @@ class HubClient {
    * be the thing that starts this process.
    */
   start(): Promise<void> {
-    this.starting ??= this.begin();
+    if (!this.starting) {
+      // The failure is cleared rather than cached. `??=` on its own would keep
+      // a rejected promise forever, so one bad read - a keystore that was not
+      // unlocked yet, a storage error at boot - would hand every later caller
+      // the same failure and the phone would never connect again, silently,
+      // for the life of the process. That is the worst possible way for a
+      // pager to fail, and it is recoverable simply by trying again later.
+      //
+      // The rejection is swallowed rather than re-thrown: every caller here is
+      // a mounting effect or a headless task, neither of which can do anything
+      // useful with it, and an unhandled rejection is not a recovery strategy.
+      this.starting = this.begin().catch(() => {
+        this.starting = undefined;
+      });
+    }
     return this.starting;
   }
 
   private async begin(): Promise<void> {
-    this.wire();
+    // Only once, however many times starting is retried: `wire()` registers
+    // listeners, and doing it twice would post every alert twice.
+    if (!this.wired) {
+      this.wire();
+      this.wired = true;
+    }
 
     const stored = await this.storage.get(PREFS_KEY);
     let parsed: unknown = null;
@@ -237,7 +257,14 @@ class HubClient {
        * queued never fires.
        */
       (() => {
-        const sub = addWakeListener(() => this.manager.syncAll());
+        const sub = addWakeListener(() => {
+          // Also a retry. If loading failed earlier there is nothing to sync,
+          // and this alarm is the only thing that fires on its own schedule -
+          // which makes it the natural place to have another go rather than
+          // waiting for somebody to open the app.
+          void this.start();
+          this.manager.syncAll();
+        });
         return () => sub?.remove();
       })(),
 
@@ -312,6 +339,7 @@ class HubClient {
     this.teardown = [];
     this.manager.disconnectAll();
     this.starting = undefined;
+    this.wired = false;
   }
 }
 
