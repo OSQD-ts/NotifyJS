@@ -14,6 +14,7 @@ import {
 } from '@osqd/notifyjs-protocol';
 import { webCrypto } from '@osqd/notifyjs-protocol/web';
 import { Ringer, speak, stopSpeaking } from './speech.js';
+import { cryptoUnavailable } from './secure.js';
 import {
   announcementFor,
   formatCodeInput,
@@ -180,7 +181,17 @@ $('pair-form').addEventListener('submit', (e) => {
   // Audio unlock has to ride on this click; there may be no other gesture
   // before the first call arrives.
   void ringer.unlock();
-  void client.pair(input.value);
+
+  // A rejection here used to go nowhere. The hub refusing a code comes back as
+  // a `status` change and re-enables the form, but `pair()` failing outright -
+  // which is what an insecure context does, before a single byte is sent -
+  // left the button disabled with nothing said, permanently.
+  client.pair(input.value).catch((err: unknown) => {
+    showPairing(
+      cryptoUnavailable() ??
+        `Pairing could not start: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  });
 });
 
 $('code').addEventListener('input', (e) => {
@@ -600,7 +611,7 @@ client.on('status', (status) => {
   const el = $('status');
   el.textContent = status;
   el.dataset.state = status;
-  if (status === 'unpaired') showPairing();
+  if (status === 'unpaired') showPairing(cryptoUnavailable());
 });
 
 client.on('ready', (ready) => {
@@ -770,7 +781,7 @@ async function main(): Promise<void> {
     showApp();
     await client.connect();
   } else {
-    showPairing();
+    showPairing(cryptoUnavailable());
   }
 }
 
