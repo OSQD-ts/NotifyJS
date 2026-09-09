@@ -11,7 +11,6 @@ export type {
   NotifierOptions,
   SecurityOptions,
   FloodOptions,
-  PushOptions,
 } from './options.js';
 export { RemoteNotifier } from './remote.js';
 export type { RemoteNotifierOptions } from './remote.js';
@@ -27,7 +26,15 @@ export {
 } from './adapters.js';
 export type { AlertSink, CaptureOptions, HttpErrorOptions, LogStreamOptions } from './adapters.js';
 export { FloodControl } from './flood.js';
-export { PushSender } from './push.js';
+export {
+  bearerFrom,
+  findIngestToken,
+  ingestTokenHash,
+  mintIngestToken,
+  INGEST_TOKEN_PREFIX,
+  type IngestToken,
+} from './ingest.js';
+
 export { WebPushSender, generateVapidKeys, encryptPayload, vapidAuthorization } from './webpush.js';
 export type { VapidKeys, WebPushPayload, WebPushTarget } from './webpush.js';
 export { renderQr } from './qr.js';

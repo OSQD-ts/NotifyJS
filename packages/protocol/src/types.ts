@@ -110,7 +110,7 @@ export interface Device {
    * check stays `device.pushToken`.
    */
   pushToken?: string;
-  pushProvider?: 'expo' | 'webpush';
+  pushProvider?: 'webpush';
   /**
    * Web Push only: the keys the browser generated for this subscription.
    *
@@ -282,6 +282,22 @@ export interface CallResult {
   endedAt?: number;
   /** Devices that were rung before this outcome was reached. */
   attempted: string[];
+}
+
+/**
+ * An HTTP publishing credential, as an operator sees it.
+ *
+ * Deliberately without the hash. A hash is not a secret, but it is also not
+ * useful to anybody outside the hub, and shipping it to every admin client
+ * invites somebody to try to verify a guess offline.
+ */
+export interface IngestTokenSummary {
+  id: string;
+  role: string;
+  label?: string;
+  createdAt: number;
+  lastUsedAt?: number;
+  revokedAt?: number;
 }
 
 export interface PairingCode {

@@ -814,14 +814,6 @@ export class NotifyClient {
   }
 
   /**
-   * Registers a wake-up token so the hub can reach this device while the app
-   * is closed. Opt-in: nothing is sent until the device calls this.
-   */
-  registerPush(token: string, provider: 'expo' = 'expo'): void {
-    this.send({ v: PROTOCOL_VERSION, t: 'push.register', token, provider });
-  }
-
-  /**
    * Registers a browser's Web Push subscription, so the hub can reach this
    * browser while nothing of ours is running - including an iPhone, where a
    * home-screen web app is the only way in without a native build.
@@ -840,9 +832,9 @@ export class NotifyClient {
     });
   }
 
-  /** Withdraws the wake-up token. */
+  /** Withdraws the wake-up subscription. */
   unregisterPush(): void {
-    this.send({ v: PROTOCOL_VERSION, t: 'push.register', token: '', provider: 'expo' });
+    this.send({ v: PROTOCOL_VERSION, t: 'push.register', token: '', provider: 'webpush' });
   }
 
   /**

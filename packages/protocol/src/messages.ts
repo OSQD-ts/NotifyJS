@@ -6,6 +6,7 @@ import type {
   Device,
   EscalationPolicy,
   Heartbeat,
+  IngestTokenSummary,
   Notification,
   PairingCode,
   Role,
@@ -270,9 +271,15 @@ export interface SnoozeMsg extends Envelope {
  */
 export interface PushRegisterMsg extends Envelope {
   t: 'push.register';
-  /** An Expo push token, or a Web Push subscription endpoint. Empty clears it. */
+  /** A Web Push subscription endpoint. Empty clears it. */
   token: string;
-  provider: 'expo' | 'webpush';
+  /**
+   * Only Web Push remains. Kept as a field rather than dropped so a hub can
+   * still recognise - and ignore - a registration from a client built before
+   * the Expo transport was removed, instead of storing a token nothing can
+   * ever deliver to.
+   */
+  provider: 'webpush';
   /** Required for `webpush`, meaningless for `expo`. */
   keys?: WebPushKeys;
 }
@@ -312,6 +319,9 @@ export type AdminOp =
   | 'policies.list'
   | 'policies.upsert'
   | 'policies.delete'
+  | 'ingest.create'
+  | 'ingest.list'
+  | 'ingest.revoke'
   | 'metrics';
 
 /**
@@ -347,6 +357,13 @@ export interface AdminData {
   'policies.list': { policies: EscalationPolicy[] };
   'policies.upsert': { policies: EscalationPolicy[] };
   'policies.delete': { deleted: boolean };
+  /**
+   * The plaintext token, returned exactly once. The hub keeps only its hash,
+   * so a caller that does not record this has to mint another.
+   */
+  'ingest.create': { id: string; token: string };
+  'ingest.list': { tokens: IngestTokenSummary[] };
+  'ingest.revoke': { revoked: boolean };
   metrics: { text: string };
   'audit.tail': { events: AuditEvent[] };
   history: { notifications: Notification[] };

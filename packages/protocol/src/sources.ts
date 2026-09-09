@@ -274,10 +274,6 @@ export class SourceManager {
     this.clients.get(sourceId)?.endCall(callId);
   }
 
-  registerPush(sourceId: string, token: string): void {
-    this.clients.get(sourceId)?.registerPush(token);
-  }
-
   /* ------------------------------ internals -------------------------- */
 
   private async connect(source: Source, pairingCode?: string): Promise<void> {

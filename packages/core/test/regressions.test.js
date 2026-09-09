@@ -234,73 +234,6 @@ test('a log level that names an Object.prototype member is not a severity', asyn
 /* Push                                                                */
 /* ------------------------------------------------------------------ */
 
-test('push fans out in batches of 100 and retires unreachable tokens', async () => {
-  // Expo refuses a request carrying more than 100 messages, so a single
-  // oversized batch delivered nothing at all rather than merely less.
-  const batches = [];
-  const server = createServer((req, res) => {
-    let body = '';
-    req.on('data', (c) => (body += c));
-    req.on('end', () => {
-      const messages = JSON.parse(body);
-      batches.push(messages.length);
-      // Answer the first message of the first batch as a dead token.
-      const data = messages.map((_, i) =>
-        batches.length === 1 && i === 0
-          ? { status: 'error', message: 'gone', details: { error: 'DeviceNotRegistered' } }
-          : { status: 'ok' },
-      );
-      res.writeHead(200, { 'content-type': 'application/json' });
-      res.end(JSON.stringify({ data }));
-    });
-  });
-  await new Promise((r) => server.listen(0, '127.0.0.1', r));
-  const endpoint = `http://127.0.0.1:${server.address().port}/send`;
-
-  const dir = tmp('pushbatch');
-  const hub = new Notifier({
-    port: 0,
-    storeDir: dir,
-    dashboard: false,
-    logger: false,
-    push: { enabled: true, endpoint, evenWhenOnline: true },
-  });
-  await hub.start();
-
-  const { PushSender } = await import('../dist/push.js');
-  const retired = [];
-  const sender = new PushSender(
-    { enabled: true, endpoint, includeBody: false, evenWhenOnline: true },
-    () => {},
-    () => {},
-    (id) => retired.push(id),
-  );
-
-  const devices = Array.from({ length: 250 }, (_, i) => ({
-    id: `d${i}`,
-    name: `phone-${i}`,
-    role: 'viewer',
-    publicKey: 'k'.repeat(43),
-    platform: 'test',
-    status: 'active',
-    createdAt: Date.now(),
-    ackedSeq: 0,
-    pushToken: `ExponentPushToken[${i}]`,
-  }));
-
-  await sender.notify(devices, {
-    id: 'n1', seq: 1, ts: Date.now(), channel: 'x', severity: 'error', title: 'batched',
-  });
-
-  assert.equal(batches.length, 3, '250 devices become three requests');
-  assert.deepEqual(batches.sort((a, b) => b - a), [100, 100, 50]);
-  assert.deepEqual(retired, ['d0'], 'a DeviceNotRegistered ticket retires that token');
-
-  await hub.stop();
-  await new Promise((r) => server.close(r));
-  rmSync(dir, { recursive: true, force: true });
-});
-
 /* ------------------------------------------------------------------ */
 /* Client                                                              */
 /* ------------------------------------------------------------------ */
@@ -447,87 +380,6 @@ test('an admin op naming an Object.prototype member is refused', async () => {
 
   client.disconnect();
   await hub.stop();
-  rmSync(dir, { recursive: true, force: true });
-});
-
-
-test('a token registered through a source reaches the hub and is used', async () => {
-  // The phone app never called this. The hub could send wake-ups, the protocol
-  // carried `push.register`, and the app had a `getPushToken()` helper - but
-  // nothing joined them, so no device ever had a token and every wake-up was
-  // filtered out before it was sent.
-  const { SourceManager } = await import('@osqd/notifyjs-protocol');
-
-  const pushed = [];
-  const pushServer = createServer((req, res) => {
-    let body = '';
-    req.on('data', (c) => (body += c));
-    req.on('end', () => {
-      pushed.push(JSON.parse(body));
-      res.writeHead(200, { 'content-type': 'application/json' });
-      res.end(JSON.stringify({ data: [{ status: 'ok' }] }));
-    });
-  });
-  await new Promise((r) => pushServer.listen(0, '127.0.0.1', r));
-
-  const dir = tmp('pushwire');
-  const hub = new Notifier({
-    port: 0,
-    storeDir: dir,
-    dashboard: false,
-    logger: false,
-    push: {
-      enabled: true,
-      endpoint: `http://127.0.0.1:${pushServer.address().port}/send`,
-      evenWhenOnline: true,
-    },
-    security: { connectionBurst: 500, connectionRefillPerSec: 100, maxConnectionsPerIp: 200 },
-  });
-  await hub.start();
-
-  const manager = new SourceManager({
-    storage: memoryStorage(),
-    crypto: nodeCrypto,
-    createSocket: (url) => new WebSocket(url),
-    platform: 'node-test',
-    deviceName: () => 'phone',
-    minSeverity: () => 'debug',
-  });
-
-  const source = await manager.add({
-    url: hub.url.replace('localhost', '127.0.0.1'),
-    code: hub.createPairingCode({ role: 'oncall' }).code,
-  });
-  assert.equal(source.status, 'ready');
-
-  // What the app now does once a source reports ready.
-  manager.registerPush(source.id, 'ExponentPushToken[wired]');
-  await new Promise((r) => setTimeout(r, 150));
-
-  const [device] = hub.devices();
-  assert.equal(device.pushToken, 'ExponentPushToken[wired]', 'the hub stored the token');
-  assert.equal(device.pushProvider, 'expo');
-
-  await hub.error({ title: 'wake the phone', channel: 'db' });
-  await new Promise((r) => setTimeout(r, 250));
-
-  assert.equal(pushed.length, 1, 'the hub actually sent a wake-up');
-  assert.equal(pushed[0][0].to, 'ExponentPushToken[wired]');
-
-  // Android reads importance off the channel, not the message. A wake-up that
-  // names none lands on the default channel, where it can be held until the
-  // phone next leaves Doze - which looks exactly like the push never arriving
-  // until the app is opened by hand.
-  assert.equal(
-    pushed[0][0].channelId,
-    'alerts',
-    'the wake-up names the high-importance channel the app creates',
-  );
-  assert.equal(pushed[0][0].priority, 'high');
-
-  manager.disconnectAll();
-  await hub.stop();
-  await new Promise((r) => pushServer.close(r));
   rmSync(dir, { recursive: true, force: true });
 });
 
@@ -1355,7 +1207,7 @@ test('a credential file survives a write that is interrupted', async () => {
 /* Dead sockets                                                        */
 /* ------------------------------------------------------------------ */
 
-test('a device whose app is frozen is woken by push, not counted as delivered', async () => {
+test('a device whose app is frozen is not counted as delivered', async () => {
   // The failure this covers: an Android phone that has been backgrounded long
   // enough for the OS to stop scheduling its JavaScript. The process is still
   // alive and its networking library still answers WebSocket pings, so the hub
@@ -1363,18 +1215,6 @@ test('a device whose app is frozen is woken by push, not counted as delivered', 
   // that was the only thing left that could have woken it. Every alert waited
   // in the socket buffer until the app was opened by hand - which is exactly
   // what "notifications only arrive when I reopen the app" is.
-  const pushes = [];
-  const pushService = createServer((req, res) => {
-    let body = '';
-    req.on('data', (c) => (body += c));
-    req.on('end', () => {
-      pushes.push(JSON.parse(body));
-      res.writeHead(200, { 'content-type': 'application/json' });
-      res.end('{"data":[]}');
-    });
-  });
-  await new Promise((r) => pushService.listen(0, '127.0.0.1', r));
-
   const dir = tmp('frozen');
   const hub = new Notifier({
     port: 0,
@@ -1385,11 +1225,6 @@ test('a device whose app is frozen is woken by push, not counted as delivered', 
     // gives a device two and a half of them to speak for itself.
     livenessIntervalMs: 1,
     deviceWatchdog: { enabled: false },
-    push: {
-      enabled: true,
-      endpoint: `http://127.0.0.1:${pushService.address().port}/send`,
-      includeBody: true,
-    },
     security: { connectionBurst: 500, connectionRefillPerSec: 100, maxConnectionsPerIp: 200 },
   });
   await hub.start();
@@ -1428,16 +1263,25 @@ test('a device whose app is frozen is woken by push, not counted as delivered', 
   });
   await ready;
 
-  // Two frames written by the app itself, which is what separates it from its
-  // networking library: a keepalive, and a token to be woken on.
+  // A frame written by the app itself, which is what separates it from its
+  // networking library.
   send({ t: 'ping', ts: Date.now() });
+
+  // And a token from a client built before the Expo transport was removed.
+  // Storing it would leave a device that reads as reachable, is counted as a
+  // push target, and silently receives nothing - the same failure a keyless
+  // web push subscription is already refused over.
   send({ t: 'push.register', token: 'ExponentPushToken[frozen]', provider: 'expo' });
   await delay(200);
+  assert.equal(
+    hub.devices()[0].pushToken,
+    undefined,
+    'a token for a transport this hub no longer has is refused, not stored',
+  );
 
   const awake = await hub.error({ title: 'while the app is running', channel: 'db' });
   await delay(300);
   assert.equal(awake.reached, 1, 'an app that is keeping alive counts as reached');
-  assert.equal(pushes.length, 0, 'and is not pushed to');
 
   // The freeze. Nothing else changes: the socket stays open and `ws` goes on
   // answering the hub's pings from a thread the OS never suspended.
@@ -1448,8 +1292,6 @@ test('a device whose app is frozen is woken by push, not counted as delivered', 
   await delay(400);
 
   assert.equal(frozen.reached, 0, 'a frozen app is not somebody the alert reached');
-  assert.equal(pushes.length, 1, 'so the wake-up push is sent');
-  assert.equal(pushes[0][0].to, 'ExponentPushToken[frozen]');
 
   // Still written down the socket, so it is already there when the app thaws.
   assert.ok(
@@ -1459,7 +1301,6 @@ test('a device whose app is frozen is woken by push, not counted as delivered', 
 
   ws.close();
   await hub.stop();
-  await new Promise((r) => pushService.close(r));
   rmSync(dir, { recursive: true, force: true });
 });
 
