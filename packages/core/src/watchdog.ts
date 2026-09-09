@@ -91,9 +91,37 @@ export class Watchdog {
     return this.beats.get(name);
   }
 
-  /** Restores heartbeats across a restart, preserving their last check-in. */
+  /**
+   * Restores heartbeats across a restart, preserving their last check-in.
+   *
+   * Every value is checked on the way in, which `expect()` already does for
+   * anything arriving through the API. These come from the store instead, and
+   * the store is a JSON file on disk that this project already assumes can be
+   * truncated or hand-edited - it keeps a `.corrupt-` copy and starts over
+   * rather than refusing to boot.
+   *
+   * An unchecked interval is not a quiet failure here. `NaN` makes the overdue
+   * comparison false, so the sweep falls straight through to raising the
+   * alarm: a corrupt store would page somebody immediately, and go on doing it
+   * every tick for a repeating heartbeat. False pages are precisely how a
+   * pager stops being read, so a heartbeat that cannot be trusted is dropped
+   * rather than watched badly.
+   */
   restore(beats: Heartbeat[]): void {
-    for (const beat of beats) this.beats.set(beat.name, beat);
+    for (const beat of beats) {
+      if (!beat || typeof beat.name !== 'string' || !beat.name) continue;
+      if (!Number.isFinite(beat.every) || beat.every <= 0) continue;
+
+      this.beats.set(beat.name, {
+        ...beat,
+        grace: Number.isFinite(beat.grace) && beat.grace >= 0 ? beat.grace : 0,
+        // A missing or nonsensical timestamp counts as "just seen" rather than
+        // as 1970, which would report the job overdue by decades on the first
+        // sweep after a restart.
+        lastSeenAt:
+          Number.isFinite(beat.lastSeenAt) && beat.lastSeenAt > 0 ? beat.lastSeenAt : Date.now(),
+      });
+    }
     if (this.beats.size > 0) this.ensureRunning();
   }
 
