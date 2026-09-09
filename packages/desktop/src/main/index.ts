@@ -1,4 +1,14 @@
-import { app, BrowserWindow, ipcMain, Menu, Notification, nativeImage, Tray, shell } from 'electron';
+import {
+  app,
+  BrowserWindow,
+  ipcMain,
+  Menu,
+  Notification,
+  nativeImage,
+  powerMonitor,
+  Tray,
+  shell,
+} from 'electron';
 import { join } from 'node:path';
 import { Hub } from './hub.js';
 import { speakSystem } from './speech.js';
@@ -242,6 +252,25 @@ app.on('second-instance', showWindow);
 
 app.whenReady().then(async () => {
   hub = new Hub(app.getPath('userData'), VERSION);
+
+  /**
+   * Reconnects after the machine has been asleep.
+   *
+   * A tray app looks like it is always running, and after a suspend it very
+   * often is not: the socket is gone - a laptop wakes on a different network
+   * as often as not - and every mechanism the client has for noticing is a
+   * timer measured against a clock the OS stopped. So it comes back holding a
+   * dead connection with a reconnect pending that was never going to fire, and
+   * says nothing, which reads exactly like a quiet night.
+   *
+   * `sync()` is the whole response, and it is the same one the phone makes
+   * when its alarm fires: reconnect a client that is not ready, replace one
+   * whose socket has gone quiet, and otherwise ask for anything missed.
+   * `unlock-screen` is listened for as well as `resume`, because a screen that
+   * locked without the machine ever suspending produces the same gap.
+   */
+  powerMonitor.on('resume', () => hub.sync());
+  powerMonitor.on('unlock-screen', () => hub.sync());
 
   hub.on('state', (state) => {
     send('state', state);
