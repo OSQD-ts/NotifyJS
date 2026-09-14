@@ -134,6 +134,16 @@ export class NotifyClient {
   private reconnectTimer: ReturnType<typeof setTimeout> | undefined;
   private closedByUs = false;
   private pendingCode: string | undefined;
+  /**
+   * The hub refused this device's pair or auth frame on the current socket.
+   *
+   * Retrying on a timer cannot help: the hub gives the same answer, and each
+   * attempt is charged to this IP. A device revoked while offline banned its
+   * own address within half a minute - and with it every device sharing that
+   * NAT, for a ban that doubled on every cycle. Retries wait for somebody or
+   * something to ask: `connect()`, `pair()` or `resume()`.
+   */
+  private rejected = false;
   private adminSeq = 0;
   /**
    * Milliseconds this device's clock is behind the hub's.
@@ -308,6 +318,7 @@ export class NotifyClient {
 
     // Whatever the last socket was proving liveness for is gone.
     this.stopKeepalive();
+    this.rejected = false;
 
     this.setStatus(this.backoff > 0 ? 'reconnecting' : 'connecting');
     const socket = this.opts.createSocket(this.opts.url);
@@ -340,6 +351,7 @@ export class NotifyClient {
       // "unpaired" again, and close - forever, at up to one attempt a second.
       // The UI has to supply a code before there is any point in retrying.
       if (this.status === 'unpaired') return;
+      if (this.rejected) return;
       if (!this.opts.autoReconnect) {
         this.setStatus('idle');
         return;
@@ -482,6 +494,10 @@ export class NotifyClient {
       case 'error':
         this.emit('error', { code: msg.code, message: msg.message });
         if (msg.code === 'pair_failed' || msg.code === 'auth_failed') {
+          this.rejected = true;
+          // A refused code stays refused; sending it again is only another
+          // failure charged to this address.
+          this.pendingCode = undefined;
           this.setStatus('error');
         }
         return;

@@ -93,8 +93,9 @@ export class RemoteNotifier {
     // failure or a `disconnect()`, and leaving them attached would accumulate
     // a set of handlers per attempt on a long-lived client.
     const offs: (() => void)[] = [];
+    let timer: ReturnType<typeof setTimeout> | undefined;
     const settled = new Promise<void>((resolve, reject) => {
-      const timer = setTimeout(
+      timer = setTimeout(
         () => reject(new Error(`timed out connecting to ${this.opts.url}`)),
         this.opts.timeoutMs ?? 15_000,
       );
@@ -120,6 +121,11 @@ export class RemoteNotifier {
         }),
       );
     });
+    // When `pair()` or `connect()` throws, `settled` is never awaited, and its
+    // timeout used to reject it anyway - an unhandled rejection that took the
+    // host process down fifteen seconds after the caller had already handled
+    // the real error.
+    settled.catch(() => {});
 
     try {
       if (this.opts.pairingCode && !(await this.client.isPaired())) {
@@ -129,6 +135,7 @@ export class RemoteNotifier {
       }
       await settled;
     } finally {
+      clearTimeout(timer);
       for (const off of offs) off();
     }
   }

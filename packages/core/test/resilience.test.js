@@ -206,6 +206,87 @@ test('an app sends to a hub in another process', async () => {
   device.disconnect();
 });
 
+test('a device the hub refuses stops retrying on its own', async () => {
+  // Its own hub, with bans out of reach: the old loop would otherwise ban
+  // 127.0.0.1 for every test that runs after this one.
+  const dir = mkdtempSync(join(tmpdir(), 'notifyjs-refused-'));
+  const strict = new Notifier({
+    port: 0,
+    storeDir: dir,
+    dashboard: false,
+    logger: false,
+    security: { uniformFailureMs: 1, maxFailuresBeforeBan: 1000 },
+  });
+  await strict.start();
+  const failures = [];
+  const onFailed = (e) => failures.push(e.reason);
+  strict.on('auth:failed', onFailed);
+
+  const client = new NotifyClient({
+    url: strict.url.replace('localhost', '127.0.0.1'),
+    crypto: nodeCrypto,
+    storage: memoryStorage(),
+    createSocket: (url) => new WebSocket(url),
+    deviceName: 'revoked-while-offline',
+    platform: 'node-test',
+    autoReconnect: true,
+  });
+
+  try {
+    const ready = once(client, 'ready');
+    await client.pair(strict.createPairingCode({ role: 'viewer' }).code);
+    const { deviceId } = await ready;
+    client.disconnect();
+    // Revoked while offline: a device still online is told `revoked` and
+    // stops by itself, which is not the case this is about.
+    while (strict.onlineDeviceIds().includes(deviceId)) {
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    strict.revokeDevice(deviceId);
+
+    await client.connect();
+    // Backoff starts under a second and doubles, so the old loop had been
+    // refused at least twice more by now - each one charged toward a ban.
+    await new Promise((r) => setTimeout(r, 3500));
+    assert.deepEqual(failures, ['unknown_device'], 'it went on retrying after being refused');
+    assert.equal(client.status, 'error');
+
+    // Coming back to the foreground is still a reason to try again.
+    client.resume();
+    await new Promise((r) => setTimeout(r, 500));
+    assert.equal(failures.length, 2, 'resume() tries again');
+  } finally {
+    strict.off('auth:failed', onFailed);
+    client.disconnect();
+    await strict.stop();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a connect that throws leaves no timeout behind to crash the process', async () => {
+  const unhandled = [];
+  const onUnhandled = (err) => unhandled.push(err);
+  process.on('unhandledRejection', onUnhandled);
+
+  // No scheme, so the socket constructor throws before anything is sent.
+  const remote = new RemoteNotifier({
+    url: 'localhost:1',
+    storage: memoryStorage(),
+    name: 'malformed-url-app',
+    timeoutMs: 50,
+  });
+
+  try {
+    await assert.rejects(remote.connect());
+    // Well past the timeout, which used to reject a promise nobody awaited.
+    await new Promise((r) => setTimeout(r, 250));
+    assert.deepEqual(unhandled, [], 'the abandoned timeout rejected with nobody listening');
+  } finally {
+    process.off('unhandledRejection', onUnhandled);
+    remote.disconnect();
+  }
+});
+
 test('keepAlive registers a heartbeat and keeps it satisfied', async () => {
   const { code } = hub.createPairingCode({ role: 'admin' });
   const remote = new RemoteNotifier({
