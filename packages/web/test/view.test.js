@@ -176,6 +176,39 @@ test('the call overlay is announced to assistive tech as a modal dialog', () => 
 });
 
 
+test('a call rings on a page nothing has unlocked', async () => {
+  // A dashboard reloaded after pairing never shows the pair form or the
+  // notification button, which were the only things that created the audio
+  // context - so every call on it rang in silence.
+  const { Ringer } = await import('../dist/speech.js');
+  const tones = [];
+  class FakeAudioContext {
+    state = 'suspended';
+    currentTime = 0;
+    destination = {};
+    async resume() {
+      this.state = 'running';
+    }
+    createOscillator() {
+      return { frequency: {}, connect: (next) => next, start: () => tones.push('tone'), stop() {} };
+    }
+    createGain() {
+      return { gain: { setValueAtTime() {}, linearRampToValueAtTime() {} }, connect: (next) => next };
+    }
+  }
+  globalThis.AudioContext = FakeAudioContext;
+
+  const ringer = new Ringer();
+  try {
+    ringer.start(30);
+    await new Promise((r) => setTimeout(r, 20));
+    assert.ok(tones.length > 0, 'the call rang in silence');
+  } finally {
+    ringer.stop();
+    delete globalThis.AudioContext;
+  }
+});
+
 test('a ring stops itself even when nothing tells it to', async () => {
   // Every normal ending comes from elsewhere - the user answering, or the hub
   // sending `call.cancel`. A hub that dies mid-call sends neither, and the

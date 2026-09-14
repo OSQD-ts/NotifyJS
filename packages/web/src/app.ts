@@ -42,6 +42,16 @@ const client = new NotifyClient({
 });
 
 const ringer = new Ringer();
+// Audio unlocks only from a gesture, and the ones that used to do it - the pair
+// form and "enable notifications" - are gone once a tab is paired and
+// permitted. A reloaded dashboard then rang every call in silence. Any gesture
+// on the page will do.
+for (const type of ['pointerdown', 'keydown'] as const) {
+  document.addEventListener(type, () => void ringer.unlock().catch(() => {}), {
+    capture: true,
+    passive: true,
+  });
+}
 const feed: Notification[] = [];
 let activeFilter: Severity | 'all' = 'all';
 let activeCall: CallRequest | undefined;
@@ -498,7 +508,9 @@ $('call-answer').addEventListener('click', async () => {
     });
   }
   client.endCall(call.id);
-  closeCall();
+  // Another call may have taken the screen while this one was read out;
+  // closing it here stopped its ring and hid it unanswered.
+  if (activeCall?.id === call.id) closeCall();
 });
 
 $('call-decline').addEventListener('click', () => {
@@ -538,8 +550,12 @@ async function refreshDevices(): Promise<void> {
       revoke.textContent = device.status === 'revoked' ? 'revoked' : 'Revoke';
       revoke.disabled = device.status === 'revoked';
       revoke.addEventListener('click', async () => {
-        await client.admin('devices.revoke', { deviceId: device.id });
-        await refreshDevices();
+        try {
+          await client.admin('devices.revoke', { deviceId: device.id });
+          await refreshDevices();
+        } catch (err) {
+          announce(`Could not revoke ${device.name}: ${err instanceof Error ? err.message : String(err)}`);
+        }
       });
 
       top.append(dot, name, revoke);
@@ -620,6 +636,7 @@ client.on('ready', (ready) => {
   $('device-line').textContent = `${ready.deviceName} · ${ready.role}`;
   $('devices-toggle').hidden = !canManage();
   $('snooze').hidden = false;
+  renderSnooze();
   $('settings-toggle').hidden = false;
   renderSettings();
   updateNotificationButton();
@@ -689,17 +706,51 @@ client.on('service:bye', ({ reason }) => {
   $('service-down').hidden = false;
 });
 
-$('snooze').addEventListener('click', () => {
+const SNOOZE_KEY = 'notifyjs.snoozedUntil';
+let snoozeExpiry: ReturnType<typeof setTimeout> | undefined;
+
+/**
+ * The snooze button, drawn from when the snooze ends rather than from itself.
+ *
+ * It used to hold its state only in its own attributes, so it went on saying
+ * "Snoozed" after the hub had resumed, and a reload reset it to "Snooze 30m"
+ * while the hub was still holding alerts back - telling somebody their pager
+ * was live when it was not.
+ */
+function renderSnooze(): void {
+  let until = 0;
+  try {
+    until = Number(localStorage.getItem(SNOOZE_KEY)) || 0;
+  } catch {
+    // Storage refused: the button falls back to the unsnoozed label.
+  }
+  const active = until > Date.now();
   const button = $<HTMLButtonElement>('snooze');
-  if (button.dataset.active === 'true') {
+  button.dataset.active = String(active);
+  button.textContent = active ? 'Snoozed - tap to resume' : 'Snooze 30m';
+  if (snoozeExpiry) clearTimeout(snoozeExpiry);
+  snoozeExpiry = active ? setTimeout(renderSnooze, until - Date.now()) : undefined;
+}
+
+function rememberSnooze(until: number): void {
+  try {
+    if (until) localStorage.setItem(SNOOZE_KEY, String(until));
+    else localStorage.removeItem(SNOOZE_KEY);
+  } catch {
+    // Best effort; the hub holds the snooze either way.
+  }
+  renderSnooze();
+}
+
+$('snooze').addEventListener('click', () => {
+  if ($<HTMLButtonElement>('snooze').dataset.active === 'true') {
     client.unsnooze();
-    button.dataset.active = 'false';
-    button.textContent = 'Snooze 30m';
+    rememberSnooze(0);
     announce('Notifications resumed.');
   } else {
-    client.snooze(30 * 60_000);
-    button.dataset.active = 'true';
-    button.textContent = 'Snoozed - tap to resume';
+    const duration = 30 * 60_000;
+    client.snooze(duration);
+    rememberSnooze(Date.now() + duration);
     announce('Snoozed for 30 minutes. Critical alerts will still arrive.');
   }
 });
