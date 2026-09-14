@@ -41,7 +41,7 @@ function hostOf(url: string): string {
 
 export default function App() {
   const t = useTheme();
-  const { manager, sources, feed, activeCall, callAnswered, prefs, loaded, savePrefs, closeCall } =
+  const { manager, sources, feed, activeCall, callAnswered, prefs, loaded, savePrefs, closeCall, markAnswered } =
     useSources();
 
   const [view, setView] = useState<View_>('feed');
@@ -212,11 +212,15 @@ export default function App() {
       <>
         <StatusBar style={t.isDark ? 'light' : 'dark'} />
         <CallScreen
+          // A second call is a new screen. Reused, this one carried the first
+          // call's answered state - and its finish - over to the second.
+          key={call.id}
           call={call}
           speech={prefs.speech}
           answered={callAnswered}
           onAnswer={() => {
             manager.answerCall(sourceId, call.id);
+            markAnswered(call.id);
             // The ring is over; leaving the notification up would let a second
             // Answer restart a call that is already being spoken.
             dismissCall(call.id);

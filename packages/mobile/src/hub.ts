@@ -25,7 +25,9 @@ import {
   addToFeed,
   callAnswered,
   markResolved,
+  nativeRingSeconds,
   shouldWatch,
+  strandedCall,
   type FeedEntry,
 } from './state';
 import { secureStorage } from './storage';
@@ -187,7 +189,15 @@ class HubClient {
 
   private wire(): void {
     this.teardown = [
-      this.manager.on('sources', (sources) => this.set({ sources })),
+      this.manager.on('sources', (sources) => {
+        const call = this.state.activeCall;
+        if (call && strandedCall(call, this.state.answeredCallId, sources)) {
+          dismissCall(call.call.id);
+          this.set({ sources, activeCall: undefined });
+          return;
+        }
+        this.set({ sources });
+      }),
 
       this.manager.on('notification', (entry) => {
         const feed = addToFeed(this.state.feed, entry);
@@ -210,6 +220,7 @@ class HubClient {
           from: `${entry.call.from} · ${entry.sourceLabel}`,
           message: entry.call.message,
           severity: entry.call.severity,
+          ringSeconds: nativeRingSeconds(entry.call.ringSeconds),
         });
       }),
 
@@ -319,8 +330,21 @@ class HubClient {
     this.set({ feed: [] });
   }
 
+  /**
+   * Answered on the call screen itself. Recorded like an answer from the
+   * notification, so a connection dropping mid-message does not take the call
+   * away before it has been heard.
+   */
+  markAnswered(callId: string): void {
+    this.set({ answeredCallId: callId });
+  }
+
   closeCall(entry?: SourcedCall): void {
     if (entry) dismissCall(entry.call.id);
+    // The call that finished may no longer be the one on screen: a second call
+    // can replace it while its message is still being read, and clearing here
+    // hid that call unanswered.
+    if (entry && this.state.activeCall?.call.id !== entry.call.id) return;
     this.set({ answeredCallId: undefined, activeCall: undefined });
   }
 

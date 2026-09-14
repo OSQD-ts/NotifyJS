@@ -6,6 +6,8 @@ export interface IncomingCallOptions {
   from: string;
   message: string;
   severity?: string;
+  /** How long the hub rings this device; the native ring ends a little after. */
+  ringSeconds?: number;
 }
 
 /** Answer or Decline tapped on the notification rather than in the app. */
@@ -28,7 +30,7 @@ export interface WakeEvent {
 interface NotifyjsCallNative {
   showIncomingCall(options: IncomingCallOptions): void;
   dismissCall(id: string): void;
-  stopRinging(): void;
+  stopRinging(id: string): void;
   speak(text: string, language: string, rate: number, pitch: number, repeat: number): Promise<boolean>;
   stopSpeaking(): void;
   showAlert(id: string, title: string, body: string, sound: boolean, vibrate: boolean): void;
@@ -76,9 +78,12 @@ export function dismissCall(id: string): void {
   native?.dismissCall(id);
 }
 
-/** Answering. The notification stays until the message has been spoken. */
-export function stopRinging(): void {
-  native?.stopRinging();
+/**
+ * Answering. The notification stays until the message has been spoken. Only
+ * this call's ring stops; a call that has since replaced it keeps ringing.
+ */
+export function stopRinging(id: string): void {
+  native?.stopRinging(id);
 }
 
 /**

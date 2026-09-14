@@ -35,10 +35,19 @@ object CallRinger {
   private val PATTERN = longArrayOf(0, 700, 800, 700, 1600)
 
   /**
-   * A ring nobody answers has to end by itself. If the JS side dies mid-call
-   * this is the only thing that stops the phone ringing until the battery does.
+   * How long a ring may last before it ends by itself. If the JS side dies
+   * mid-call this is the only thing that stops the phone ringing until the
+   * battery does.
+   *
+   * Taken from the call, as the browser does, rather than a flat minute: a hub
+   * may ring one device for up to ten, and a phone that went quiet at sixty
+   * seconds left the hub waiting on a device nobody could hear, holding back
+   * the escalation. Bounded so no value a hub sends leaves it ringing all day.
    */
-  private const val MAX_RING_MS = 60_000L
+  fun ringDeadlineMs(ringSeconds: Int?): Long {
+    val seconds = if (ringSeconds != null && ringSeconds > 0) ringSeconds.toLong() else 60L
+    return (seconds + 15).coerceIn(30L, 15L * 60) * 1000
+  }
 
   private val ALARM_ATTRS: AudioAttributes = AudioAttributes.Builder()
     .setUsage(AudioAttributes.USAGE_ALARM)
@@ -58,24 +67,32 @@ object CallRinger {
   fun ringing(): String? = ringingId
 
   @Synchronized
-  fun start(context: Context, callId: String) {
+  fun start(context: Context, callId: String, ringSeconds: Int? = null) {
     if (ringingId == callId) return
     stop()
     ringingId = callId
+    val deadline = ringDeadlineMs(ringSeconds)
 
     val app = context.applicationContext
-    keepAwake(app)
+    keepAwake(app, deadline)
     takeAudioFocus(app)
     playRingtone(app)
     startVibrating(app)
 
-    stopper.postDelayed({ stop() }, MAX_RING_MS)
+    stopper.postDelayed({ stop() }, deadline)
   }
 
-  /** Idempotent: answering, declining and cancelling all land here. */
+  /**
+   * Idempotent: answering, declining and cancelling all land here.
+   *
+   * Given an id, stops only that call's ring. A second call replaces the first
+   * one's ring, and the first one's cancel - or Decline on its leftover
+   * notification - used to silence the call now ringing.
+   */
   @Synchronized
-  fun stop() {
+  fun stop(callId: String? = null) {
     if (ringingId == null) return
+    if (callId != null && callId != ringingId) return
     ringingId = null
     stopper.removeCallbacksAndMessages(null)
 
@@ -101,15 +118,15 @@ object CallRinger {
   /**
    * Holds the CPU up for as long as the phone is ringing.
    *
-   * Timed out at the ring length so a crash between start and stop costs a
-   * minute of wakefulness rather than the rest of the day.
+   * Timed out at the ring length so a crash between start and stop costs one
+   * ring of wakefulness rather than the rest of the day.
    */
-  private fun keepAwake(context: Context) {
+  private fun keepAwake(context: Context, timeoutMs: Long) {
     val power = context.getSystemService(Context.POWER_SERVICE) as? PowerManager ?: return
     wakeLock = runCatching {
       power.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "notifyjs:ring").apply {
         setReferenceCounted(false)
-        acquire(MAX_RING_MS)
+        acquire(timeoutMs)
       }
     }.getOrNull()
   }

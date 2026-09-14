@@ -87,6 +87,42 @@ export function callAnswered(
 }
 
 /**
+ * Whether a call still ringing has lost the hub that placed it.
+ *
+ * The hub treats a device whose socket closes as having declined, rings the
+ * next person, and never sends this device a cancel - its later `taken` and
+ * `missed` go only to devices still ringing. A connection that dropped
+ * (a Wi-Fi handover), a revoke, or a removed source therefore left the phone
+ * ringing and offering an Answer the hub would ignore, to somebody who then
+ * believed they had taken a page that someone else had. An answered call is
+ * left alone: its message is still worth hearing out.
+ */
+export function strandedCall(
+  activeCall: SourcedCall | undefined,
+  answeredCallId: string | undefined,
+  sources: readonly SourceState[],
+): boolean {
+  if (!activeCall || callAnswered(activeCall, answeredCallId)) return false;
+  const source = sources.find((s) => s.id === activeCall.sourceId);
+  return source?.status !== 'ready';
+}
+
+/**
+ * A ring length the native module can be handed: whole seconds, in range, or
+ * nothing at all.
+ *
+ * The value comes from a hub and crosses into a Kotlin `Int`. A fraction or a
+ * number past `Int` range fails that conversion, and a failed
+ * `showIncomingCall` does not ring at all - so it is settled here, where the
+ * worst a bad value can do is fall back to the default length.
+ */
+export function nativeRingSeconds(value: unknown): number | undefined {
+  const seconds = Number(value);
+  if (!Number.isFinite(seconds) || seconds <= 0) return undefined;
+  return Math.max(1, Math.min(Math.round(seconds), 15 * 60));
+}
+
+/**
  * Whether a recurring prompt is still inside its quiet period.
  *
  * Anything unreadable counts as long ago, so an install that predates the

@@ -6,8 +6,10 @@ import {
   addToFeed,
   callAnswered,
   markResolved,
+  nativeRingSeconds,
   promptIsFresh,
   shouldWatch,
+  strandedCall,
 } from '../dist-test/state.js';
 
 /** A feed entry in the shape the hub delivers one. */
@@ -87,6 +89,37 @@ test('watching needs both the setting and something to watch', () => {
 });
 
 /* -------------------------------- calls -------------------------------- */
+
+test('a ringing call is dropped once its hub is no longer connected', () => {
+  // The hub counts a closed socket as a decline and rings the next person,
+  // but never tells this device - so without this the phone rang on and
+  // offered an Answer the hub would ignore.
+  const call = { sourceId: 'hub-a', sourceLabel: 'hub-a', call: { id: 'c1' } };
+  const source = (status) => [{ id: 'hub-a', url: 'ws://a', label: 'hub-a', enabled: true, status, paired: true }];
+
+  assert.equal(strandedCall(call, undefined, source('ready')), false, 'still connected');
+  assert.equal(strandedCall(call, undefined, source('reconnecting')), true, 'the socket dropped');
+  assert.equal(strandedCall(call, undefined, source('revoked')), true, 'this device was revoked');
+  assert.equal(strandedCall(call, undefined, []), true, 'the source was removed');
+  assert.equal(
+    strandedCall(call, 'c1', source('reconnecting')),
+    false,
+    'an answered call is heard out, not taken away mid-message',
+  );
+  assert.equal(strandedCall(undefined, undefined, source('reconnecting')), false, 'no call at all');
+});
+
+test('a ring length reaches the native module as whole seconds or not at all', () => {
+  // A Kotlin `Int` refuses a fraction or anything past its range, and a
+  // refused `showIncomingCall` would not ring at all.
+  assert.equal(nativeRingSeconds(30), 30);
+  assert.equal(nativeRingSeconds(29.6), 30, 'rounded');
+  assert.equal(nativeRingSeconds(0.2), 1, 'a positive length never rounds to nothing');
+  assert.equal(nativeRingSeconds(1e12), 900, 'capped well inside Int range');
+  for (const bad of [undefined, null, 0, -5, NaN, Infinity, 'soon']) {
+    assert.equal(nativeRingSeconds(bad), undefined, `no length for ${String(bad)}`);
+  }
+});
 
 test('a call counts as answered only when the ids line up', () => {
   const call = { sourceId: 'hub-a', sourceLabel: 'a', call: { id: 'c1' } };
