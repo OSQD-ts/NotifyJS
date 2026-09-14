@@ -819,10 +819,27 @@ async function checkHubVersion(): Promise<void> {
 
 $('app-update-reload').addEventListener('click', () => location.reload());
 
-/** Coming back from background may have missed frames; resync. */
+/**
+ * Moments worth checking the connection, as the phone and desktop do.
+ *
+ * `resume()` rather than `sync()`: it resyncs a ready client, but also retries
+ * one that is not. The client no longer retries a refused handshake on its own
+ * timer - each attempt was charged toward a ban - so without this a tab refused
+ * once, for a clock that had drifted or a hub restored from a backup, stayed
+ * disconnected until somebody reloaded it. The interval is for the tab left
+ * open on a screen nobody switches to, and is slow for the same ban reason.
+ */
+function recheck(): void {
+  // `idle` is a tab that has never connected - still on the pairing form. A
+  // resume there would only be told "unpaired" and redraw the form under
+  // somebody typing a code.
+  if (client.status !== 'idle') client.resume();
+}
 document.addEventListener('visibilitychange', () => {
-  if (document.visibilityState === 'visible' && client.status === 'ready') client.sync();
+  if (document.visibilityState === 'visible') recheck();
 });
+window.addEventListener('online', recheck);
+setInterval(recheck, 9 * 60_000);
 
 async function main(): Promise<void> {
   buildFilters();
