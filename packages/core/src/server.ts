@@ -2138,13 +2138,23 @@ export class Notifier extends EventEmitter<NotifierEvents> {
           return reply(true, { revoked: this.revokeIngestToken(String(args.id)) });
         case 'roles.list':
           return reply(true, { roles: this.roles() });
-        case 'roles.upsert':
+        case 'roles.upsert': {
           // A role may only carry the privileged capabilities its author
           // already holds. Blocking `admin` alone was not enough:
           // `devices.manage` mints pairing codes and `roles.manage` writes the
           // role they point at, so either one composes back into admin.
-          this.upsertRole(sanitizeRole(args, role.capabilities));
+          const next = sanitizeRole(args, role.capabilities);
+          // Stripping is right for a new role, but applied to one that already
+          // exists it quietly rewrote it: a `roles.manage` device saving the
+          // `admin` role's description sent it back with no capabilities, and
+          // every admin device lost its authority on the spot.
+          const existing = this.store.role(next.name);
+          if (existing && escalatingCapabilities(role, existing.capabilities).length > 0) {
+            throw new Error(`role ${next.name} carries capabilities you do not hold`);
+          }
+          this.upsertRole(next);
           return reply(true, { roles: this.roles() });
+        }
         case 'roles.delete':
           return reply(true, { deleted: this.deleteRole(String(args.name)) });
         case 'notify.send':
