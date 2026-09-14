@@ -158,6 +158,34 @@ test('removing a source discards its identity', async () => {
   sources.disconnectAll();
 });
 
+test('removing a muted source still discards its identity', async () => {
+  const backing = memoryStorage();
+  const written = new Set();
+  const storage = {
+    ...backing,
+    async set(k, v) {
+      written.add(k);
+      return backing.set(k, v);
+    },
+  };
+
+  const sources = manager(storage);
+  await sources.load();
+  const added = await sources.add({
+    url: HOME_URL,
+    code: home.createPairingCode({ role: 'oncall' }).code,
+  });
+  const secrets = [...written].filter((k) => k.includes(added.id) && k.endsWith('secretSeed'));
+  assert.equal(secrets.length, 1, 'the keypair was stored under the source');
+
+  // Muting drops the live client, which is what removal used to rely on.
+  await sources.setEnabled(added.id, false);
+  await sources.remove(added.id);
+
+  for (const k of secrets) assert.equal(await backing.get(k), null, `${k} was left behind`);
+  sources.disconnectAll();
+});
+
 test('the same hub cannot be added twice', async () => {
   const sources = manager();
   await sources.load();
