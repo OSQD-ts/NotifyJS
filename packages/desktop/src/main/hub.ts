@@ -125,11 +125,9 @@ export class Hub {
     this.clearCall();
   }
 
-  endCall(): void {
-    const call = this.activeCall;
-    if (!call) return;
-    this.manager.endCall(call.sourceId, call.call.id);
-    this.clearCall();
+  endCall(sourceId: string, callId: string): void {
+    this.manager.endCall(sourceId, callId);
+    if (this.activeCall?.call.id === callId) this.clearCall();
   }
 
   clearFeed(): void {

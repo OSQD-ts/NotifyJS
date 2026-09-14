@@ -39,7 +39,7 @@ const bridge: Bridge = {
 
   answerCall: () => ipcRenderer.invoke('call:answer'),
   declineCall: () => ipcRenderer.invoke('call:decline'),
-  endCall: () => ipcRenderer.invoke('call:end'),
+  endCall: (sourceId: string, callId: string) => ipcRenderer.invoke('call:end', sourceId, callId),
   speakSystem: (message: string, repeat: number) =>
     ipcRenderer.invoke('call:speak', message, repeat),
 

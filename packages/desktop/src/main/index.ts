@@ -11,7 +11,7 @@ import {
 } from 'electron';
 import { join } from 'node:path';
 import { Hub } from './hub.js';
-import { speakSystem } from './speech.js';
+import { speakSystem, stopSystemSpeech } from './speech.js';
 import type { ActiveCall, AddSourceInput, AppState, ClientPreferences, DesktopPreferences } from '../shared.js';
 
 const VERSION = app.getVersion();
@@ -231,7 +231,13 @@ function registerIpc(): void {
 
   ipcMain.handle('call:answer', () => hub.answerCall());
   ipcMain.handle('call:decline', () => hub.declineCall());
-  ipcMain.handle('call:end', () => hub.endCall());
+  // Named by id: the call that was answered may no longer be the active one by
+  // the time its message has been read out, and ending "whatever is active"
+  // hung up the next call instead.
+  ipcMain.handle('call:end', (_e, sourceId: unknown, callId: unknown) => {
+    stopSystemSpeech();
+    if (typeof sourceId === 'string' && typeof callId === 'string') hub.endCall(sourceId, callId);
+  });
   ipcMain.handle('call:speak', (_e, message: string, repeat: number) =>
     speakSystem(message, repeat),
   );

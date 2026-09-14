@@ -43,7 +43,8 @@ const actions: Actions = {
   },
   hangUp: () => {
     stopSpeaking();
-    void bridge.endCall();
+    const active = state?.activeCall;
+    if (active) void bridge.endCall(active.sourceId, active.call.id);
   },
   navigate: (next) => {
     view = next;
@@ -69,7 +70,7 @@ function resetCall(): void {
 async function answer(): Promise<void> {
   if (answering || !state?.activeCall) return;
   answering = true;
-  const { call } = state.activeCall;
+  const { call, sourceId } = state.activeCall;
   const prefs = state.prefs.speech;
 
   ringer.stop();
@@ -77,7 +78,7 @@ async function answer(): Promise<void> {
 
   if (!prefs.enabled) {
     // Answering still counts; the person simply does not want it read out.
-    await bridge.endCall();
+    await bridge.endCall(sourceId, call.id);
     resetCall();
     return;
   }
@@ -96,8 +97,10 @@ async function answer(): Promise<void> {
     bridge.speakSystem,
   );
 
-  await bridge.endCall();
-  resetCall();
+  await bridge.endCall(sourceId, call.id);
+  // Another call may have arrived while this one was read out; its ring and
+  // its screen are not this call's to reset.
+  if (!state?.activeCall || state.activeCall.call.id === call.id) resetCall();
 }
 
 function onCall(call: ActiveCall | null): void {

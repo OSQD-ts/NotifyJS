@@ -1,5 +1,18 @@
-import { execFile } from 'node:child_process';
+import { execFile, type ChildProcess } from 'node:child_process';
 import { platform } from 'node:os';
+
+/** Engines speaking right now, so hanging up can silence them. */
+const speaking = new Set<ChildProcess>();
+
+/** Bumped by `stopSystemSpeech`, so a run part-way through its repeats stops too. */
+let generation = 0;
+
+/**
+ * A stuck engine - speech-dispatcher never answering `--wait` - otherwise kept
+ * the call answered and unfinished at the hub for as long as the app ran.
+ * Generous, because the longest message a hub sends takes minutes to read.
+ */
+const ENGINE_TIMEOUT_MS = 5 * 60_000;
 
 /**
  * Speaking through whatever engine the operating system already has.
@@ -14,9 +27,16 @@ const run = (cmd: string, args: string[], env?: NodeJS.ProcessEnv): Promise<bool
   new Promise((resolve) => {
     // Arguments are passed as an array, never through a shell, so a message
     // containing shell metacharacters is inert.
-    execFile(cmd, args, { env: env ? { ...process.env, ...env } : process.env }, (err) =>
-      resolve(!err),
+    const child = execFile(
+      cmd,
+      args,
+      { env: env ? { ...process.env, ...env } : process.env, timeout: ENGINE_TIMEOUT_MS },
+      (err) => {
+        speaking.delete(child);
+        resolve(!err);
+      },
     );
+    speaking.add(child);
   });
 
 /** Engines to try, most natural first, per platform. */
@@ -68,10 +88,13 @@ function safeMessage(value: string): string {
 export async function speakSystem(raw: string, repeat: number): Promise<boolean> {
   const message = safeMessage(raw);
   const times = Math.max(1, Math.min(repeat, 5));
+  const started = generation;
   for (const [cmd, args] of engines(message)) {
     let spoke = false;
     for (let i = 0; i < times; i++) {
       spoke = await run(cmd, args, { NOTIFYJS_MESSAGE: message });
+      // Stopped on purpose: not a failure, so no other engine picks it up.
+      if (generation !== started) return true;
       // A missing binary fails on the first pass; move to the next engine
       // rather than repeating a failure five times.
       if (!spoke) break;
@@ -79,4 +102,14 @@ export async function speakSystem(raw: string, repeat: number): Promise<boolean>
     if (spoke) return true;
   }
   return false;
+}
+
+/**
+ * Silences system speech at once. Hanging up used to cancel only the window's
+ * own `speechSynthesis`, while `espeak` read on through every repeat.
+ */
+export function stopSystemSpeech(): void {
+  generation += 1;
+  for (const child of speaking) child.kill();
+  speaking.clear();
 }
