@@ -1389,11 +1389,18 @@ export class Notifier extends EventEmitter<NotifierEvents> {
   private clientIp(req: IncomingMessage): string {
     if (this.opts.security.trustProxy) {
       const fwd = req.headers['x-forwarded-for'];
-      const first = Array.isArray(fwd) ? fwd[0] : fwd?.split(',')[0];
+      const chain = Array.isArray(fwd) ? fwd.join(',') : fwd;
+      // The last entry, never the first. A proxy appends the address it saw to
+      // whatever the client already sent, so every entry before the last was
+      // written by the client. Reading the first let a peer going through the
+      // very proxy this option exists for name a fresh identity per request -
+      // past the rate limit and every ban - or name someone else's address and
+      // get it banned.
+      const last = chain?.split(',').pop();
       // Only an actual address is honoured. The header is client-supplied, so
       // an unvalidated value lets a peer invent a new identity per request and
       // walk straight past the per-IP rate limit and every ban ever issued.
-      const candidate = first ? normalizeIp(first) : undefined;
+      const candidate = last ? normalizeIp(last.trim()) : undefined;
       if (candidate && isIpAddress(candidate)) return candidate;
     }
     return normalizeIp(req.socket.remoteAddress ?? undefined);
