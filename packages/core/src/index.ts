@@ -44,7 +44,13 @@ export {
   type IngestToken,
 } from './ingest.js';
 
-export { WebPushSender, generateVapidKeys, encryptPayload, vapidAuthorization } from './webpush.js';
+export {
+  WebPushSender,
+  generateVapidKeys,
+  encodePayload,
+  encryptPayload,
+  vapidAuthorization,
+} from './webpush.js';
 export type { VapidKeys, WebPushPayload, WebPushTarget } from './webpush.js';
 export { renderQr } from './qr.js';
 export { Store } from './store.js';

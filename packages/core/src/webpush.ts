@@ -209,6 +209,54 @@ export function vapidAuthorization(
   return `vapid t=${signingInput}.${b64url(signature)}, k=${keys.publicKey}`;
 }
 
+/**
+ * The most plaintext one push can carry.
+ *
+ * Push services refuse a body over 4096 bytes, and ours is the 21-byte header,
+ * the 65-byte server key, then the plaintext plus a delimiter byte and a
+ * 16-byte tag.
+ */
+const MAX_PAYLOAD_BYTES = 4096 - 21 - 65 - 1 - 16;
+
+/** Bytes a string occupies once JSON-encoded, quotes excluded. */
+function jsonBytes(value: string): number {
+  return Buffer.byteLength(JSON.stringify(value)) - 2;
+}
+
+function truncateJson(value: string, budget: number): string {
+  const ellipsis = jsonBytes('…');
+  let out = '';
+  let used = 0;
+  for (const ch of value) {
+    const cost = jsonBytes(ch);
+    if (used + cost + ellipsis > budget) break;
+    out += ch;
+    used += cost;
+  }
+  return `${out}…`;
+}
+
+/**
+ * The payload as sent, cut to fit.
+ *
+ * With `includeBody` a notification body runs to 4000 characters, and a push
+ * over the limit is refused by the service - so the device this push exists
+ * for, the one that is not connected, received nothing at all. The body gives
+ * way first, then the title.
+ */
+export function encodePayload(payload: WebPushPayload): Buffer {
+  let fitted = payload;
+  let json = Buffer.from(JSON.stringify(fitted));
+  for (const field of ['body', 'title'] as const) {
+    const value = fitted[field];
+    if (json.length <= MAX_PAYLOAD_BYTES || !value) continue;
+    const budget = Math.max(0, jsonBytes(value) - (json.length - MAX_PAYLOAD_BYTES));
+    fitted = { ...fitted, [field]: truncateJson(value, budget) };
+    json = Buffer.from(JSON.stringify(fitted));
+  }
+  return json;
+}
+
 /** What the service worker is handed. Deliberately small - see `send`. */
 export interface WebPushPayload {
   title: string;
@@ -257,7 +305,7 @@ export class WebPushSender {
   async send(targets: Array<WebPushTarget & { deviceId: string }>, payload: WebPushPayload): Promise<void> {
     if (!this.opts.enabled || targets.length === 0) return;
 
-    const body = Buffer.from(JSON.stringify(payload));
+    const body = encodePayload(payload);
     const results = await Promise.all(targets.map((t) => this.sendOne(t, body)));
 
     const ok = results.filter(Boolean).length;
