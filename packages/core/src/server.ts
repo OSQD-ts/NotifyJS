@@ -1133,9 +1133,9 @@ export class Notifier extends EventEmitter<NotifierEvents> {
    * line - will never implement that handshake, and a pager nothing can reach
    * is not a pager.
    *
-   * Every check that guards a socket applies here too: the ban list and per-IP
-   * limiter run first, the token resolves to a role, and the role decides what
-   * may be published. What is *not* shared is the trust: this path is off
+   * The checks that guard a socket apply here too: the allow/deny lists and
+   * the ban list run first, a bad token is charged toward a ban, the token
+   * resolves to a role, and the role decides what may be published. What is *not* shared is the trust: this path is off
    * until enabled, and refuses a cleartext connection from off-box outright.
    */
   private async handleIngest(
@@ -1161,6 +1161,12 @@ export class Notifier extends EventEmitter<NotifierEvents> {
 
     const startedAt = Date.now();
     const ip = this.clientIp(req);
+    // The operator's allow/deny lists say "connect at all", and until this was
+    // checked here a hub locked to its LAN still took tokens from anywhere.
+    if (this.guard.refused(ip)) {
+      send(403, { error: 'denied', message: 'this address is refused' });
+      return;
+    }
     if (this.guard.bannedFor(ip) > 0) {
       send(403, { error: 'banned', message: 'this address is refused' });
       return;

@@ -60,12 +60,20 @@ export class Guard {
     this.sweeper = undefined;
   }
 
+  /**
+   * The operator's allow/deny rules alone, with no slot taken.
+   *
+   * Separate from `admit()` because a request that never opens a session - an
+   * HTTP publish - has nothing to release a connection slot with, yet "only
+   * these IPs may connect at all" has to mean it for that path too.
+   */
+  refused(ip: string): boolean {
+    return this.denyIps.has(ip) || (this.allowIps !== undefined && !this.allowIps.has(ip));
+  }
+
   /** Called on TCP upgrade, before a WebSocket session exists. */
   admit(ip: string): Allowance | Rejection {
-    if (this.denyIps.has(ip)) {
-      return { ok: false, reason: 'denied', retryAfter: 3600 };
-    }
-    if (this.allowIps && !this.allowIps.has(ip)) {
+    if (this.refused(ip)) {
       return { ok: false, reason: 'denied', retryAfter: 3600 };
     }
 

@@ -284,6 +284,40 @@ test('behind a proxy, the address the proxy appended is the identity', async () 
   }
 });
 
+test('the operator allow/deny lists refuse ingest as they refuse a socket', async () => {
+  // Loopback, whichever family `localhost` resolved to.
+  const here = ['127.0.0.1', '::1'];
+  const cases = [
+    { security: { denyIps: here }, why: 'a denied address' },
+    { security: { allowIps: ['203.0.113.1'] }, why: 'an address missing from the allow list' },
+  ];
+
+  for (const { security, why } of cases) {
+    const dir = mkdtempSync(join(tmpdir(), 'notifyjs-lists-'));
+    const listed = new Notifier({
+      port: 0,
+      storeDir: dir,
+      dashboard: false,
+      logger: false,
+      ingest: { enabled: true },
+      security: { uniformFailureMs: 1, ...security },
+    });
+    await listed.start();
+    const good = listed.createIngestToken({ role: 'admin', label: 'listed' }).token;
+    try {
+      const res = await fetch(`${listed.dashboardUrl}/api/notify`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', authorization: `Bearer ${good}` },
+        body: JSON.stringify({ title: 'x' }),
+      });
+      assert.equal(res.status, 403, `${why} published with a valid token`);
+    } finally {
+      await listed.stop();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+});
+
 test('a valid token clears the failure counter it would otherwise ban on', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'notifyjs-ban-'));
   const strict = new Notifier({
