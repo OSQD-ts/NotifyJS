@@ -39,6 +39,8 @@ export class Hub {
   private readonly prefs: Preferences;
   private feed: FeedEntry[] = [];
   private activeCall: ActiveCall | undefined;
+  /** Set once the active call is answered, so a dropped connection leaves it be. */
+  private answeredCallId: string | undefined;
   private snoozedUntil = 0;
   private sources = [] as AppState['sources'];
   private listeners: Partial<HubEvents> = {};
@@ -115,7 +117,9 @@ export class Hub {
 
   answerCall(): void {
     const call = this.activeCall;
-    if (call) this.manager.answerCall(call.sourceId, call.call.id);
+    if (!call) return;
+    this.manager.answerCall(call.sourceId, call.call.id);
+    this.answeredCallId = call.call.id;
   }
 
   declineCall(): void {
@@ -163,6 +167,17 @@ export class Hub {
   private wire(): void {
     this.manager.on('sources', (sources) => {
       this.sources = sources;
+      // The hub counts a device whose socket closed as having declined, rings
+      // the next person, and never tells this one. A call still ringing from a
+      // source that is no longer connected - dropped, revoked, removed - would
+      // otherwise ring on and offer an Answer the hub ignores. An answered call
+      // is left to finish being read out.
+      const call = this.activeCall;
+      const source = call && sources.find((s) => s.id === call.sourceId);
+      if (call && this.answeredCallId !== call.call.id && source?.status !== 'ready') {
+        this.clearCall();
+        return;
+      }
       this.publish();
     });
 
@@ -224,6 +239,7 @@ export class Hub {
 
   private clearCall(): void {
     this.activeCall = undefined;
+    this.answeredCallId = undefined;
     this.publish();
     this.listeners.call?.(null);
   }

@@ -628,6 +628,10 @@ client.on('status', (status) => {
   el.textContent = status;
   el.dataset.state = status;
   if (status === 'unpaired') showPairing(cryptoUnavailable());
+  // The hub counts a dropped socket as a decline, rings the next person and
+  // never tells this tab - so a call still ringing here would offer an Answer
+  // the hub ignores. One already answered is left to finish being read out.
+  if (status !== 'ready' && activeCall && $('call-speaking').hidden) closeCall();
 });
 
 client.on('ready', (ready) => {
