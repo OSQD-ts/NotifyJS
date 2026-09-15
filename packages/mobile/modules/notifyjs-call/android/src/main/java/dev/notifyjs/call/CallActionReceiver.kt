@@ -19,7 +19,7 @@ class CallActionReceiver : BroadcastReceiver() {
     val callId = intent.getStringExtra(CallNotification.EXTRA_CALL_ID) ?: return
     val answered = intent.action == CallNotification.ACTION_ANSWER
 
-    CallRinger.stop()
+    CallRinger.stop(callId)
     NotificationManagerCompat.from(context).cancel(callId.hashCode())
     CallEvents.emit(intent.action ?: CallNotification.ACTION_DECLINE, callId)
 

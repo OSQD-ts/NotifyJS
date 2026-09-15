@@ -199,12 +199,25 @@ export class SourceManager {
   async remove(id: string): Promise<void> {
     await this.load();
     const client = this.clients.get(id);
-    if (client) {
-      client.disconnect();
-      // Drop the keypair too: leaving it behind would let a stale identity
-      // reconnect if the source were ever re-added.
-      await client.forgetCredentials();
-    }
+    client?.disconnect();
+    // Drop the keypair too: leaving it behind would let a stale identity
+    // reconnect if the source were ever re-added. A muted source has no live
+    // client - muting drops it - so one is built only to find its keys, which
+    // used to stay in storage for good.
+    const source = this.sources.get(id);
+    const holder =
+      client ??
+      (source &&
+        new NotifyClient({
+          url: source.url,
+          crypto: this.opts.crypto,
+          storage: this.opts.storage,
+          createSocket: this.opts.createSocket,
+          deviceName: this.opts.deviceName(),
+          platform: this.opts.platform,
+          storagePrefix: this.storagePrefix(source.id),
+        }));
+    await holder?.forgetCredentials();
     this.clients.delete(id);
     this.states.delete(id);
     this.sources.delete(id);
@@ -276,6 +289,14 @@ export class SourceManager {
 
   /* ------------------------------ internals -------------------------- */
 
+  /**
+   * Each source keeps its own keypair under its own namespace, so one identity
+   * can never be used against another hub.
+   */
+  private storagePrefix(sourceId: string): string {
+    return `notifyjs.${sourceId}`;
+  }
+
   private async connect(source: Source, pairingCode?: string): Promise<void> {
     this.clients.get(source.id)?.disconnect();
 
@@ -288,9 +309,7 @@ export class SourceManager {
       platform: this.opts.platform,
       model: this.opts.model,
       autoReconnect: true,
-      // Each source keeps its own keypair under its own namespace, so one
-      // identity can never be used against another hub.
-      storagePrefix: `notifyjs.${source.id}`,
+      storagePrefix: this.storagePrefix(source.id),
       isOnline: this.opts.isOnline,
     });
     this.clients.set(source.id, client);

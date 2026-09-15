@@ -98,8 +98,15 @@ Behind NAT or a proxy, set `security.trustProxy = true` and raise
 `maxConnectionsPerIp` — otherwise every device behind one address shares a
 budget, and the limiter sees only the proxy.
 
+The hub reads the **last** `X-Forwarded-For` entry — the one your proxy appended
+— because everything before it was sent by the client. That assumes exactly one
+proxy in front of the hub. Behind a chain (a CDN in front of nginx, say) the
+last entry is the CDN's address, and every client behind it shares one budget;
+have the proxy nearest the hub overwrite the header with the real client address
+instead.
+
 **Only turn `trustProxy` on when the hub cannot be reached except through that
-proxy.** It makes the client IP a value the client sends. The hub requires it
+proxy.** It makes the client IP a value the caller sends. The hub requires it
 to parse as an address, so it cannot be used to spray arbitrary keys into the
 ban store, but a peer that can reach the port directly can still name a
 different address on every connection and walk past both the per-IP limits and

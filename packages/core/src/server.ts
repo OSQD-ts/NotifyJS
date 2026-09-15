@@ -1133,9 +1133,9 @@ export class Notifier extends EventEmitter<NotifierEvents> {
    * line - will never implement that handshake, and a pager nothing can reach
    * is not a pager.
    *
-   * Every check that guards a socket applies here too: the ban list and per-IP
-   * limiter run first, the token resolves to a role, and the role decides what
-   * may be published. What is *not* shared is the trust: this path is off
+   * The checks that guard a socket apply here too: the allow/deny lists and
+   * the ban list run first, a bad token is charged toward a ban, the token
+   * resolves to a role, and the role decides what may be published. What is *not* shared is the trust: this path is off
    * until enabled, and refuses a cleartext connection from off-box outright.
    */
   private async handleIngest(
@@ -1161,6 +1161,12 @@ export class Notifier extends EventEmitter<NotifierEvents> {
 
     const startedAt = Date.now();
     const ip = this.clientIp(req);
+    // The operator's allow/deny lists say "connect at all", and until this was
+    // checked here a hub locked to its LAN still took tokens from anywhere.
+    if (this.guard.refused(ip)) {
+      send(403, { error: 'denied', message: 'this address is refused' });
+      return;
+    }
     if (this.guard.bannedFor(ip) > 0) {
       send(403, { error: 'banned', message: 'this address is refused' });
       return;
@@ -1389,11 +1395,18 @@ export class Notifier extends EventEmitter<NotifierEvents> {
   private clientIp(req: IncomingMessage): string {
     if (this.opts.security.trustProxy) {
       const fwd = req.headers['x-forwarded-for'];
-      const first = Array.isArray(fwd) ? fwd[0] : fwd?.split(',')[0];
+      const chain = Array.isArray(fwd) ? fwd.join(',') : fwd;
+      // The last entry, never the first. A proxy appends the address it saw to
+      // whatever the client already sent, so every entry before the last was
+      // written by the client. Reading the first let a peer going through the
+      // very proxy this option exists for name a fresh identity per request -
+      // past the rate limit and every ban - or name someone else's address and
+      // get it banned.
+      const last = chain?.split(',').pop();
       // Only an actual address is honoured. The header is client-supplied, so
       // an unvalidated value lets a peer invent a new identity per request and
       // walk straight past the per-IP rate limit and every ban ever issued.
-      const candidate = first ? normalizeIp(first) : undefined;
+      const candidate = last ? normalizeIp(last.trim()) : undefined;
       if (candidate && isIpAddress(candidate)) return candidate;
     }
     return normalizeIp(req.socket.remoteAddress ?? undefined);
@@ -2125,13 +2138,23 @@ export class Notifier extends EventEmitter<NotifierEvents> {
           return reply(true, { revoked: this.revokeIngestToken(String(args.id)) });
         case 'roles.list':
           return reply(true, { roles: this.roles() });
-        case 'roles.upsert':
+        case 'roles.upsert': {
           // A role may only carry the privileged capabilities its author
           // already holds. Blocking `admin` alone was not enough:
           // `devices.manage` mints pairing codes and `roles.manage` writes the
           // role they point at, so either one composes back into admin.
-          this.upsertRole(sanitizeRole(args, role.capabilities));
+          const next = sanitizeRole(args, role.capabilities);
+          // Stripping is right for a new role, but applied to one that already
+          // exists it quietly rewrote it: a `roles.manage` device saving the
+          // `admin` role's description sent it back with no capabilities, and
+          // every admin device lost its authority on the spot.
+          const existing = this.store.role(next.name);
+          if (existing && escalatingCapabilities(role, existing.capabilities).length > 0) {
+            throw new Error(`role ${next.name} carries capabilities you do not hold`);
+          }
+          this.upsertRole(next);
           return reply(true, { roles: this.roles() });
+        }
         case 'roles.delete':
           return reply(true, { deleted: this.deleteRole(String(args.name)) });
         case 'notify.send':

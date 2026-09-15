@@ -46,7 +46,7 @@ export function CallScreen({ call, speech, answered, onAnswer, onDecline, onFini
   useEffect(() => {
     return () => {
       Vibration.cancel();
-      stopRinging();
+      stopRinging(call.id);
       stopSpeaking();
       Speech.stop();
     };
@@ -60,7 +60,7 @@ export function CallScreen({ call, speech, answered, onAnswer, onDecline, onFini
     started.current = true;
 
     Vibration.cancel();
-    stopRinging();
+    stopRinging(call.id);
     void Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
     setSpeaking(true);
     onAnswer();
@@ -107,7 +107,7 @@ export function CallScreen({ call, speech, answered, onAnswer, onDecline, onFini
 
   const decline = () => {
     Vibration.cancel();
-    stopRinging();
+    stopRinging(call.id);
     stopSpeaking();
     Speech.stop();
     onDecline();

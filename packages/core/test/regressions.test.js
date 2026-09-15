@@ -32,7 +32,7 @@ import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import WebSocket from 'ws';
 
-import { Notifier, Store, CallOrchestrator, createLogStream } from '../dist/index.js';
+import { Notifier, Store, CallOrchestrator, createLogStream, encodePayload } from '../dist/index.js';
 import {
   NotifyClient,
   PROTOCOL_VERSION,
@@ -547,6 +547,30 @@ test('web push encryption reproduces the RFC 8291 example byte for byte', async 
       'mlMoZIIgDll6e3vCYLocInmYWAmS6TlzAC8wEqKK6PBru3jl7A_yl95bQpu6cVPT' +
       'pK4Mqgkf1CXztLVBSt2Ks3oZwbuwXPXLWyouBWLVWGNWQexSgSxsj_Qulcy4a-fN',
   );
+});
+
+test('a push too long for one message is cut to fit rather than refused', () => {
+  // 4096 bytes on the wire, less the header, server key, delimiter and tag.
+  const MAX = 3993;
+
+  const wide = encodePayload({
+    title: 'CRITICAL: disk full',
+    body: '磁'.repeat(4000),
+    tag: 'n1',
+    severity: 'critical',
+  });
+  assert.ok(wide.length <= MAX, `${wide.length} bytes`);
+  const parsed = JSON.parse(wide.toString());
+  assert.equal(parsed.title, 'CRITICAL: disk full', 'the body gives way before the title');
+  assert.ok(parsed.body.endsWith('…'));
+
+  // Characters JSON escapes count at their escaped size.
+  const escaped = encodePayload({ title: '"'.repeat(200), body: '\n'.repeat(4000) });
+  assert.ok(escaped.length <= MAX, `${escaped.length} bytes`);
+  JSON.parse(escaped.toString());
+
+  const small = { title: 'ok', body: 'fine', tag: 't' };
+  assert.equal(encodePayload(small).toString(), JSON.stringify(small), 'what fits is untouched');
 });
 
 test('the VAPID header is scoped to one push service and signed as ES256', async () => {

@@ -185,6 +185,36 @@ test('writing roles cannot mint a capability its author does not hold', async ()
   );
 });
 
+test('a role editor cannot rewrite a role that holds more than it does', async () => {
+  hub.upsertRole({
+    name: 'role-editor',
+    channels: ['*'],
+    minSeverity: 'info',
+    capabilities: ['notify.receive', 'roles.manage'],
+  });
+
+  const { client } = await joinAs('role-editor', 'role-editor-rewriter');
+  try {
+    // Saving the admin role's description, with the role sent back whole.
+    // Stripping used to turn that into a role with no capabilities at all.
+    await assert.rejects(
+      client.admin('roles.upsert', {
+        name: 'admin',
+        description: 'renamed',
+        channels: ['*'],
+        minSeverity: 'info',
+        capabilities: ['admin'],
+      }),
+      /capabilities you do not hold/,
+    );
+  } finally {
+    client.disconnect();
+  }
+
+  const admin = hub.roles().find((r) => r.name === 'admin');
+  assert.deepEqual(admin.capabilities, ['admin'], 'the admin role keeps its authority');
+});
+
 test('a role editor can still hand out the capabilities that only receive', () => {
   // The rule must not be so tight that onboarding an ordinary viewer needs
   // admin, or operators will simply hand out admin.

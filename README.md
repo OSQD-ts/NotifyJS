@@ -869,6 +869,13 @@ but no JavaScript runs, so nothing reads what arrives. Alerts queue in the
 socket buffer and land all at once when the app is next opened, which is the
 "notifications only arrive when I reopen it" everyone eventually reports.
 
+React Native adds its own layer to this: once the activity is paused it stops
+firing JavaScript timers unless a headless task is still running, however
+alive the process is. The watch service's headless task therefore stays open
+for as long as watching is on, rather than finishing once the hub has
+connected. Otherwise the keepalive, the watchdog and the reconnect backoff
+would all stop the moment the app left the screen.
+
 The hub cannot see that from the transport, so devices prove their own liveness
 instead: the client sends a `ping` from the same thread that would handle a
 notification, which stops the instant that handling would. A device that goes

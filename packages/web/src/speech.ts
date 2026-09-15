@@ -29,6 +29,11 @@ export class Ringer {
       this.tone(this.ctx.currentTime, 0.4);
       this.tone(this.ctx.currentTime + 0.5, 0.4);
     };
+    // Tried here too, not only from a gesture: a page somebody has already
+    // clicked on may resume without one, and a call must not wait for a click
+    // that nothing prompts.
+    if (!this.ctx && typeof AudioContext !== 'undefined') this.ctx = new AudioContext();
+    if (this.ctx?.state === 'suspended') void this.ctx.resume().then(beep, () => {});
     beep();
     this.timer = setInterval(beep, 2000);
 

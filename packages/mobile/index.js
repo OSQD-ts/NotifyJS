@@ -16,7 +16,13 @@ registerRootComponent(App);
  * the native watch service starts it, and it hands off to the same `hub`
  * singleton the UI subscribes to, so whichever arrives first the phone ends up
  * with exactly one manager and one socket per source.
+ *
+ * It does not return once connected. React Native only fires JavaScript timers
+ * for a backgrounded app while a headless task is running, and the client's
+ * keepalive, watchdog and reconnect are all timers - so the task stays open
+ * for as long as the phone is meant to be watching.
  */
 AppRegistry.registerHeadlessTask('NotifyjsWatch', () => async () => {
   await hub.start();
+  await hub.whileWatching();
 });

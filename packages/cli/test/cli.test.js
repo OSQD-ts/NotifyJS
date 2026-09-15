@@ -107,6 +107,24 @@ test('minting a code prints a scannable QR alongside it', async () => {
   assert.ok(/[▀▄█]/.test(stdout), 'a QR code is printed');
 });
 
+test('--no-qr leaves the QR out', async () => {
+  // Strict parsing used to refuse the documented flag outright.
+  const { stdout } = await cli(['code', '--no-qr', '--url', HUB_URL, '--store', creds]);
+  assert.match(stdout, /[0-9A-Z]{4}-[0-9A-Z]{4}-[0-9A-Z]{4}/);
+  assert.ok(!/[▀▄█]/.test(stdout), 'no QR code is printed');
+});
+
+test('token revoke takes its id after the flags', async () => {
+  const created = await cli(['token', 'create', '--label', 'ci', '--url', HUB_URL, '--store', creds]);
+  const id = /id: (\S+)/.exec(created.stderr)?.[1];
+  assert.ok(id, 'the token id is printed');
+
+  // The id used to be read from the first argument, which here is `--url`.
+  const revoked = await cli(['token', 'revoke', '--url', HUB_URL, '--store', creds, id]);
+  assert.equal(revoked.stdout, `revoked ${id}\n`);
+  assert.ok(hub.ingestTokens().find((t) => t.id === id).revokedAt, 'the hub revoked it');
+});
+
 test('a device without permission cannot send', async () => {
   const viewerCreds = join(dir, 'viewer.json');
   const { code } = hub.createPairingCode({ role: 'viewer' });

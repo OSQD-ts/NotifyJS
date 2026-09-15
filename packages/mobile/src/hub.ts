@@ -25,7 +25,9 @@ import {
   addToFeed,
   callAnswered,
   markResolved,
+  nativeRingSeconds,
   shouldWatch,
+  strandedCall,
   type FeedEntry,
 } from './state';
 import { secureStorage } from './storage';
@@ -87,6 +89,9 @@ class HubClient {
    * wasteful and a good way to be noticed by a battery optimiser.
    */
   private watching = false;
+
+  /** Headless tasks waiting on `whileWatching()`, released when watching ends. */
+  private watchers: Array<() => void> = [];
 
   constructor() {
     this.manager = new SourceManager({
@@ -187,7 +192,15 @@ class HubClient {
 
   private wire(): void {
     this.teardown = [
-      this.manager.on('sources', (sources) => this.set({ sources })),
+      this.manager.on('sources', (sources) => {
+        const call = this.state.activeCall;
+        if (call && strandedCall(call, this.state.answeredCallId, sources)) {
+          dismissCall(call.call.id);
+          this.set({ sources, activeCall: undefined });
+          return;
+        }
+        this.set({ sources });
+      }),
 
       this.manager.on('notification', (entry) => {
         const feed = addToFeed(this.state.feed, entry);
@@ -210,6 +223,7 @@ class HubClient {
           from: `${entry.call.from} · ${entry.sourceLabel}`,
           message: entry.call.message,
           severity: entry.call.severity,
+          ringSeconds: nativeRingSeconds(entry.call.ringSeconds),
         });
       }),
 
@@ -301,10 +315,40 @@ class HubClient {
   private applyWatching(): void {
     if (!this.state.loaded) return;
     const wanted = shouldWatch(this.state.prefs, this.state.sources);
+    if (!wanted) this.releaseWatchers();
     if (wanted === this.watching) return;
     this.watching = wanted;
     if (wanted) startWatching('NotifyJS');
     else stopWatching();
+  }
+
+  /**
+   * Settles once the phone should no longer be watching.
+   *
+   * This is what the headless task awaits, and the task being open is what
+   * keeps JavaScript timers running. React Native stops firing `setTimeout`
+   * and `setInterval` the moment the activity is paused unless a headless
+   * task is still active (`JavaTimerManager`), whatever the foreground service
+   * is doing for the process. A task that finished as soon as the hub had
+   * connected therefore took the client's keepalive, watchdog and reconnect
+   * backoff with it: the socket stayed open, the `ping` frames stopped, and
+   * the hub stopped counting the phone as reached - an app that looks
+   * suspended with "Listening for alerts" still showing.
+   *
+   * Before settings have loaded nobody knows yet, so it waits rather than
+   * letting the task end early.
+   */
+  whileWatching(): Promise<void> {
+    if (this.state.loaded && !shouldWatch(this.state.prefs, this.state.sources)) {
+      return Promise.resolve();
+    }
+    return new Promise((resolve) => this.watchers.push(resolve));
+  }
+
+  private releaseWatchers(): void {
+    const waiting = this.watchers;
+    this.watchers = [];
+    for (const release of waiting) release();
   }
 
   /* ------------------------------ actions --------------------------- */
@@ -319,8 +363,21 @@ class HubClient {
     this.set({ feed: [] });
   }
 
+  /**
+   * Answered on the call screen itself. Recorded like an answer from the
+   * notification, so a connection dropping mid-message does not take the call
+   * away before it has been heard.
+   */
+  markAnswered(callId: string): void {
+    this.set({ answeredCallId: callId });
+  }
+
   closeCall(entry?: SourcedCall): void {
     if (entry) dismissCall(entry.call.id);
+    // The call that finished may no longer be the one on screen: a second call
+    // can replace it while its message is still being read, and clearing here
+    // hid that call unanswered.
+    if (entry && this.state.activeCall?.call.id !== entry.call.id) return;
     this.set({ answeredCallId: undefined, activeCall: undefined });
   }
 
@@ -338,6 +395,7 @@ class HubClient {
     for (const off of this.teardown) off();
     this.teardown = [];
     this.manager.disconnectAll();
+    this.releaseWatchers();
     this.starting = undefined;
     this.wired = false;
   }

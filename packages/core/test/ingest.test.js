@@ -234,6 +234,90 @@ test('a forwarded header cannot talk the hub out of requiring TLS', async () => 
   }
 });
 
+test('behind a proxy, the address the proxy appended is the identity', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'notifyjs-xff-chain-'));
+  const proxied = new Notifier({
+    port: 0,
+    storeDir: dir,
+    dashboard: false,
+    logger: false,
+    ingest: { enabled: true },
+    security: { trustProxy: true, uniformFailureMs: 1, maxFailuresBeforeBan: 3, failureWindowMs: 60_000 },
+  });
+  await proxied.start();
+  const good = proxied.createIngestToken({ role: 'admin', label: 'good' }).token;
+  const url = `${proxied.dashboardUrl}/api/notify`;
+
+  // What nginx's `$proxy_add_x_forwarded_for` and its peers send: whatever the
+  // client supplied, then the address the proxy actually saw.
+  const attempt = async (bearer, forwarded) =>
+    (
+      await fetch(url, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          authorization: `Bearer ${bearer}`,
+          'x-forwarded-for': forwarded,
+        },
+        body: JSON.stringify({ title: 'x' }),
+      })
+    ).status;
+
+  try {
+    // The attacker is 198.51.100.7, and puts a victim's address in front.
+    for (let i = 0; i < 3; i += 1) {
+      assert.equal(await attempt('njs_wrong', '192.0.2.50, 198.51.100.7'), 401);
+    }
+
+    // The ban lands on the attacker, whatever they claim to be next.
+    assert.equal(
+      await attempt(good, '203.0.113.9, 198.51.100.7'),
+      403,
+      'a forged first entry is not a fresh identity',
+    );
+
+    // And not on the address they named.
+    assert.equal(await attempt(good, '192.0.2.50'), 202, 'the named address was not banned');
+  } finally {
+    await proxied.stop();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('the operator allow/deny lists refuse ingest as they refuse a socket', async () => {
+  // Loopback, whichever family `localhost` resolved to.
+  const here = ['127.0.0.1', '::1'];
+  const cases = [
+    { security: { denyIps: here }, why: 'a denied address' },
+    { security: { allowIps: ['203.0.113.1'] }, why: 'an address missing from the allow list' },
+  ];
+
+  for (const { security, why } of cases) {
+    const dir = mkdtempSync(join(tmpdir(), 'notifyjs-lists-'));
+    const listed = new Notifier({
+      port: 0,
+      storeDir: dir,
+      dashboard: false,
+      logger: false,
+      ingest: { enabled: true },
+      security: { uniformFailureMs: 1, ...security },
+    });
+    await listed.start();
+    const good = listed.createIngestToken({ role: 'admin', label: 'listed' }).token;
+    try {
+      const res = await fetch(`${listed.dashboardUrl}/api/notify`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', authorization: `Bearer ${good}` },
+        body: JSON.stringify({ title: 'x' }),
+      });
+      assert.equal(res.status, 403, `${why} published with a valid token`);
+    } finally {
+      await listed.stop();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+});
+
 test('a valid token clears the failure counter it would otherwise ban on', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'notifyjs-ban-'));
   const strict = new Notifier({

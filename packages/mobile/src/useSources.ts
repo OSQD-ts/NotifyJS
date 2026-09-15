@@ -32,6 +32,7 @@ export function useSources() {
   );
   const clearFeed = useCallback(() => hub.clearFeed(), []);
   const closeCall = useCallback((entry?: SourcedCall) => hub.closeCall(entry), []);
+  const markAnswered = useCallback((callId: string) => hub.markAnswered(callId), []);
 
   return {
     manager: hub.manager,
@@ -45,6 +46,7 @@ export function useSources() {
     savePrefs,
     clearFeed,
     closeCall,
+    markAnswered,
   };
 }
 

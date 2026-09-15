@@ -280,7 +280,7 @@ export interface PushRegisterMsg extends Envelope {
    * ever deliver to.
    */
   provider: 'webpush';
-  /** Required for `webpush`, meaningless for `expo`. */
+  /** The subscription's encryption keys. Required unless `token` is empty. */
   keys?: WebPushKeys;
 }
 

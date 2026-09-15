@@ -19,6 +19,7 @@ class IncomingCallOptions : Record {
   @Field val from: String = "Alert"
   @Field val message: String = ""
   @Field val severity: String? = null
+  @Field val ringSeconds: Int? = null
 }
 
 /**
@@ -90,17 +91,17 @@ class NotifyjsCallModule : Module() {
       }
       // Rings whether or not the notification made it: a refused permission
       // should cost the banner, not the alert.
-      CallRinger.start(context, options.id)
+      CallRinger.start(context, options.id, options.ringSeconds)
     }
 
     Function("dismissCall") { id: String ->
-      CallRinger.stop()
+      CallRinger.stop(id)
       NotificationManagerCompat.from(context).cancel(id.hashCode())
     }
 
     /** Answering: the ring stops, the message has yet to be spoken. */
-    Function("stopRinging") {
-      CallRinger.stop()
+    Function("stopRinging") { id: String ->
+      CallRinger.stop(id)
     }
 
     /**

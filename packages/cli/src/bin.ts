@@ -322,6 +322,8 @@ function common(argv: string[], extra: Record<string, { type: 'string' | 'boolea
       ...extra,
     } as never,
     allowPositionals: true,
+    // `--no-qr` is documented for `code`; strict parsing refused it outright.
+    allowNegative: true,
   });
   const v = values as Record<string, string | boolean | undefined>;
   return {
@@ -610,7 +612,7 @@ async function backup(argv: string[]): Promise<void> {
 
 async function token(argv: string[]): Promise<void> {
   const sub = argv[0] && !argv[0].startsWith('-') ? argv.shift() : 'list';
-  const { values, options } = common(argv, {
+  const { values, positionals, options } = common(argv, {
     role: { type: 'string' },
     label: { type: 'string' },
     id: { type: 'string' },
@@ -637,7 +639,9 @@ async function token(argv: string[]): Promise<void> {
     }
 
     if (sub === 'revoke') {
-      const id = (values.id as string) ?? argv[0];
+      // A positional, not `argv[0]`: that is whatever came first, so
+      // `token revoke --url wss://hub <id>` tried to revoke "--url".
+      const id = (values.id as string) ?? positionals[0];
       if (!id) throw new Error('which token? pass --id <id>');
       const { revoked } = await client.admin('ingest.revoke', { id });
       process.stdout.write(revoked ? `revoked ${id}\n` : `no live token with id ${id}\n`);

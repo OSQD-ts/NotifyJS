@@ -93,7 +93,8 @@ export interface Bridge {
 
   answerCall(): Promise<void>;
   declineCall(): Promise<void>;
-  endCall(): Promise<void>;
+  /** Ends the call named, which may no longer be the active one. */
+  endCall(sourceId: string, callId: string): Promise<void>;
   /** Speaks through the OS engine, for machines whose webview has no voices. */
   speakSystem(message: string, repeat: number): Promise<boolean>;
 
