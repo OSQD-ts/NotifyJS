@@ -115,7 +115,12 @@ jobs:
           distribution: temurin
           java-version: '17'
 
+      # The default package list asks for the legacy `tools` package, which the
+      # runner's current cmdline-tools no longer offer, so sdkmanager fails
+      # outright. Gradle fetches the platform and build-tools it needs itself.
       - uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3
+        with:
+          packages: platform-tools
 
       - name: Generate the native project
         working-directory: packages/mobile
