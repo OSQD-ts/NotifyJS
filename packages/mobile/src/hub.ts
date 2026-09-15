@@ -90,6 +90,9 @@ class HubClient {
    */
   private watching = false;
 
+  /** Headless tasks waiting on `whileWatching()`, released when watching ends. */
+  private watchers: Array<() => void> = [];
+
   constructor() {
     this.manager = new SourceManager({
       storage: this.storage,
@@ -312,10 +315,40 @@ class HubClient {
   private applyWatching(): void {
     if (!this.state.loaded) return;
     const wanted = shouldWatch(this.state.prefs, this.state.sources);
+    if (!wanted) this.releaseWatchers();
     if (wanted === this.watching) return;
     this.watching = wanted;
     if (wanted) startWatching('NotifyJS');
     else stopWatching();
+  }
+
+  /**
+   * Settles once the phone should no longer be watching.
+   *
+   * This is what the headless task awaits, and the task being open is what
+   * keeps JavaScript timers running. React Native stops firing `setTimeout`
+   * and `setInterval` the moment the activity is paused unless a headless
+   * task is still active (`JavaTimerManager`), whatever the foreground service
+   * is doing for the process. A task that finished as soon as the hub had
+   * connected therefore took the client's keepalive, watchdog and reconnect
+   * backoff with it: the socket stayed open, the `ping` frames stopped, and
+   * the hub stopped counting the phone as reached - an app that looks
+   * suspended with "Listening for alerts" still showing.
+   *
+   * Before settings have loaded nobody knows yet, so it waits rather than
+   * letting the task end early.
+   */
+  whileWatching(): Promise<void> {
+    if (this.state.loaded && !shouldWatch(this.state.prefs, this.state.sources)) {
+      return Promise.resolve();
+    }
+    return new Promise((resolve) => this.watchers.push(resolve));
+  }
+
+  private releaseWatchers(): void {
+    const waiting = this.watchers;
+    this.watchers = [];
+    for (const release of waiting) release();
   }
 
   /* ------------------------------ actions --------------------------- */
@@ -362,6 +395,7 @@ class HubClient {
     for (const off of this.teardown) off();
     this.teardown = [];
     this.manager.disconnectAll();
+    this.releaseWatchers();
     this.starting = undefined;
     this.wired = false;
   }
