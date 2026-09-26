@@ -429,3 +429,43 @@ test('resuming early collects what was held', async () => {
 
   sources.disconnectAll();
 });
+
+test('a critical during a snooze does not take the held alerts with it', async () => {
+  // The catch-up recovers by syncing from the device's cursor, and a critical is
+  // deliberately delivered *through* a snooze - so acknowledging it, as every client
+  // does on receipt, moved the cursor past everything the snooze had suppressed. The
+  // feature worked only in the case where nothing paged you, which is the opposite of
+  // the case that matters.
+  const sources = manager();
+  await sources.load();
+  await sources.add({
+    url: WORK_URL,
+    code: work.createPairingCode({ role: 'oncall' }).code,
+  });
+  await new Promise((r) => setTimeout(r, 400));
+
+  const seen = [];
+  sources.on('notification', (n) => seen.push(n.notification.title));
+
+  sources.snoozeAll(60_000);
+  await new Promise((r) => setTimeout(r, 200));
+
+  await work.error({ title: 'held-1', channel: 'ci' });
+  await work.error({ title: 'held-2', channel: 'ci' });
+  await new Promise((r) => setTimeout(r, 200));
+  await work.notify({ title: 'paged through', severity: 'critical', channel: 'ci' });
+  await new Promise((r) => setTimeout(r, 300));
+
+  assert.deepEqual(seen, ['paged through'], 'only the critical arrives while snoozed');
+
+  sources.unsnoozeAll();
+  await new Promise((r) => setTimeout(r, 600));
+
+  // Both held alerts arrive. The critical comes again with them, because the replay
+  // starts from the first alert the snooze held and everything after it follows -
+  // every client dedupes by id, which is what that is for.
+  assert.ok(seen.includes('held-1'), `held-1 arrived: ${seen.join(',')}`);
+  assert.ok(seen.includes('held-2'), `held-2 arrived: ${seen.join(',')}`);
+
+  sources.disconnectAll();
+});

@@ -2256,8 +2256,23 @@ export class Notifier extends EventEmitter<NotifierEvents> {
   }
 
   private handleSync(session: Session, msg: Extract<ClientMessage, { t: 'sync' }>): void {
-    const since = Number.isFinite(msg.since) ? Math.max(0, Number(msg.since)) : 0;
-    this.replay(session, since);
+    let since = Number.isFinite(msg.since) ? Math.max(0, Number(msg.since)) : 0;
+
+    // What a snooze held back is handed over on the first sync after it ends - which
+    // is the sync the client now sends when the snooze expires or is lifted. Without
+    // this the promise that a snooze holds alerts rather than dropping them was only
+    // kept while nothing paged you: one critical through the snooze, acknowledged on
+    // receipt, took the cursor past the rest for good.
+    const held = session.device?.snoozeHeldFrom;
+    if (held !== undefined && session.device && !snoozeHolds(session.device, 'info')) {
+      since = Math.min(since, held - 1);
+      const updated = this.store.updateDevice(session.device.id, { snoozeHeldFrom: undefined });
+      if (updated) {
+        for (const other of this.byDevice.get(session.device.id) ?? []) other.device = updated;
+      }
+    }
+
+    this.replay(session, Math.max(0, since));
   }
 
   /* ------------------------------ admin ------------------------------ */
@@ -2594,13 +2609,48 @@ export class Notifier extends EventEmitter<NotifierEvents> {
     const reached = new Set<string>();
     for (const session of this.sessions.values()) {
       if (session.state !== 'ready' || !session.device) continue;
-      if (!this.allowed(session, n.channel, n.severity, n.to, false)) continue;
+      if (!this.allowed(session, n.channel, n.severity, n.to, false)) {
+        // Noted when it was the snooze that held it: the alert is in history and
+        // this device is meant to see it once the snooze ends, and its own cursor
+        // will not lead it back there - a critical delivered through the snooze,
+        // acknowledged as every client does on receipt, moves that cursor past
+        // everything the snooze suppressed.
+        if (snoozeHolds(session.device, n.severity) && this.couldSee(session, n)) {
+          this.markSnoozeHeld(session, n.seq);
+        }
+        continue;
+      }
       session.send({ v: PROTOCOL_VERSION, t: 'notification', n });
       if (!this.awake(session)) continue;
       // A device may hold several sockets; it is still one device reached.
       reached.add(session.device.id);
     }
     return [...reached];
+  }
+
+  /** Whether the snooze is the only thing standing between this device and an alert. */
+  private couldSee(session: Session, n: Notification): boolean {
+    if (!session.role || !session.device) return false;
+    return canDeliver({
+      role: session.role,
+      deviceId: session.device.id,
+      channel: n.channel,
+      severity: n.severity,
+      to: n.to,
+      isCall: false,
+    });
+  }
+
+  /** Remembers the earliest alert a snooze held back from this device. */
+  private markSnoozeHeld(session: Session, seq: number): void {
+    const device = session.device;
+    if (!device) return;
+    const held = device.snoozeHeldFrom ?? Number.POSITIVE_INFINITY;
+    if (seq >= held) return;
+
+    const updated = this.store.updateDevice(device.id, { snoozeHeldFrom: seq });
+    if (!updated) return;
+    for (const other of this.byDevice.get(device.id) ?? []) other.device = updated;
   }
 
   /**

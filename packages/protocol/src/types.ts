@@ -133,6 +133,16 @@ export interface Device {
    * gets through, so snoozing quiets noise without disabling the pager.
    */
   snoozedUntil?: number;
+  /**
+   * The lowest sequence a snooze held back from this device, if any.
+   *
+   * A snooze suppresses delivery and the alert stays in the hub's history, so the
+   * device is meant to receive it once the snooze ends. Its replay cursor cannot be
+   * relied on to find it: a `critical` alert is deliberately delivered *through* a
+   * snooze, and acknowledging that one moves the cursor past everything the snooze
+   * had suppressed. This is the mark that survives it.
+   */
+  snoozeHeldFrom?: number;
 }
 
 /**
