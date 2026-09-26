@@ -145,7 +145,11 @@ function wireSettings(): void {
   // than being toggled programmatically.
   $('pref-desktop').addEventListener('change', async () => {
     await ringer.unlock();
-    await Notification.requestPermission();
+    // Guarded: iOS Safari has no `Notification` outside an installed web app, and
+    // this threw inside an async listener - an unhandled rejection, and the
+    // checkbox left showing the opposite of the truth because the render below
+    // never ran.
+    if ('Notification' in window) await Notification.requestPermission();
     renderSettings();
     updateNotificationButton();
   });
@@ -270,7 +274,7 @@ function updateNotificationButton(): void {
 
 $('enable-notifications').addEventListener('click', async () => {
   await ringer.unlock();
-  await Notification.requestPermission();
+  if ('Notification' in window) await Notification.requestPermission();
   updateNotificationButton();
   await subscribeToPush();
 });
@@ -583,7 +587,12 @@ async function refreshRoles(): Promise<void> {
       return opt;
     }),
   );
-  select.value = 'viewer';
+  // The previous choice survives the drawer being closed and opened again;
+  // `viewer` is only the starting point.
+  const wanted = select.value || 'viewer';
+  select.value = data.roles.some((r) => r.name === wanted)
+    ? wanted
+    : (data.roles[0]?.name ?? 'viewer');
 }
 
 $('devices-toggle').addEventListener('click', () => {
