@@ -457,6 +457,9 @@ export class Notifier extends EventEmitter<NotifierEvents> {
     const targets = this.store.devices().filter((device) => {
       if (!device.pushToken || device.status !== 'active') return false;
       if (online.has(device.id)) return false;
+      // The same rule the socket path applies. Without it a snooze was not just
+      // ignored here, it was the reason the push happened.
+      if (snoozeHolds(device, n.severity)) return false;
       const role = this.store.role(device.role);
       if (!role) return false;
       return canDeliver({
@@ -772,6 +775,7 @@ export class Notifier extends EventEmitter<NotifierEvents> {
     const online = new Set(ringing);
     const targets = this.store.devices().filter((device) => {
       if (!device.pushToken || device.status !== 'active' || online.has(device.id)) return false;
+      if (snoozeHolds(device, req.severity)) return false;
       const role = this.store.role(device.role);
       if (!role) return false;
       return canDeliver({
@@ -2455,10 +2459,7 @@ export class Notifier extends EventEmitter<NotifierEvents> {
   ): boolean {
     if (!session.role || !session.device) return false;
 
-    // A snoozed device still gets critical alerts: the point is to quiet
-    // noise, not to disable the pager.
-    const snoozed = session.device.snoozedUntil ?? 0;
-    if (snoozed > Date.now() && severity !== 'critical') return false;
+    if (snoozeHolds(session.device, severity)) return false;
 
     return canDeliver({
       role: session.role,
@@ -2833,6 +2834,28 @@ const DECOY_PUBLIC_KEY = 'BdC4l3lXbNIqjRfjP8ycxHDCiMMVBpjs7ymEQR8lPFY';
 
 function randomId(bytes: number): string {
   return toBase64Url(nodeCrypto.randomBytes(bytes));
+}
+
+/**
+ * Whether a snooze on this device holds an alert of this severity back.
+ *
+ * Extracted because it was written into the socket path alone, and the Web Push
+ * fan-out filtered with `canDeliver`, which knows nothing about snoozing. The two
+ * combined perversely: `deliver()` skipped the snoozed session, so the device was
+ * absent from `deliveredTo` - the very set the fan-out treats as "already
+ * reached" - and snoozing a device therefore *promoted* it from suppressed to
+ * "offline, wake it". Somebody who asked for quiet got a lock-screen push for an
+ * alert their app was deliberately not showing them.
+ *
+ * A critical alert is never held: the point is to quiet noise, not to switch the
+ * pager off.
+ */
+function snoozeHolds(
+  device: { snoozedUntil?: number },
+  severity: Severity,
+  now = Date.now(),
+): boolean {
+  return (device.snoozedUntil ?? 0) > now && severity !== 'critical';
 }
 
 /** Whether a device satisfies an explicit role/device restriction. */

@@ -3139,3 +3139,74 @@ test('a poisoned alert already in the store does not disconnect every device', a
   await hub.stop();
   rmSync(dir, { recursive: true, force: true });
 });
+
+test('a snoozed device is not pushed the alert its snooze held back', async () => {
+  // The socket path knew about snoozing and the Web Push fan-out did not, and it
+  // filtered on `deliveredTo` - the set a snoozed device is absent from. So
+  // snoozing did not merely fail to suppress the push, it was the reason the push
+  // happened: a lock-screen notification for an alert the app was deliberately
+  // not showing, and one that is not in the feed to find afterwards.
+  const dir = tmp('snooze-push');
+  const pushes = [];
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async (url, init) => {
+    pushes.push(String(url));
+    return new Response(null, { status: 201 });
+  };
+
+  const hub = new Notifier({
+    port: 0,
+    storeDir: dir,
+    dashboard: false,
+    logger: false,
+    webPush: { enabled: true, subject: 'mailto:test@example.invalid' },
+  });
+  await hub.start();
+
+  try {
+    const client = makeClient(hub, 'browser');
+    const paired = new Promise((resolve) => client.on('paired', resolve));
+    await client.pair(hub.createPairingCode({ role: 'oncall' }).code);
+    await paired;
+
+    const ua = createECDH('prime256v1');
+    ua.generateKeys();
+    client.registerWebPush({
+      endpoint: 'https://push.example.invalid/wpush/v2/snoozed',
+      keys: {
+        p256dh: ua.getPublicKey().toString('base64url'),
+        auth: randomBytes(16).toString('base64url'),
+      },
+    });
+    await delay(200);
+
+    client.snooze(60_000);
+    await delay(200);
+
+    pushes.length = 0;
+    await hub.error({ title: 'disk filling up', channel: 'ops' });
+    await delay(300);
+    assert.deepEqual(pushes, [], 'a snooze holds the push back too');
+
+    // A critical alert is never held, which is the other half of what a snooze
+    // promises. Checked with the browser closed, since an open one is reached over
+    // its socket and needs no push at all.
+    client.disconnect();
+    await delay(300);
+    pushes.length = 0;
+
+    await hub.notify({ title: 'the database is down', severity: 'critical', channel: 'ops' });
+    await delay(300);
+    assert.equal(pushes.length, 1, 'critical still wakes a snoozed device');
+
+    // While one the snooze covers stays held even with the browser closed.
+    pushes.length = 0;
+    await hub.error({ title: 'still filling up', channel: 'ops' });
+    await delay(300);
+    assert.deepEqual(pushes, [], 'and the snooze still applies when offline');
+  } finally {
+    globalThis.fetch = realFetch;
+    await hub.stop();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
