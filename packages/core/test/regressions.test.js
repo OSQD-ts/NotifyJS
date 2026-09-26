@@ -2151,15 +2151,27 @@ test('a client whose signing fails reports it instead of killing the process', a
     createSocket: (url) => new WebSocket(url),
     deviceName: 'broken-keys',
     platform: 'node-test',
+    connectTimeoutMs: 200,
   });
   client.on('error', (e) => errors.push(e));
   client.on('status', (v) => statuses.push(v));
 
   await client.pair(hub.createPairingCode({ role: 'viewer' }).code);
-  await delay(400);
+  await delay(700);
 
-  assert.ok(errors.length > 0, 'the app is told the client cannot sign');
-  assert.ok(statuses.includes('error'), 'and the client stops claiming to be connecting');
+  assert.ok(
+    errors.some((e) => e.code === 'client_error'),
+    'the app is told the client cannot sign',
+  );
+  // The failure itself no longer latches the status: an incidental one on a
+  // working socket must not mark the source dead. What ends the wait is the
+  // handshake deadline, which drops a socket that never got anywhere - here with
+  // no reconnect, since this client did not ask for one.
+  assert.ok(
+    statuses.includes('idle'),
+    `the client stops claiming to be connecting: ${statuses.join(',')}`,
+  );
+  assert.ok(!statuses.includes('ready'), 'and never claims to be ready');
 
   client.disconnect();
   await hub.stop();
@@ -2662,6 +2674,9 @@ test('a socket that never opens is given up on rather than waited on for ever', 
     deviceName: 'mid-handover',
     platform: 'node-test',
     connectTimeoutMs: 120,
+    // Not the default, and deliberately so: the deadline honours it exactly as
+    // `onclose` does, so a CLI client - which passes false - gives up instead.
+    autoReconnect: true,
   });
   client.on('status', (v) => statuses.push(v));
 
@@ -2813,4 +2828,87 @@ test('a pairing code restricted to a range can be redeemed from inside it', asyn
 
   await hub.stop();
   rmSync(dir, { recursive: true, force: true });
+});
+
+test('the handshake deadline honours autoReconnect and never replays a pairing code', async () => {
+  // The deadline checked only which socket it belonged to, so it retried in the
+  // states `onclose` deliberately does not: a client built with
+  // `autoReconnect: false` - the CLI's default - dialled an address that accepts
+  // TCP and never speaks for ever, and a pairing attempt was replayed with a code
+  // the timed-out attempt may already have consumed, which earns a `pair_failed`
+  // and latches `rejected`.
+  const { NotifyClient, memoryStorage } = await import('@osqd/notifyjs-protocol');
+
+  const blackHole = (sockets) => () => {
+    const socket = {
+      onopen: null,
+      onmessage: null,
+      onclose: null,
+      onerror: null,
+      sent: [],
+      send(d) {
+        this.sent.push(d);
+      },
+      close() {},
+    };
+    sockets.push(socket);
+    return socket;
+  };
+
+  const quiet = [];
+  const giveUp = new NotifyClient({
+    url: 'ws://192.0.2.1:7741',
+    crypto: nodeCrypto,
+    storage: memoryStorage(),
+    createSocket: blackHole(quiet),
+    deviceName: 'one-shot',
+    platform: 'node-test',
+    connectTimeoutMs: 100,
+  });
+  await giveUp.connect();
+  await delay(600);
+  assert.equal(quiet.length, 1, 'autoReconnect: false dials once and stops');
+
+  // A hub that says hello, takes the pairing frame and then goes quiet - the
+  // case where the code may already have been spent.
+  const pairing = [];
+  const errors = [];
+  const pairingClient = new NotifyClient({
+    url: 'ws://192.0.2.1:7741',
+    crypto: nodeCrypto,
+    storage: memoryStorage(),
+    createSocket: blackHole(pairing),
+    deviceName: 'pairing',
+    platform: 'node-test',
+    connectTimeoutMs: 250,
+    autoReconnect: true,
+  });
+  pairingClient.on('error', (e) => errors.push(e));
+
+  await pairingClient.pair('ABCD-EFGH-JKMN');
+  pairing[0].onmessage({
+    data: JSON.stringify({
+      v: 1,
+      t: 'hello',
+      serverId: 'srv',
+      nonce: 'nonce-1',
+      name: 'quiet hub',
+      serverTime: Date.now(),
+    }),
+  });
+  await delay(150);
+  assert.ok(
+    pairing[0].sent.some((f) => JSON.parse(f).t === 'pair'),
+    'the code went out once',
+  );
+
+  await delay(600);
+  assert.equal(pairing.length, 1, 'and is not replayed on a second socket');
+  assert.ok(
+    errors.some((e) => e.code === 'pair_timeout'),
+    `the UI is told to ask for a fresh one: ${errors.map((e) => e.code).join(',')}`,
+  );
+
+  giveUp.disconnect();
+  pairingClient.disconnect();
 });

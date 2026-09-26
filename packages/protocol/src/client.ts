@@ -378,7 +378,14 @@ export class NotifyClient {
       // merely disconnected, so it says so instead of sitting in `connecting`
       // for ever.
       this.receive(String(ev.data)).catch((err) => {
-        this.setStatus('error');
+        // Reported, and deliberately not latched into the status. The failure
+        // may be incidental to a connection that is otherwise working - the
+        // `watchdog` frame persists its spec, so a storage backend that rejects
+        // on a full disk lands here on an authenticated, keepaliving socket that
+        // is delivering alerts. Marking that `error` had `SourceManager` publish
+        // the source as failed and `resume()` tear the healthy socket down on
+        // every wake. A handshake that cannot be finished is caught instead by
+        // the connect deadline, which drops the socket and retries properly.
         this.emit('error', {
           code: 'client_error',
           message: err instanceof Error ? err.message : String(err),
@@ -433,11 +440,40 @@ export class NotifyClient {
 
       socket.onopen = socket.onmessage = socket.onclose = socket.onerror = null;
       this.socket = undefined;
+      this.stopKeepalive();
       try {
         socket.close(1000, 'handshake timed out');
       } catch {
         /* already closing */
       }
+
+      // A pairing attempt is never retried from here. The code may already have
+      // been consumed by the attempt that timed out, and replaying it earns a
+      // `pair_failed`, which latches `rejected` and stops the client trying
+      // anything again until the UI intervenes. Better to say so and let
+      // somebody type a fresh code.
+      if (this.status === 'pairing') {
+        this.pendingCode = undefined;
+        this.setStatus('error');
+        this.emit('error', {
+          code: 'pair_timeout',
+          message: 'the hub did not answer the pairing request',
+        });
+        return;
+      }
+
+      // The same rules `onclose` follows, for the same reasons: a client with no
+      // credentials would be told "unpaired" again on every attempt, one the hub
+      // has rejected must wait for the UI, and `autoReconnect: false` means what
+      // it says - which is the CLI's default, so without this a `notifyjs send`
+      // against an address that accepts TCP and never speaks retried for ever.
+      if (this.status === 'unpaired') return;
+      if (this.rejected) return;
+      if (!this.opts.autoReconnect) {
+        this.setStatus('idle');
+        return;
+      }
+
       // Through the backoff rather than straight back out, so a hub that
       // accepts connections and says nothing is not dialled every twenty
       // seconds for the life of the app.
