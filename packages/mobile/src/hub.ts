@@ -377,13 +377,6 @@ class HubClient {
     ];
   }
 
-  /**
-   * Starts or stops the foreground service to match what the settings ask for.
-   *
-   * Driven from state rather than from a React effect, because the thing that
-   * decides it - preferences, and whether any source is enabled - now lives
-   * here, and because the service must not depend on a screen being mounted.
-   */
   /** Offers held declines to hubs that are ready and have not been told yet. */
   private flushDeclines(): void {
     if (this.pendingDeclines.size === 0) return;
@@ -406,6 +399,13 @@ class HubClient {
     }
   }
 
+  /**
+   * Starts or stops the foreground service to match what the settings ask for.
+   *
+   * Driven from state rather than from a React effect, because the thing that
+   * decides it - preferences, and whether any source is enabled - now lives
+   * here, and because the service must not depend on a screen being mounted.
+   */
   private applyWatching(): void {
     if (!this.state.loaded) return;
     const wanted = shouldWatch(this.state.prefs, this.state.sources);

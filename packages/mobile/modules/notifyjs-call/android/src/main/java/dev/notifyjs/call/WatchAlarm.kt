@@ -89,22 +89,18 @@ class WatchAlarmReceiver : BroadcastReceiver() {
   override fun onReceive(context: Context, intent: Intent?) {
     val wanted = WatchState.isWanted(context)
 
-    // Nobody home. The service was meant to be running and is not - Android
-    // reclaimed it, or an OEM battery manager stopped it - and this receiver used
-    // to do nothing about that: it woke the CPU, told a listener that did not
-    // exist, and re-armed itself, every nine minutes, indefinitely. A wake lock
-    // held for thirty seconds each time, achieving nothing, while alerting stayed
-    // off until somebody opened the app.
-    //
-    // So try to bring it back, and fall back to the notice the boot path already
-    // uses when that is refused - an inexact alarm is not one of the exemptions
-    // that permits starting a foreground service from the background, so being
-    // refused is the expected case rather than the surprising one.
-    // Nothing wanted, nothing to do. `stop()` cancels the alarm, but one that was
-    // already in flight arrives afterwards, and re-arming here kept the nine-minute
-    // cycle alive for an install that had switched watching off.
+    // Nothing wanted, nothing to do - and in particular nothing re-armed. `stop()`
+    // cancels the alarm, but one already in flight arrives afterwards, and re-arming
+    // it here kept the nine-minute cycle alive for an install that had switched
+    // watching off.
     if (!wanted) return
 
+    // Nobody home: the service was meant to be running and is not, because Android
+    // reclaimed it or an OEM battery manager stopped it. This receiver used to do
+    // nothing about that - it woke the CPU, told a listener that no longer existed,
+    // and re-armed itself, every nine minutes, indefinitely, while alerting stayed
+    // off until somebody happened to open the app. So try to bring it back, and fall
+    // back to the notice the boot path already uses when that is refused.
     if (!WatchEvents.hasListener()) {
       val started = runCatching {
         NotifyjsWatchService.start(context, WatchState.hubName(context))

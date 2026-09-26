@@ -1146,7 +1146,6 @@ export function webStorage(): ClientStorage {
   };
 }
 
-/** Storage for tests and short-lived processes. */
 /**
  * A watchdog spec this client can actually arm, or nothing.
  *
@@ -1173,6 +1172,7 @@ function usableWatchdog(spec: WatchdogSpec | undefined): WatchdogSpec | undefine
   };
 }
 
+/** Storage for tests and short-lived processes. */
 export function memoryStorage(): ClientStorage {
   const map = new Map<string, string>();
   return {
