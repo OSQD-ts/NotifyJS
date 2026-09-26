@@ -2716,3 +2716,48 @@ test('a ring time off the wire cannot collapse the whole ladder', async () => {
   await hub.stop();
   rmSync(dir, { recursive: true, force: true });
 });
+
+test('a store that lost its counter to a crash does not hand a number out twice', async () => {
+  // `flush()` drains `history.jsonl` before writing `store.json`, so a crash
+  // between the two leaves an alert on disk whose `seq` the counter forgot.
+  // Reusing it is worse than skipping it: a device whose cursor already passed
+  // that number never receives the second alert, because `since()` compares
+  // strictly, and no reconnect will ever deliver it.
+  const dir = tmp('seq-torn');
+  writeFileSync(
+    join(dir, 'store.json'),
+    JSON.stringify({ serverId: 'srv', seq: 4, devices: {}, roles: {}, codes: {}, bans: {} }),
+  );
+  writeFileSync(
+    join(dir, 'history.jsonl'),
+    `${JSON.stringify({ id: 'n1', seq: 5, ts: Date.now(), channel: 'ops', severity: 'error', title: 'landed before the crash' })}\n`,
+  );
+
+  const store = new Store(dir, { history: 50, audit: 50 }, () => 'unused');
+  assert.equal(store.nextSeq(), 6, 'the counter carries on past what is on disk');
+  store.close();
+
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test('a hub that recovered from a corrupt store keeps the identity it chose', async () => {
+  // `load()` sets the corrupt file aside and returns a brand new document, but
+  // the file had existed - so nothing was marked dirty and the new serverId was
+  // never written. The restart the log line invites produced a third identity,
+  // invalidating every device that had just re-paired.
+  const dir = tmp('recovered-id');
+  writeFileSync(join(dir, 'store.json'), '{ this is not json');
+
+  let n = 0;
+  const first = new Store(dir, { history: 10, audit: 10 }, () => `server-${++n}`);
+  const chosen = first.serverId;
+  assert.ok(first.recoveredFrom, 'the corrupt file was set aside');
+  first.close();
+
+  const second = new Store(dir, { history: 10, audit: 10 }, () => `server-${++n}`);
+  assert.equal(second.serverId, chosen, 'the identity survives the restart');
+  assert.equal(second.recoveredFrom, undefined, 'and there is nothing left to recover from');
+  second.close();
+
+  rmSync(dir, { recursive: true, force: true });
+});

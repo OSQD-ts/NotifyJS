@@ -178,7 +178,14 @@ export class Store {
     // A fresh store must be written even if nothing is ever added to it. The
     // serverId is part of every auth signature, so letting it be regenerated
     // on the next boot would invalidate every paired device.
-    if (!existed) this.markDirty();
+    //
+    // `recoveredFrom` counts as fresh, and used not to: the file existed, so
+    // nothing was marked dirty, so the brand-new document `load()` returned -
+    // including its new serverId - was never written. A hub that booted with a
+    // corrupt store therefore invented a *third* identity on the restart its own
+    // log line invites, invalidating the devices that had just re-paired, and
+    // for the whole of that first run `exportStore` found no file to salvage.
+    if (!existed || loaded.recoveredFrom) this.markDirty();
 
     const history = readTail<Notification>(this.historyFile, limits.history);
     const audit = readTail<AuditEvent>(this.auditFile, limits.audit);
@@ -186,6 +193,19 @@ export class Store {
     this.historyLines = history.lines;
     this.auditCache = audit.entries;
     this.auditLines = audit.lines;
+
+    // The sequence counter lives in `store.json`, and `flush()` drains the
+    // append logs before it writes that file - so a crash in between, or a
+    // `store.json` write that fails on a full disk, leaves notifications on disk
+    // whose numbers the counter has forgotten. Handing one out twice is far worse
+    // than skipping it: a device whose cursor has already passed that number
+    // never receives the second alert, because `since()` compares strictly, and
+    // no amount of reconnecting will ever deliver it.
+    const highest = this.historyCache.reduce((max, n) => Math.max(max, n.seq ?? 0), 0);
+    if (highest > this.data.seq) {
+      this.data.seq = highest;
+      this.markDirty();
+    }
 
     this.migrateInlineCollections();
   }
