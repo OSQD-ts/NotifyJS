@@ -2282,7 +2282,14 @@ export class Notifier extends EventEmitter<NotifierEvents> {
     if (!role) return reply(false, undefined, 'not ready');
 
     const required = ADMIN_CAPABILITY[msg.op];
-    if (!required || !hasCapability(role, required)) {
+    // One operation two different capabilities legitimately need: whoever edits
+    // roles has to be able to read them, and whoever mints pairing codes has to pick
+    // one to point at. Everything else maps to exactly one capability.
+    const alternatives = EITHER_CAPABILITY[msg.op];
+    const allowed = alternatives
+      ? alternatives.some((cap) => hasCapability(role, cap))
+      : Boolean(required) && hasCapability(role, required!);
+    if (!allowed) {
       this.audit('admin.denied', { deviceId: session.deviceId, detail: { op: msg.op } });
       return reply(false, undefined, 'forbidden');
     }
@@ -2903,16 +2910,27 @@ const ADMIN_CAPABILITY: Record<string, Capability> = Object.assign(Object.create
   'ingest.create': 'devices.manage',
   'ingest.list': 'devices.manage',
   'ingest.revoke': 'devices.manage',
-  'roles.list': 'notify.receive',
+  // Not `notify.receive`, which `rbac.ts` singles out as freely grantable because it
+  // "only decides whether a device is on the receiving end of something". Reading the
+  // hub's authorization topology is not that: a stock viewer could list every role
+  // with its channels and capabilities, and `policies.list` handed it device ids on
+  // top. See `EITHER_CAPABILITY` - this one is reachable with either of two.
+  'roles.list': 'roles.manage',
   'roles.upsert': 'roles.manage',
   'roles.delete': 'roles.manage',
   'notify.send': 'notify.send',
   'notify.resolve': 'notify.send',
-  'heartbeats.list': 'notify.receive',
+  // A publisher may reasonably ask what is being watched - `notifyjs watches` does -
+  // but the complete inventory of monitored jobs and their descriptions is not
+  // something a receiving-only role should be able to enumerate.
+  'heartbeats.list': 'notify.send',
   'heartbeat.expect': 'notify.send',
   'heartbeat.checkin': 'notify.send',
-  'heartbeat.forget': 'notify.send',
-  'policies.list': 'notify.receive',
+  // Removing a beat is not publishing: it deletes the monitoring configuration from
+  // the store, so the thing that would have noticed a dead process silently stops
+  // existing and does not come back on restart. Nothing shipped here calls it.
+  'heartbeat.forget': 'roles.manage',
+  'policies.list': 'roles.manage',
   'policies.upsert': 'roles.manage',
   'policies.delete': 'roles.manage',
   metrics: 'audit.read',
@@ -2959,6 +2977,18 @@ function adminTarget(args: Record<string, unknown>): string | undefined {
   }
   return undefined;
 }
+
+/**
+ * Operations more than one capability legitimately reaches.
+ *
+ * Only `roles.list`: a `roles.manage` device must be able to read the roles it edits,
+ * and a `devices.manage` device must be able to pick the role a new pairing code
+ * points at. Everything else in `ADMIN_CAPABILITY` maps to exactly one.
+ */
+const EITHER_CAPABILITY: Record<string, readonly Capability[]> = Object.assign(
+  Object.create(null),
+  { 'roles.list': ['roles.manage', 'devices.manage'] satisfies readonly Capability[] },
+);
 
 /** A valid, throwaway key used to keep failed-auth timing flat. */
 const DECOY_PUBLIC_KEY = 'BdC4l3lXbNIqjRfjP8ycxHDCiMMVBpjs7ymEQR8lPFY';

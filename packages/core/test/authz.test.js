@@ -290,3 +290,50 @@ test('a role that never rings cannot answer or decline a live call', async () =>
   assert.equal(outcome.outcome, 'answered');
   assert.equal(outcome.deviceName, 'real-phone', 'the viewer never became part of the call');
 });
+
+test('a receiving-only role cannot enumerate the hub', async () => {
+  // `notify.receive` is the capability the RBAC module singles out as freely
+  // grantable, because it "only decides whether a device is on the receiving end of
+  // something". Three list operations were gated on it, so a stock viewer could read
+  // every role with its channels and capabilities, every escalation policy - which
+  // carries device ids - and the complete inventory of monitored jobs with their
+  // descriptions.
+  const { client } = await joinAs('viewer', 'nosy-viewer');
+
+  for (const op of ['roles.list', 'policies.list', 'heartbeats.list']) {
+    await assert.rejects(() => client.admin(op), /forbidden/, `${op} is refused`);
+  }
+
+  // And it can still do what a viewer is for.
+  const history = await client.admin('history');
+  assert.ok(Array.isArray(history.notifications), 'reading its own feed still works');
+
+  client.disconnect();
+});
+
+test('whoever edits roles can still read them', async () => {
+  // `roles.list` is the one operation two capabilities legitimately need: a role
+  // editor has to see what it is editing, and whoever mints a pairing code has to
+  // pick the role it points at.
+  hub.upsertRole({
+    name: 'code-minter',
+    channels: ['*'],
+    minSeverity: 'info',
+    capabilities: ['notify.receive', 'devices.manage'],
+  });
+
+  for (const role of ['role-editor', 'code-minter']) {
+    if (role === 'role-editor') {
+      hub.upsertRole({
+        name: 'role-editor',
+        channels: ['*'],
+        minSeverity: 'info',
+        capabilities: ['notify.receive', 'roles.manage'],
+      });
+    }
+    const { client } = await joinAs(role, `${role}-reader`);
+    const { roles } = await client.admin('roles.list');
+    assert.ok(roles.length > 0, `${role} can read the roles`);
+    client.disconnect();
+  }
+});
