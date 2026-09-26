@@ -329,6 +329,42 @@ function bounded(
 }
 
 /**
+ * Refuses a boolean that is not one.
+ *
+ * `security: { trustProxy: process.env.TRUST_PROXY }` with that variable set to
+ * `'false'` is a truthy string, and what it switched on was reading the client's
+ * address out of a request header - so both IP lists, every ban and the
+ * per-address connection limit became a line the caller could write for
+ * themselves. The same spelling turns HTTP publishing on, or the device watchdog
+ * off.
+ *
+ * The strings are accepted because an option wired from a configuration file or
+ * an environment variable arrives as one, exactly as `bounded` accepts a numeric
+ * string. Anything that is neither answer is refused rather than guessed at.
+ */
+function flag(option: string, value: unknown): boolean {
+  if (typeof value === 'boolean') return value;
+  // 1 and 0 are the two numbers that are not a guess, and both worked when this
+  // was a plain truthiness test, so refusing them would be a fault introduced by
+  // a fix. Any other number is refused along with the rest.
+  if (value === 1) return true;
+  if (value === 0) return false;
+  if (typeof value === 'string') {
+    const s = value.trim().toLowerCase();
+    if (s === 'true' || s === '1' || s === 'yes' || s === 'on') return true;
+    if (s === 'false' || s === '0' || s === 'no' || s === 'off') return false;
+  }
+  throw new Error(`${option} must be true or false, not ${JSON.stringify(value)}`);
+}
+
+/** Applies `flag` to the named fields of an already-merged group of options. */
+function flags<T>(prefix: string, group: T, keys: readonly (keyof T & string)[]): T {
+  const bag = group as Record<string, unknown>;
+  for (const key of keys) bag[key] = flag(prefix + key, bag[key]);
+  return group;
+}
+
+/**
  * Drops keys whose value is `undefined`, so a spread cannot erase a default.
  *
  * `{ ...defaults, ...caller }` copies an explicit `undefined` over the value
@@ -350,7 +386,7 @@ export function resolveOptions(o: NotifierOptions = {}): ResolvedOptions {
     host: o.host ?? '0.0.0.0',
     name: o.name ?? 'NotifyJS',
     storeDir: o.storeDir ?? '.notifyjs',
-    dashboard: o.dashboard ?? true,
+    dashboard: flag('dashboard', o.dashboard ?? true),
     dashboardDir: o.dashboardDir,
     tls: o.tls,
     historyLimit: bounded('historyLimit', o.historyLimit ?? 500, 1),
@@ -365,72 +401,92 @@ export function resolveOptions(o: NotifierOptions = {}): ResolvedOptions {
       1_000,
       o.livenessIntervalMs ?? o.deviceWatchdog?.intervalMs ?? 30_000,
     ),
-    metrics: o.metrics ?? true,
+    metrics: flag('metrics', o.metrics ?? true),
     metricsToken: o.metricsToken,
     publicUrl: o.publicUrl,
     logger: log,
-    deviceWatchdog: {
-      // On by default: the failure it catches is the one that matters most,
-      // and it costs one small frame every 30 seconds per device.
-      enabled: true,
-      intervalMs: 30_000,
-      graceMs: 30_000,
-      severity: 'critical',
-      ...defined(o.deviceWatchdog),
-    },
-    flood: {
-      enabled: true,
-      windowMs: 60_000,
-      burst: 5,
-      alwaysDeliver: ['critical'],
-      ...defined(o.flood),
-    },
-    actions: { enabled: false, ...defined(o.actions) },
-    ingest: {
-      enabled: false,
-      allowInsecure: false,
-      // Enough for a verbose Alertmanager group, far short of anything worth
-      // buffering from an unauthenticated caller.
-      maxBodyBytes: 64 * 1024,
-      ratePerMinute: 120,
-      ...defined(o.ingest),
-    },
-    webPush: {
-      enabled: true,
-      includeBody: false,
-      evenWhenOnline: false,
-      subject: 'https://github.com/OSQD-ts/NotifyJS',
-      // Four hours. Long enough to survive a closed laptop over lunch, short
-      // enough that a pager alert never arrives stale enough to mislead.
-      ttlSeconds: 4 * 60 * 60,
-      ...defined(o.webPush),
-    },
-    security: {
-      maxConnectionsPerIp: 10,
-      connectionBurst: 10,
-      connectionRefillPerSec: 0.5,
-      maxUnauthenticated: 100,
-      handshakeTimeoutMs: 10_000,
-      maxFailuresBeforeBan: 5,
-      failureWindowMs: 15 * 60_000,
-      banBaseMs: 60_000,
-      banMaxMs: 24 * 60 * 60_000,
-      maxMessageBytes: 64 * 1024,
-      clockSkewMs: 60_000,
-      maxBufferedBytes: 1024 * 1024,
-      allowedOrigins: 'same-origin',
-      trustProxy: false,
-      uniformFailureMs: 250,
-      ...defined(o.security),
-      // After the spread, and merged rather than replaced: this is the one
-      // nested object in here, and a caller supplying just one of its two
-      // fields would otherwise lose the other to `undefined`.
-      messageRate: {
-        points: 60,
-        windowMs: 10_000,
-        ...defined(o.security?.messageRate),
+    deviceWatchdog: flags(
+      'deviceWatchdog.',
+      {
+        // On by default: the failure it catches is the one that matters most,
+        // and it costs one small frame every 30 seconds per device.
+        enabled: true,
+        intervalMs: 30_000,
+        graceMs: 30_000,
+        severity: 'critical' as Severity,
+        ...defined(o.deviceWatchdog),
       },
-    },
+      ['enabled'],
+    ),
+    flood: flags(
+      'flood.',
+      {
+        enabled: true,
+        windowMs: 60_000,
+        burst: 5,
+        alwaysDeliver: ['critical'] as Severity[],
+        ...defined(o.flood),
+      },
+      ['enabled'],
+    ),
+    actions: flags('actions.', { enabled: false, ...defined(o.actions) }, ['enabled']),
+    ingest: flags(
+      'ingest.',
+      {
+        enabled: false,
+        allowInsecure: false,
+        // Enough for a verbose Alertmanager group, far short of anything worth
+        // buffering from an unauthenticated caller.
+        maxBodyBytes: 64 * 1024,
+        ratePerMinute: 120,
+        ...defined(o.ingest),
+      },
+      ['enabled', 'allowInsecure'],
+    ),
+    webPush: flags(
+      'webPush.',
+      {
+        enabled: true,
+        includeBody: false,
+        evenWhenOnline: false,
+        subject: 'https://github.com/OSQD-ts/NotifyJS',
+        // Four hours. Long enough to survive a closed laptop over lunch, short
+        // enough that a pager alert never arrives stale enough to mislead.
+        ttlSeconds: 4 * 60 * 60,
+        ...defined(o.webPush),
+      },
+      ['enabled', 'includeBody', 'evenWhenOnline'],
+    ),
+    security: flags(
+      'security.',
+      {
+        maxConnectionsPerIp: 10,
+        connectionBurst: 10,
+        connectionRefillPerSec: 0.5,
+        maxUnauthenticated: 100,
+        handshakeTimeoutMs: 10_000,
+        maxFailuresBeforeBan: 5,
+        failureWindowMs: 15 * 60_000,
+        banBaseMs: 60_000,
+        banMaxMs: 24 * 60 * 60_000,
+        maxMessageBytes: 64 * 1024,
+        clockSkewMs: 60_000,
+        maxBufferedBytes: 1024 * 1024,
+        allowedOrigins: 'same-origin' as SecurityOptions['allowedOrigins'],
+        trustProxy: false,
+        uniformFailureMs: 250,
+        ...defined(o.security),
+        // After the spread, and merged rather than replaced: this is the one
+        // nested object in here, and a caller supplying just one of its two
+        // fields would otherwise lose the other to `undefined`.
+        messageRate: {
+          points: 60,
+          windowMs: 10_000,
+          ...defined(o.security?.messageRate),
+        },
+      },
+      ['trustProxy'],
+    ),
   };
 }
 

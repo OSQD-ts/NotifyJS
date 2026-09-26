@@ -2692,6 +2692,68 @@ test('a number that would switch off what it configures is refused by name', asy
   rmSync(dir, { recursive: true, force: true });
 });
 
+test("a flag set to the string 'false' does not mean true", async () => {
+  // `security: { trustProxy: process.env.TRUST_PROXY }` is how an application
+  // wires this, and with that variable set to 'false' the string is truthy: the
+  // hub read every client's address out of `X-Forwarded-For`, so both IP lists,
+  // every ban and the per-address connection limit became a header the caller
+  // wrote for themselves. The same spelling turned HTTP publishing on and the
+  // device watchdog off.
+  const dir = tmp('bad-flags');
+  const hub = hostileHub(dir, {
+    security: { uniformFailureMs: 1, maxFailuresBeforeBan: 1000, trustProxy: 'false' },
+    ingest: { enabled: 'false' },
+  });
+  await hub.start();
+
+  const ws = new WebSocket(hub.url.replace('localhost', '127.0.0.1'), {
+    headers: { 'x-forwarded-for': '10.9.9.9' },
+  });
+  await new Promise((r) => ws.on('open', r));
+  ws.send(JSON.stringify({ v: 1, t: 'pair', code: 'AAAA-AAAA-AAAA', publicKey: 'x' }));
+  await new Promise((r) => setTimeout(r, 250));
+
+  const ips = new Set(hub.auditLog(30).map((e) => e.ip).filter(Boolean));
+  assert.ok(!ips.has('10.9.9.9'), `'false' left the header believed: ${[...ips].join(',')}`);
+  assert.ok(ips.has('127.0.0.1'), `the real address was recorded: ${[...ips].join(',')}`);
+
+  // And HTTP publishing stayed off, rather than being switched on by the word for
+  // off. 404 is what a hub with `ingest` disabled answers.
+  const res = await fetch(`http://127.0.0.1:${new URL(hub.url).port}/api/notify`, {
+    method: 'POST',
+    headers: { authorization: 'Bearer nope', 'content-type': 'application/json' },
+    body: JSON.stringify({ title: 'in' }),
+  });
+  assert.equal(res.status, 404, 'ingest stayed off');
+
+  ws.close();
+  await hub.stop();
+
+  // Anything that is neither answer is refused by name rather than guessed at.
+  for (const [extra, pattern] of [
+    [{ security: { trustProxy: 'maybe' } }, /security\.trustProxy must be true or false/],
+    [{ flood: { enabled: 'sometimes' } }, /flood\.enabled must be true or false/],
+    [{ actions: { enabled: null } }, /actions\.enabled must be true or false/],
+    [{ metrics: 2 }, /metrics must be true or false/],
+  ]) {
+    assert.throws(
+      () => new Notifier({ port: 0, storeDir: dir, logger: false, ...extra }),
+      pattern,
+      JSON.stringify(extra),
+    );
+  }
+
+  // 1 and 0 worked when this was a truthiness test, so they still do, and so does
+  // the other spelling a config file produces.
+  for (const ok of [{ metrics: 1 }, { dashboard: 0 }, { metrics: 'on' }, { dashboard: 'no' }]) {
+    const fine = new Notifier({ port: 0, storeDir: dir, logger: false, ...ok });
+    await fine.start();
+    await fine.stop();
+  }
+
+  rmSync(dir, { recursive: true, force: true });
+});
+
 test('a freshly paired device is not handed the backlog from before it existed', async () => {
   // The hub enrols a new device at the head on purpose, and the client undid it:
   // `ackedSeq` was 0, so the `sync()` every app sends on `ready` - and on every
