@@ -394,6 +394,21 @@ export class Store {
     }
   }
 
+  /**
+   * Makes a closed store writable again, for a hub that is starting a second time.
+   *
+   * `Notifier` holds one store for its whole life and `stop()` closes it, so after
+   * a `stop()`/`start()` - a supported and tested pattern - the guard in
+   * `scheduleDrain` refused to arm the drain timer ever again. `flush()` is only
+   * reachable from that timer or from `close()`, so nothing written during the
+   * hub's second life reached disk at all: devices paired, roles rewritten, tokens
+   * minted, every history and audit line, all lost to anything but another
+   * graceful stop.
+   */
+  reopen(): void {
+    this.closed = false;
+  }
+
   close(): void {
     if (this.saveTimer) clearTimeout(this.saveTimer);
     this.saveTimer = undefined;

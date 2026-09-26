@@ -3326,3 +3326,35 @@ test('a watchdog spec restored from storage is checked like a fresh one', async 
   await second.loadCredentials();
   assert.equal(second.watchdog?.intervalMs, 30_000, 'a usable spec is restored');
 });
+
+test('a hub started a second time still writes to disk', async () => {
+  // `stop()` closes the store, and a closed store refuses to arm its drain timer -
+  // which is right, except that `Notifier` keeps one store for its whole life. So
+  // for the entire second life of a restarted hub nothing reached disk: devices
+  // paired, roles rewritten, tokens minted, every history and audit line, all of it
+  // lost to anything but another graceful stop. `stop()`/`start()` is a supported
+  // pattern and two tests here already use it; neither looked at the files.
+  const dir = tmp('restart-persist');
+  const hub = new Notifier({ port: 0, storeDir: dir, dashboard: false, logger: false });
+
+  await hub.start();
+  hub.createPairingCode({ role: 'viewer' });
+  await hub.stop();
+
+  await hub.start();
+  hub.createPairingCode({ role: 'viewer' });
+  await hub.notify({ title: 'after the restart', channel: 'ops', severity: 'error' });
+  await delay(300);
+
+  const store = JSON.parse(readFileSync(join(dir, 'store.json'), 'utf8'));
+  assert.equal(Object.keys(store.codes ?? {}).length, 2, 'both codes are on disk');
+  assert.ok(store.seq >= 1, 'and the sequence the notification took');
+  assert.match(
+    readFileSync(join(dir, 'history.jsonl'), 'utf8'),
+    /after the restart/,
+    'and the alert itself',
+  );
+
+  await hub.stop();
+  rmSync(dir, { recursive: true, force: true });
+});

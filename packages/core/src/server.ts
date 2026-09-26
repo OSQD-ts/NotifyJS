@@ -583,6 +583,11 @@ export class Notifier extends EventEmitter<NotifierEvents> {
     // Everything `stop()` shut down comes back with the hub. These were armed
     // once, at construction, so a stopped-and-restarted hub silently ran
     // without its IP sweeper and without checking a single heartbeat.
+    //
+    // The store belongs on that list too: `stop()` closes it, and a closed store
+    // refuses to schedule a write - so without this nothing the hub's second life
+    // did would ever reach disk.
+    this.store.reopen();
     this.guard.start();
     this.watchdog.start();
 
@@ -1979,7 +1984,8 @@ export class Notifier extends EventEmitter<NotifierEvents> {
       const action = claimed ? this.takeAction(session, id, claimed, offered, held) : undefined;
       if (action) taken = true;
       this.emit('ack', { notificationId: id, deviceId: session.device.id, action });
-      // One acknowledgement is enough: a human has seen it, so stop retrying.
+      // One acknowledgement from any entitled device settles the alert. Not a
+      // person: see `scheduleAckRetry`, which says what this does and does not mean.
       const timer = this.ackWaiters.get(id);
       if (timer) {
         clearTimeout(timer);
@@ -2942,7 +2948,11 @@ function sanitizeTargeting(to: Targeting | undefined): Targeting | undefined {
     if (list.length > MAX_TARGETS) {
       throw new Error(`\`to.${key}\` may name at most ${MAX_TARGETS} entries, not ${list.length}`);
     }
-    clean[key] = list as string[];
+    // Copied, not aliased. This value is persisted with the notification, and a
+    // caller that reuses or clears its target buffer afterwards was silently
+    // rewriting history: an emptied list reads as "no restriction", so a
+    // device-restricted alert became a broadcast on the next replay.
+    clean[key] = [...(list as string[])];
   }
   return clean.devices || clean.roles ? clean : undefined;
 }
