@@ -18,7 +18,34 @@ async function populated(prefix) {
   });
   await hub.start();
   hub.createIngestToken({ role: 'admin', label: 'ci' });
-  hub.createPairingCode({ role: 'oncall' });
+
+  // A device that actually paired, not just a code that was minted. Without one
+  // the device counts compared either side of a restore were 0 on both sides, so
+  // "devices do not need re-pairing" - the whole point of carrying them - was never
+  // exercised.
+  const { NotifyClient, memoryStorage } = await import('@osqd/notifyjs-protocol');
+  const { nodeCrypto } = await import('@osqd/notifyjs-protocol/node');
+  const WebSocket = (await import('ws')).default;
+  const client = new NotifyClient({
+    url: hub.url.replace('localhost', '127.0.0.1'),
+    crypto: nodeCrypto,
+    storage: memoryStorage(),
+    createSocket: (url) => new WebSocket(url),
+    deviceName: 'backed-up-phone',
+    platform: 'node-test',
+  });
+  const paired = new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('never paired')), 5000);
+    timer.unref?.();
+    client.on('ready', () => {
+      clearTimeout(timer);
+      resolve();
+    });
+  });
+  await client.pair(hub.createPairingCode({ role: 'oncall' }).code);
+  await paired;
+  client.disconnect();
+
   await hub.notify({ title: 'something happened', channel: 'db' });
   return { hub, dir };
 }
@@ -95,6 +122,14 @@ test('the restored files are not world-readable', async () => {
   // The document holds the VAPID private key and every credential hash.
   const mode = statSync(join(fresh, 'store.json')).mode & 0o777;
   assert.equal(mode, 0o600, 'the store is owner-only');
+
+  // The logs hold the incidents and the pairing trail, and the directory holds all
+  // three: only `store.json` was ever checked.
+  for (const name of ['history.jsonl', 'audit.jsonl']) {
+    if (!existsSync(join(fresh, name))) continue;
+    assert.equal(statSync(join(fresh, name)).mode & 0o777, 0o600, `${name} is owner-only`);
+  }
+  assert.equal(statSync(fresh).mode & 0o777, 0o700, 'and the directory is too');
 
   rmSync(dir, { recursive: true, force: true });
   rmSync(fresh, { recursive: true, force: true });

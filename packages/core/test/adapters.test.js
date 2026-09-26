@@ -134,10 +134,14 @@ test('a real device that never reads is disconnected by the hub', async () => {
 /* Crash capture                                                       */
 /* ------------------------------------------------------------------ */
 
-test('an unhandled rejection is reported', async () => {
+test('an unhandled rejection is reported', async (t) => {
   const s = sink();
   const before = process.listeners('unhandledRejection').length;
   const stop = captureCrashes(s, { exit: false, drainMs: 50 });
+  // Removed however this test ends. Left registered by a failure, it swallows
+  // Node's own crash for every later test in the file - so one failure here hid
+  // the next one.
+  t.after(() => stop());
   const handlers = process.listeners('unhandledRejection');
   assert.equal(handlers.length, before + 1, 'the handler was registered');
 

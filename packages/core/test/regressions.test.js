@@ -410,6 +410,7 @@ test('every workspace package declares a project reference for what it imports',
   }
 
   const missing = [];
+  let checked = 0;
   for (const [, dir] of byPackageName) {
     const base = join(REPO, 'packages', dir);
     const tsconfig = JSON.parse(stripComments(readFileSync(join(base, 'tsconfig.json'), 'utf8')));
@@ -435,11 +436,15 @@ test('every workspace package declares a project reference for what it imports',
     }
 
     for (const target of imported) {
+      checked += 1;
       if (!declared.has(target)) missing.push(`${dir} imports ${target} without a reference`);
     }
   }
 
   assert.deepEqual(missing, [], 'a tsc -b build cannot see an undeclared dependency');
+  // And it actually looked: a regex that stopped matching would otherwise leave
+  // this passing over nothing, which is the exact failure it exists to catch.
+  assert.ok(checked >= 3, `cross-package imports found: ${checked}`);
 });
 
 function escapeRe(value) {
@@ -498,6 +503,7 @@ test('set-version stamps one version across the packages and their links', async
     copied.setVersion('9.9.9-test');
 
     const names = new Set();
+    let pinned = 0;
     for (const pkg of PACKAGES) {
       const json = JSON.parse(readFileSync(join(dir, 'packages', pkg, 'package.json'), 'utf8'));
       names.add(json.name);
@@ -509,12 +515,15 @@ test('set-version stamps one version across the packages and their links', async
       for (const field of ['dependencies', 'devDependencies', 'peerDependencies']) {
         for (const [name, range] of Object.entries(json[field] ?? {})) {
           if (!names.has(name)) continue;
+          pinned += 1;
           // A workspace sibling must be pinned to exactly what is being
           // published alongside it, never a range or a stale literal.
           assert.equal(range, '9.9.9-test', `${pkg} -> ${name} must be pinned`);
         }
       }
     }
+    // A loop over no siblings would have passed just as well.
+    assert.ok(pinned >= 3, `sibling dependencies checked: ${pinned}`);
   } finally {
     process.chdir(cwd);
     rmSync(dir, { recursive: true, force: true });
@@ -2073,6 +2082,9 @@ test('a forged X-Forwarded-For is not an identity while trustProxy is off', asyn
 
   const ips = new Set(hub.auditLog(30).map((e) => e.ip).filter(Boolean));
   assert.ok(!ips.has('10.9.9.9'), `the header was believed: ${[...ips].join(',')}`);
+  // The positive control: an audit line that stopped carrying an address at all
+  // would have satisfied the assertion above over an empty set.
+  assert.ok(ips.has('127.0.0.1'), `the real address was recorded: ${[...ips].join(',')}`);
 
   ws.close();
   await hub.stop();
