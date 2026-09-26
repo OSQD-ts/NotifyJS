@@ -204,7 +204,16 @@ class HubClient {
 
       this.manager.on('notification', (entry) => {
         const feed = addToFeed(this.state.feed, entry);
-        if (feed !== this.state.feed) this.set({ feed });
+        // The same array back means the feed already held this alert, and that
+        // is the ordinary case rather than an exceptional one: a reconnect
+        // replays from the ack cursor, so everything unacknowledged arrives
+        // again. Posting was outside this guard, and re-posting a notification
+        // id rings and vibrates afresh - so a phone that reconnected in the
+        // night re-announced every alert its owner had already read, once per
+        // reconnect, for as long as they stayed unacknowledged. The desktop
+        // client has always returned here.
+        if (feed === this.state.feed) return;
+        this.set({ feed });
         // Posted natively so it arrives whether the app is in front, behind,
         // or the screen is off - a JS scheduler only runs while JS does.
         showAlert(
