@@ -21,6 +21,9 @@ import type { ClientStorage } from '@osqd/notifyjs-protocol';
  * someone impersonate this computer until it is revoked.
  */
 export function fileStorage(path: string): ClientStorage {
+  /** Set when the file is there and could not be read. */
+  let unreadable = false;
+
   const load = (): Record<string, string> => {
     if (!existsSync(path)) return {};
     // Read and parse are kept apart, because only one of them means the file is
@@ -31,7 +34,13 @@ export function fileStorage(path: string): ClientStorage {
     let raw: string;
     try {
       raw = readFileSync(path, 'utf8');
+      unreadable = false;
     } catch (err) {
+      // Remembered, because `save()` writes the whole document: saving over a file
+      // that could not be read would destroy the seeds inside it, and a keypair
+      // cannot be regenerated. Narrowing this guard to parse failures alone had put
+      // that back for a permissions error or a lock held by another process.
+      unreadable = true;
       say(`notifyjs: ${path} could not be read (${(err as Error).message})`);
       return {};
     }
@@ -108,19 +117,29 @@ export function fileStorage(path: string): ClientStorage {
     tighten(path);
   };
 
+  /** Refuses to write over a file whose contents could not be read. */
+  const mutate = (change: (data: Record<string, string>) => void): void => {
+    const data = load();
+    if (unreadable) {
+      throw new Error(`${path} could not be read; refusing to write over it`);
+    }
+    change(data);
+    save(data);
+  };
+
   return {
     async get(key) {
       return load()[key] ?? null;
     },
     async set(key, value) {
-      const data = load();
-      data[key] = value;
-      save(data);
+      mutate((data) => {
+        data[key] = value;
+      });
     },
     async remove(key) {
-      const data = load();
-      delete data[key];
-      save(data);
+      mutate((data) => {
+        delete data[key];
+      });
     },
   };
 }
