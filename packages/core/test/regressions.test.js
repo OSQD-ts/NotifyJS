@@ -2998,3 +2998,51 @@ test('a graceful shutdown does not report every device as going offline', async 
   device.ws.close();
   rmSync(dir, { recursive: true, force: true });
 });
+
+test('a restore will not land on logs that are still there', async () => {
+  // The occupancy guard covered `store.json` alone, and `if (doc.audit)` treated
+  // an empty array as "carried" - and `exportStore` always sets both fields. So
+  // restoring into a directory whose store had been set aside as corrupt, with
+  // both logs intact and holding this month's incidents, succeeded without
+  // `--force` and emptied the audit log on the way past.
+  const { exportStore, importStore } = await import('../dist/index.js');
+
+  const source = tmp('restore-source');
+  const hub = hostileHub(source);
+  await hub.start();
+  await hub.notify({ title: 'from the backup', severity: 'error', channel: 'ops' });
+  await hub.stop();
+
+  const doc = exportStore(source, { history: true });
+  // A hub with no audit rows exports exactly this.
+  doc.audit = [];
+
+  const target = tmp('restore-target');
+  writeFileSync(join(target, 'history.jsonl'), '{"id":"live-incident","seq":9}\n');
+  writeFileSync(join(target, 'audit.jsonl'), '{"kind":"pair.created","ts":1}\n');
+
+  assert.throws(() => importStore(target, doc, {}), /already exists/, 'refused');
+  assert.match(
+    readFileSync(join(target, 'history.jsonl'), 'utf8'),
+    /live-incident/,
+    'the history that was there is untouched',
+  );
+  assert.match(
+    readFileSync(join(target, 'audit.jsonl'), 'utf8'),
+    /pair\.created/,
+    'and so is the audit trail',
+  );
+
+  // Said out loud, it still works.
+  const forced = importStore(target, doc, { force: true });
+  assert.ok(forced.restoredHistory > 0, 'with --force the backup lands');
+  assert.equal(forced.restoredAudit, 0, 'and an empty audit list writes nothing');
+  assert.match(
+    readFileSync(join(target, 'audit.jsonl'), 'utf8'),
+    /pair\.created/,
+    'so the audit log is still not emptied',
+  );
+
+  rmSync(source, { recursive: true, force: true });
+  rmSync(target, { recursive: true, force: true });
+});

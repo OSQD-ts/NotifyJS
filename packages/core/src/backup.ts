@@ -149,22 +149,48 @@ export function importStore(
     throw new Error(`${file} already exists; pass --force to replace it`);
   }
 
-  // Only when the backup carried them. A restore that silently emptied an
-  // existing history would be a second, quieter kind of data loss.
+  // Only when the backup carried them, and `[]` does not count as carrying
+  // them: `exportStore` always sets both fields, so a backup from a hub with no
+  // audit rows arrived with `audit: []` and wrote it straight over a live audit
+  // log. The comment below this one has always claimed otherwise, and the case
+  // it describes is real - a store set aside as corrupt leaves the two logs
+  // intact and full of this month's incidents, and a restore without `--force`
+  // then succeeded because only `store.json` was guarded.
+  //
+  // A restore that silently emptied an existing history would be a second,
+  // quieter kind of data loss.
   let restoredHistory = 0;
   let restoredAudit = 0;
-  if (doc.history) {
-    writeFileSync(join(dir, HISTORY_FILE), doc.history.map((l) => l + '\n').join(''), {
-      mode: 0o600,
-    });
+  if (doc.history?.length) {
+    writeLog(join(dir, HISTORY_FILE), doc.history, options.force);
     restoredHistory = doc.history.length;
   }
-  if (doc.audit) {
-    writeFileSync(join(dir, AUDIT_FILE), doc.audit.map((l) => l + '\n').join(''), { mode: 0o600 });
+  if (doc.audit?.length) {
+    writeLog(join(dir, AUDIT_FILE), doc.audit, options.force);
     restoredAudit = doc.audit.length;
   }
 
   return { restoredHistory, restoredAudit };
+}
+
+/**
+ * Writes one of the append-only logs, refusing to land on an existing one.
+ *
+ * The same occupancy guard `store.json` gets, for the same reason: these hold
+ * the incidents and the pairing trail, and a restore into a directory that still
+ * has them is either a mistake or something the operator should have to say out
+ * loud with `--force`.
+ */
+function writeLog(file: string, lines: string[], force: boolean | undefined): void {
+  try {
+    writeFileSync(file, lines.map((l) => l + '\n').join(''), {
+      mode: 0o600,
+      flag: force ? 'w' : 'wx',
+    });
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
+    throw new Error(`${file} already exists; pass --force to replace it`);
+  }
 }
 
 /** What an operator should be told before they hand this file to anybody. */
