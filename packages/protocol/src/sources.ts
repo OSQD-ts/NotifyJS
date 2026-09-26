@@ -332,6 +332,27 @@ export class SourceManager {
     this.clients.get(sourceId)?.declineCall(callId);
   }
 
+  /**
+   * Declines a call without knowing which hub placed it.
+   *
+   * For a tap on a notification that arrived while the app was not running:
+   * Android hands back a call id and nothing else, and by then the call is not in
+   * any local state to look up. Every connected hub is told; the one that placed
+   * the call acts on it, and the rest ignore an id they have never rung.
+   *
+   * Returns false when there is nobody to tell yet, so the caller can hold on to
+   * it rather than dropping it.
+   */
+  declineAnywhere(callIds: string[]): boolean {
+    let told = false;
+    for (const [id, client] of this.clients) {
+      if (this.states.get(id)?.status !== 'ready') continue;
+      for (const callId of callIds) client.declineCall(callId);
+      told = true;
+    }
+    return told;
+  }
+
   endCall(sourceId: string, callId: string): void {
     this.clients.get(sourceId)?.endCall(callId);
   }

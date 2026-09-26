@@ -3,11 +3,12 @@ package dev.notifyjs.call
 /**
  * Carries Answer and Decline from the notification back to the app.
  *
- * The broadcast receiver runs whether or not JavaScript is up, so the two
- * cannot talk directly. Actions taken before the module is listening are held
- * here and replayed the moment it is: tapping Answer on a lock screen very
- * often *is* what starts the app, and dropping that tap would show the user a
- * call they have already answered.
+ * The broadcast receiver runs whether or not JavaScript is up, so the two cannot
+ * talk directly. Every tap is held here and collected by the app through
+ * `consumePendingCallActions`; the event the module sends is a nudge, not the
+ * delivery. Tapping Answer on a lock screen very often *is* what starts the app,
+ * and dropping that tap would show somebody a call they had already answered -
+ * or, for a decline, leave the hub ringing a phone whose owner has said no.
  */
 object CallEvents {
   data class Action(val action: String, val callId: String)
@@ -18,14 +19,18 @@ object CallEvents {
   @Synchronized
   fun emit(action: String, callId: String) {
     val event = Action(action, callId)
-    val current = listener
-    if (current == null) {
-      // One call at a time; an older unanswered tap is not worth replaying.
-      if (pending.size >= 4) pending.removeFirst()
-      pending.addLast(event)
-    } else {
-      current(event)
-    }
+
+    // Queued whether or not anything is listening, and the listener is only a
+    // nudge to come and collect it. Queueing solely when `listener == null` left
+    // a window that swallowed taps outright: the module installs its listener
+    // while the registry is being built, so between that moment and the bundle
+    // subscribing there *was* a listener and no subscriber, and the event went to
+    // an emitter with nobody on it. One call at a time; an older unanswered tap is
+    // not worth keeping.
+    if (pending.size >= 8) pending.removeFirst()
+    pending.addLast(event)
+
+    listener?.invoke(event)
   }
 
   @Synchronized

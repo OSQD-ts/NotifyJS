@@ -334,3 +334,35 @@ test('a snooze survives a reconnect, because the hub is asked', async () => {
 
   sources.disconnectAll();
 });
+
+test('a decline with no call to match it still reaches the hub that placed it', async () => {
+  // A tap on a lock-screen notification arrives with a call id and nothing else,
+  // and when the app was not running there is no local call to look it up
+  // against - `wire()` runs before the sources are even loaded. The tap used to
+  // be dropped, so the hub never learned the phone had refused and waited out the
+  // whole ring before trying the next person.
+  const sources = manager();
+  await sources.load();
+  await sources.add({
+    url: WORK_URL,
+    code: work.createPairingCode({ role: 'oncall' }).code,
+  });
+  await new Promise((r) => setTimeout(r, 400));
+
+  const calls = [];
+  sources.on('call', (c) => calls.push(c));
+
+  const outcome = work.call({ message: 'the database is down', ringSeconds: 20 });
+  await new Promise((r) => setTimeout(r, 400));
+
+  // What the phone knows after a cold start: an id, and no source.
+  const placed = calls[0]?.call.id;
+  assert.ok(placed, 'the call rang');
+
+  assert.equal(sources.declineAnywhere([placed]), true, 'there was somewhere to send it');
+  assert.equal((await outcome).outcome, 'declined', 'and the hub acted on it at once');
+
+  // With nothing connected there is nothing to tell, and the caller is told so.
+  sources.disconnectAll();
+  assert.equal(sources.declineAnywhere(['whatever']), false);
+});

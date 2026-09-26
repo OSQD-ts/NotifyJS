@@ -100,6 +100,14 @@ class HubClient {
   /** Headless tasks waiting on `whileWatching()`, released when watching ends. */
   private watchers: Array<() => void> = [];
 
+  /**
+   * Declines tapped on a notification before any hub was connected.
+   *
+   * Kept until there is somewhere to send them: the hub needs to know the phone
+   * refused, or it waits out the whole ring before trying the next person.
+   */
+  private readonly pendingDeclines = new Set<string>();
+
   constructor() {
     this.manager = new SourceManager({
       storage: this.storage,
@@ -195,11 +203,14 @@ class HubClient {
 
     await this.manager.load();
     this.set({ loaded: true });
+    this.flushDeclines();
   }
 
   private wire(): void {
     this.teardown = [
       this.manager.on('sources', (sources) => {
+        // A hub becoming ready is the moment a held decline can go out.
+        this.flushDeclines();
         const call = this.state.activeCall;
         if (call && strandedCall(call, this.state.answeredCallId, sources)) {
           dismissCall(call.call.id);
@@ -285,14 +296,29 @@ class HubClient {
           if (entry?.call.id === callId) {
             this.manager.declineCall(entry.sourceId, callId);
             this.set({ activeCall: undefined });
+            return;
           }
+
+          // A decline that arrived while the app was not running has nothing to
+          // match against: `wire()` runs before the sources are even loaded, and
+          // the notification carries no hub. Held, then offered to every
+          // connected hub - the one that owns the call acts on it, and the others
+          // ignore a call id they have never rung. Without this the tap was
+          // silently dropped, which is the case the queue exists for.
+          this.pendingDeclines.add(callId);
+          this.flushDeclines();
         };
-        const sub = addCallActionListener(act);
-        // Taps that landed before this listener existed, which is most of them:
-        // the notification's receiver runs whether or not there is a runtime, and
-        // tapping one is often what starts the app. Pulled immediately after
-        // subscribing, so nothing is lost in the gap.
-        for (const pending of consumePendingCallActions()) act(pending);
+        // The native side queues every tap and sends the event only as a nudge,
+        // so the queue is the delivery path and this is the only place it is
+        // read: on the nudge, on subscribing, and on returning to the foreground
+        // below. A tap that arrives while nothing is subscribed - most of them,
+        // since tapping a notification is often what starts the app - waits in
+        // the queue rather than being sent to nobody.
+        const drain = () => {
+          for (const pending of consumePendingCallActions()) act(pending);
+        };
+        const sub = addCallActionListener(() => drain());
+        drain();
         return () => sub?.remove();
       })(),
 
@@ -345,6 +371,13 @@ class HubClient {
    * decides it - preferences, and whether any source is enabled - now lives
    * here, and because the service must not depend on a screen being mounted.
    */
+  /** Offers held declines to every connected hub, once there is one. */
+  private flushDeclines(): void {
+    if (this.pendingDeclines.size === 0) return;
+    if (!this.manager.declineAnywhere([...this.pendingDeclines])) return;
+    this.pendingDeclines.clear();
+  }
+
   private applyWatching(): void {
     if (!this.state.loaded) return;
     const wanted = shouldWatch(this.state.prefs, this.state.sources);
