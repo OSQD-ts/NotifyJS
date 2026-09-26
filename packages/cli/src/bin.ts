@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { parseArgs } from 'node:util';
-import { networkInterfaces } from 'node:os';
+import { hostname, networkInterfaces } from 'node:os';
 import { createInterface } from 'node:readline/promises';
 import WebSocket from 'ws';
 
@@ -348,7 +348,11 @@ function common(argv: string[], extra: Record<string, { type: 'string' | 'boolea
     options: {
       url: String(v.url ?? process.env.NOTIFYJS_URL ?? 'ws://localhost:7741'),
       store: String(v.store ?? defaultPath()),
-      name: String(v.name ?? `cli@${process.env.HOSTNAME ?? 'localhost'}`),
+      // `hostname()`, not `process.env.HOSTNAME`: that is a shell variable and
+      // is not exported, so every machine paired itself as `cli@localhost` and
+      // `notifyjs devices` listed a column of identical names - with no way to
+      // tell which entry belonged to the server you wanted to revoke.
+      name: String(v.name ?? `cli@${process.env.HOSTNAME || hostname()}`),
     } satisfies CommonOptions,
   };
 }
