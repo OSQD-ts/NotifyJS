@@ -397,3 +397,46 @@ test('quiet hours include their start and exclude their end', () => {
   assert.equal(inQuietHours(daytime, at(17)), false);
   assert.equal(inQuietHours(daytime, at(8, 59)), false);
 });
+
+test('a crash loop with one dedupe key does not become a thousand pages', async () => {
+  // `alwaysDeliver` exempts a severity from the severity rule, and it was checked
+  // before the caller's key - so the crash handler, whose own comment is "one crash
+  // loop should not become a thousand pages", sent every one of them at `critical`,
+  // each arming its own ack retry.
+  const dir = mkdtempSync(join(tmpdir(), 'notifyjs-crashloop-'));
+  const hub = new Notifier({
+    port: 0,
+    storeDir: dir,
+    dashboard: false,
+    logger: false,
+    flood: { enabled: true, windowMs: 400, burst: 2 },
+  });
+  await hub.start();
+
+  try {
+    const outcomes = [];
+    for (let i = 0; i < 12; i += 1) {
+      outcomes.push(
+        await hub.notify({
+          title: 'out of memory',
+          severity: 'critical',
+          channel: 'crash',
+          dedupeKey: 'crash:out of memory',
+        }),
+      );
+    }
+
+    const sent = outcomes.filter((o) => !o.coalesced).length;
+    assert.equal(sent, 2, `the burst goes out and the rest are held, got ${sent}`);
+
+    // And a critical alert with no key of its own is still never held.
+    const unkeyed = [];
+    for (let i = 0; i < 5; i += 1) {
+      unkeyed.push(await hub.notify({ title: `distinct ${i}`, severity: 'critical', channel: 'crash' }));
+    }
+    assert.equal(unkeyed.filter((o) => o.coalesced).length, 0, 'criticals are not withheld');
+  } finally {
+    await hub.stop();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

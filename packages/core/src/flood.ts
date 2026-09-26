@@ -53,7 +53,18 @@ export class FloodControl {
    */
   shouldCoalesce(n: Notification, explicitKey?: string): boolean {
     if (!this.opts.enabled) return false;
-    if (this.opts.alwaysDeliver.includes(n.severity)) return false;
+
+    // `alwaysDeliver` exempts a severity from the *severity* rule, not from a key
+    // the caller supplied. A `dedupeKey` is the caller saying "these are the same
+    // thing", and the adapters say it while sending `critical`: the crash handler's
+    // own comment is "one crash loop should not become a thousand pages", and a
+    // crash loop is precisely a thousand identical criticals. Checking the
+    // exemption first meant they all went out, each arming its own ack retry.
+    //
+    // Nothing is withheld that the burst allowance would have let through: the
+    // first of a window always goes out, and what is collapsed is the repetition
+    // after it, released as a summary.
+    if (!explicitKey && this.opts.alwaysDeliver.includes(n.severity)) return false;
 
     const key = explicitKey ?? defaultKey(n);
     const existing = this.windows.get(key);
