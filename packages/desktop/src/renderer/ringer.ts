@@ -86,18 +86,39 @@ export async function speak(
       if (opts.lang) u.lang = opts.lang;
       u.rate = opts.rate;
       u.pitch = opts.pitch;
-      u.onend = () => (--remaining > 0 ? utter() : resolve());
+      u.onend = () => {
+        if (mine !== speechGeneration) return resolve();
+        if (--remaining > 0) utter();
+        else resolve();
+      };
       // An engine failure must still settle, or the call screen hangs open
       // with no way back to the feed.
       u.onerror = () => resolve();
       synth.speak(u);
     };
+    // Claimed before the flush below, which interrupts whatever was
+    // speaking: that utterance's `end` then belongs to a run that is over.
+    const mine = ++speechGeneration;
     synth.cancel();
     utter();
   });
 }
 
+/**
+ * Bumped by `stopSpeaking`, so a run part-way through its repeats stops too.
+ *
+ * Cancelling an utterance that is currently speaking dispatches `end` rather
+ * than `error` in Chromium - which the Electron renderer always is - so a
+ * hang-up decremented the repeat counter and started the message again, reading
+ * it out to a screen nobody is looking at, and each further cancel only burned
+ * one more repeat. The same counter settles a previous call's promise when a
+ * second call takes over. The system-speech fallback in the main process has
+ * always worked this way.
+ */
+let speechGeneration = 0;
+
 export function stopSpeaking(): void {
+  speechGeneration += 1;
   globalThis.speechSynthesis?.cancel();
 }
 
