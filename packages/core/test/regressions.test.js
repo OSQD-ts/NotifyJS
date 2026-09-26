@@ -2912,3 +2912,47 @@ test('the handshake deadline honours autoReconnect and never replays a pairing c
   giveUp.disconnect();
   pairingClient.disconnect();
 });
+
+test('a heartbeat longer than the ceiling is refused, not quietly halved', async () => {
+  // Arming 30 days for a task that checks in quarterly manufactures exactly what
+  // this module exists to avoid: a critical page, repeated every tick, for a job
+  // that is not late - and the CLI printed the interval that was asked for, so
+  // nobody would have known.
+  const dir = tmp('heartbeat-ceiling');
+  const hub = hostileHub(dir);
+  await hub.start();
+  const device = await pairRaw(hub, 'admin', 'setter');
+
+  const tooLong = await device.ask('heartbeat.expect', { name: 'quarterly', every: '90d' });
+  assert.equal(tooLong.ok, false, 'refused');
+  assert.match(tooLong.error, /30d or less/);
+
+  const fine = await device.ask('heartbeat.expect', { name: 'nightly', every: '24h' });
+  assert.equal(fine.ok, true, 'and an ordinary interval still works');
+  assert.equal(fine.data.heartbeat.every, 24 * 60 * 60_000);
+
+  device.ws.close();
+  await hub.stop();
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test('a graceful shutdown does not report every device as going offline', async () => {
+  // `stop()` releases each session's connection slot through `closeSession`,
+  // which also emits `device:offline` when a device's last session goes. A deploy
+  // is not a device going offline, and an application that pages on that event
+  // would have been paged once per device every time the hub restarted.
+  const dir = tmp('quiet-shutdown');
+  const hub = hostileHub(dir);
+  await hub.start();
+  const device = await pairRaw(hub, 'oncall', 'phone');
+
+  const offline = [];
+  hub.on('device:offline', (d) => offline.push(d.name));
+  await hub.stop();
+  await delay(200);
+
+  assert.deepEqual(offline, [], 'nothing was reported as going offline');
+
+  device.ws.close();
+  rmSync(dir, { recursive: true, force: true });
+});

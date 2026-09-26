@@ -628,12 +628,18 @@ export class Notifier extends EventEmitter<NotifierEvents> {
     // those phantom counts were still charged after the next `start()`: a hub
     // cycled a few times with devices connected refused the very devices it
     // had been holding, and the sweeper could never reclaim them.
+    // Emptied before the loop, not after it. `closeSession` releases the slot -
+    // which is why it is called here at all - but it also emits
+    // `device:offline` when a device's last session goes, and a graceful
+    // shutdown is not a device going offline. An application that pages on that
+    // event would have been paged once per device on every deploy, which is the
+    // false alarm the `bye` frame exists to prevent on the device side.
+    this.byDevice.clear();
     for (const session of [...this.sessions.values()]) {
       session.close(1001, 'shutting down');
       this.closeSession(session);
     }
     this.sessions.clear();
-    this.byDevice.clear();
 
     this.guard.stop();
     this.wss?.close();
@@ -2268,6 +2274,12 @@ export class Notifier extends EventEmitter<NotifierEvents> {
           if (wanted && !this.store.policy(wanted)) {
             return reply(false, undefined, `unknown escalation policy: ${wanted}`);
           }
+          // The checked value is the one that gets used. Validating the trimmed
+          // name and then passing the original meant `policy: ' night-shift '`
+          // walked through the guard and threw inside `call()` instead, into the
+          // same swallowed catch - answering `ok` for a call that rang nobody,
+          // one space away from the bug this check was added for.
+          if (wanted) args.policy = wanted;
           void this.call(args as CallInput).catch(() => {});
           return reply(true, {});
         }
@@ -2828,9 +2840,25 @@ function sanitizeHeartbeat(input: HeartbeatSpec, floorMs: number): HeartbeatSpec
   if (raw.every === undefined) throw new Error('a heartbeat needs an interval');
 
   const asked = parseDuration(raw.every);
+  // Refused rather than trimmed. Silently arming 30 days for a task that checks
+  // in quarterly manufactures the thing this module exists to avoid: a critical
+  // page, repeated every tick, for a job that is not late. The floor may only
+  // make a deadline later, so that one is safe to apply quietly.
+  if (asked > MAX_WIRE_HEARTBEAT_MS) {
+    throw new Error(
+      `a heartbeat interval must be ${formatDuration(MAX_WIRE_HEARTBEAT_MS)} or less, not ${formatDuration(asked)}`,
+    );
+  }
+  const grace = raw.grace === undefined ? 0 : parseDuration(raw.grace);
+  if (grace > MAX_WIRE_HEARTBEAT_MS) {
+    throw new Error(
+      `a heartbeat's grace must be ${formatDuration(MAX_WIRE_HEARTBEAT_MS)} or less, not ${formatDuration(grace)}`,
+    );
+  }
+
   const clean: HeartbeatSpec = {
-    every: Math.min(MAX_WIRE_HEARTBEAT_MS, Math.max(floorMs, asked)),
-    grace: Math.min(MAX_WIRE_HEARTBEAT_MS, raw.grace === undefined ? 0 : parseDuration(raw.grace)),
+    every: Math.max(floorMs, asked),
+    grace,
     severity: coerceSeverity(raw.severity, 'critical'),
     repeat: raw.repeat === true,
   };

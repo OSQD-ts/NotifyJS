@@ -8,6 +8,7 @@ import {
   Notifier,
   backupSecrets,
   exportStore,
+  formatDuration,
   importStore,
   isBackup,
   type Severity,
@@ -782,12 +783,18 @@ async function watch(argv: string[]): Promise<void> {
     severity: level,
     description: values.description as string | undefined,
   });
+  // What the hub armed, not what was asked for. The two can differ - a hub whose
+  // sweep is slower than the interval asked for widens it - and printing the
+  // request while the hub held something else is how somebody ends up waiting
+  // for a page that was never going to come when they expected it.
+  const armed = (result as { heartbeat?: { every: number; grace: number } }).heartbeat;
+  const every = armed ? formatDuration(armed.every) : String(values.every);
+  const grace = armed?.grace ? formatDuration(armed.grace) : values.grace;
   process.stdout.write(
-    `watching "${name}": a check-in is expected every ${values.every}` +
-      (values.grace ? ` (plus ${values.grace} grace)` : '') +
+    `watching "${name}": a check-in is expected every ${every}` +
+      (grace ? ` (plus ${grace} grace)` : '') +
       `\n\nRecord one with:\n\n    notifyjs checkin ${name}\n`,
   );
-  void result;
   client.disconnect();
 }
 
