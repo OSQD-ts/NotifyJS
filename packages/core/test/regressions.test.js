@@ -2080,3 +2080,47 @@ test('a handshake ws abandons gives its connection slot back', async () => {
   await hub.stop();
   rmSync(dir, { recursive: true, force: true });
 });
+
+test('one good handshake does not lift a running ban', async () => {
+  // `succeed()` preserved the ban's level so the next one would be longer, but
+  // wrote `until: 0` - which is the ban itself. Any device the attacker
+  // already held, or anybody honest behind the same NAT, bought them another
+  // `maxFailuresBeforeBan` guesses, round after round.
+  const { Guard } = await import('../dist/index.js');
+
+  let record;
+  const store = {
+    ban: () => record,
+    putBan: (b) => {
+      record = b;
+    },
+    clearBan: () => {
+      record = undefined;
+    },
+    bans: () => (record ? [record] : []),
+  };
+  const guard = new Guard(
+    {
+      maxConnectionsPerIp: 10,
+      connectionBurst: 10,
+      connectionRefillPerSec: 1,
+      maxUnauthenticated: 50,
+      maxFailuresBeforeBan: 3,
+      failureWindowMs: 60_000,
+      banBaseMs: 60_000,
+      banMaxMs: 3_600_000,
+    },
+    store,
+  );
+
+  for (let i = 0; i < 3; i += 1) guard.fail('198.51.100.7');
+  assert.ok(guard.bannedFor('198.51.100.7') > 0, 'three failures ban the address');
+
+  guard.succeed('198.51.100.7');
+
+  assert.ok(guard.bannedFor('198.51.100.7') > 0, 'and a later success leaves it banned');
+  assert.equal(guard.admit('198.51.100.7').ok, false, 'so new connections are still refused');
+  assert.equal(record.failures, 0, 'while the failure counter still resets');
+
+  guard.stop();
+});

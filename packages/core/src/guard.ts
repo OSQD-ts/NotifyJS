@@ -172,6 +172,20 @@ export class Guard {
   succeed(ip: string): void {
     const prior = this.store.ban(ip);
     if (!prior) return;
+
+    // A ban that is still running stays running. Preserving `level` only makes
+    // the next ban longer; clearing `until` handed the lockout itself back for
+    // the price of one valid handshake, which an attacker has whenever they
+    // hold any paired device or any ingest token - or whenever they share a
+    // NAT with somebody who does. `admit()` refuses new connections from a
+    // banned address but says nothing about the sockets already open, so this
+    // was reachable from a session opened before the ban landed: five guesses,
+    // one honest auth, five more guesses, indefinitely.
+    if (prior.until > Date.now()) {
+      this.store.putBan({ ...prior, failures: 0 });
+      return;
+    }
+
     if (prior.level === 0) {
       this.store.clearBan(ip);
       return;
