@@ -636,6 +636,15 @@ client.on('status', (status) => {
 
 client.on('ready', (ready) => {
   showApp();
+  // Whatever the banner was saying, this tab is connected now.
+  //
+  // A `bye` arrives on every graceful shutdown, and the client only emits
+  // `service:back` when it had previously decided the service was missing - so
+  // a hub that restarted and came back inside its own grace window (the normal
+  // case for a deploy) left every open dashboard showing a red "Service
+  // restarting" alert permanently, while being perfectly healthy. Nothing but a
+  // reload cleared it.
+  $('service-down').hidden = true;
   $('hub-name').textContent = client.serverName ?? 'NotifyJS';
   $('device-line').textContent = `${ready.deviceName} · ${ready.role}`;
   $('devices-toggle').hidden = !canManage();
