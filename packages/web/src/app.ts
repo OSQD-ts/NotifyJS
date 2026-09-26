@@ -655,13 +655,20 @@ client.on('ready', (ready) => {
 });
 
 client.on('notification', (n) => {
+  // Acknowledged before anything else, including for an alert already on screen.
+  // The hub's replay cursor only moves when an ack arrives, so returning early
+  // for a repeat left that cursor stuck: the alert was re-sent on every
+  // reconnect for ever, the device read as permanently behind, and a
+  // `requireAck` alert exhausted its retries and was recorded as unseen by
+  // somebody who had read it. `SourceManager` acks unconditionally for exactly
+  // this reason, even for alerts it filters out.
+  client.ack([n.id], { seq: n.seq });
   if (feed.some((existing) => existing.id === n.id)) return; // retries repeat ids
   feed.unshift(n);
   if (feed.length > 300) feed.pop();
   renderFeed();
   announce(announcementFor(n));
   popNotification(n);
-  client.ack([n.id], { seq: n.seq });
 });
 
 /** The condition ended, so the alert should stop occupying a screen. */
