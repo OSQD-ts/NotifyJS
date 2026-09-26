@@ -212,3 +212,15 @@ test('a device that vanishes mid-ring says so in the events', async () => {
     'the disappearance is named, and is not a decline',
   );
 });
+
+test('a call with nobody to ring says so, rather than only returning', async () => {
+  // The outcome existed solely in the return value: the audit log could not tell a
+  // call that failed from one still ringing, and an application driving escalation
+  // off the event never heard about it at all.
+  const events = [];
+  const orch = new CallOrchestrator(30, (e) => events.push(e));
+
+  const result = await orch.place(request('c-nobody'), [rung([])]);
+  assert.equal(result.outcome, 'failed');
+  assert.deepEqual(events, [{ type: 'failed', callId: 'c-nobody' }]);
+});

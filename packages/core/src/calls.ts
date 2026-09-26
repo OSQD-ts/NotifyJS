@@ -54,7 +54,14 @@ export type CallEvent =
    */
   | { type: 'vanished'; callId: string; deviceId: string }
   | { type: 'ended'; callId: string; deviceId: string }
-  | { type: 'missed'; callId: string };
+  | { type: 'missed'; callId: string }
+  /**
+   * There was nobody to ring at all - no device on any rung. Emitted so the
+   * outcome exists somewhere other than the return value: an operator reading the
+   * audit log could not tell a call that failed from one still ringing, and an
+   * application driving escalation off the `call` event never heard about it.
+   */
+  | { type: 'failed'; callId: string };
 
 /**
  * Drives a call from "somebody should hear about this" to a definite outcome.
@@ -94,6 +101,7 @@ export class CallOrchestrator {
   place(request: CallRequest, steps: CallStep[], repeat = 0): Promise<CallResult> {
     const reachable = steps.some((step) => step.targets.length > 0);
     if (!reachable) {
+      this.emit({ type: 'failed', callId: request.id });
       return Promise.resolve({ callId: request.id, outcome: 'failed', attempted: [] });
     }
 
