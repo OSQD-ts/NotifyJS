@@ -87,9 +87,36 @@ object WatchAlarm {
  */
 class WatchAlarmReceiver : BroadcastReceiver() {
   override fun onReceive(context: Context, intent: Intent?) {
-    WatchEvents.wake(context, "alarm")
+    val wanted = WatchState.isWanted(context)
+
+    // Nobody home. The service was meant to be running and is not - Android
+    // reclaimed it, or an OEM battery manager stopped it - and this receiver used
+    // to do nothing about that: it woke the CPU, told a listener that did not
+    // exist, and re-armed itself, every nine minutes, indefinitely. A wake lock
+    // held for thirty seconds each time, achieving nothing, while alerting stayed
+    // off until somebody opened the app.
+    //
+    // So try to bring it back, and fall back to the notice the boot path already
+    // uses when that is refused - an inexact alarm is not one of the exemptions
+    // that permits starting a foreground service from the background, so being
+    // refused is the expected case rather than the surprising one.
+    if (wanted && !WatchEvents.hasListener()) {
+      val started = runCatching {
+        NotifyjsWatchService.start(context, WatchState.hubName(context))
+      }.isSuccess
+      if (!started) {
+        CallNotification.ensureChannels(context)
+        CallNotification.showResume(context)
+      }
+      WatchAlarm.schedule(context)
+      return
+    }
+
+    if (wanted) WatchEvents.wake(context, "alarm")
+
     // Re-armed even if nothing was listening. The alarm is what makes the app
-    // recoverable at all, so the one thing it must never do is stop.
+    // recoverable at all, so the one thing it must never do is stop - but only
+    // while watching is still wanted; `stop()` cancels it otherwise.
     WatchAlarm.schedule(context)
   }
 }
