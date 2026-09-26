@@ -2693,6 +2693,20 @@ export class Notifier extends EventEmitter<NotifierEvents> {
    * alert, so a per-socket set of outstanding ids would have nothing to decide.
    */
   private scheduleAckRetry(n: Notification): void {
+    // Bounded. Each outstanding alert re-runs `deliver()` over every session for up to
+    // twenty rounds, so the work is "outstanding x sessions" and nothing capped the
+    // first term: an application that sets `requireAck` on a busy channel had the hub
+    // re-sending thousands of frames per round, holding the retained notification alive
+    // in each closure. Past the cap the alert is still delivered and still in history -
+    // what it loses is the nagging, which is the right thing to drop first, and the
+    // operator can see it happened.
+    if (this.ackWaiters.size >= MAX_ACK_WAITERS) {
+      this.audit('notify.ack_retry_skipped', {
+        detail: { id: n.id, outstanding: this.ackWaiters.size },
+      });
+      return;
+    }
+
     let attempts = 0;
     const tick = () => {
       // handleAck() deletes the entry, which is how an acknowledgement stops
@@ -2914,6 +2928,14 @@ const NOTIFYJS_VERSION = ownVersion('0.1.0');
 const INGEST_LAST_USED_RESOLUTION_MS = 60_000;
 
 const MAX_ACK_RETRIES = 20;
+
+/**
+ * Most alerts kept waiting for an acknowledgement at once.
+ *
+ * Each one costs a timer, a retained notification and a fan-out over every session on
+ * every round, so this is the term that has to be bounded rather than the rounds.
+ */
+const MAX_ACK_WAITERS = 500;
 
 /** A pairing code is meant to be redeemed now, not next week. */
 const MAX_CODE_TTL_MS = 7 * 24 * 60 * 60_000;
