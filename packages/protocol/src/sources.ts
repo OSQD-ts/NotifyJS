@@ -116,7 +116,15 @@ export class SourceManager {
   /** Restores the subscription list and connects everything enabled. */
   load(): Promise<void> {
     // Idempotent: callers may race, and only the first should do the work.
-    this.loading ??= this.restore();
+    //
+    // A failure is deliberately not remembered. `add`, `remove` and
+    // `setEnabled` all begin by awaiting this, so a memoized rejection left
+    // the user unable to add a hub - or even to remove the one that had
+    // failed - for the life of the install.
+    this.loading ??= this.restore().catch((err) => {
+      this.loading = undefined;
+      throw err;
+    });
     return this.loading;
   }
 
@@ -135,8 +143,18 @@ export class SourceManager {
       // A source added while this was loading already has a live client -
       // reconnecting it here would drop a pairing that is still in progress.
       if (this.clients.has(source.id)) continue;
-      if (source.enabled) await this.connect(source);
-      else this.setState(source.id, { status: 'idle', paired: true });
+      if (source.enabled) {
+        // One source that cannot even be dialled must not strand the rest.
+        // `createSocket` throws outright for a `ws://` URL on an `https://`
+        // page and for a malformed one on a phone, and this loop used to carry
+        // that out of `restore()`: every later source went unconnected and the
+        // list was never published, so the UI showed nothing at all.
+        try {
+          await this.connect(source);
+        } catch {
+          this.setState(source.id, { status: 'error', paired: true });
+        }
+      } else this.setState(source.id, { status: 'idle', paired: true });
     }
     this.publish();
   }

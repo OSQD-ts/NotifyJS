@@ -2164,3 +2164,48 @@ test('a client whose signing fails reports it instead of killing the process', a
   await hub.stop();
   rmSync(dir, { recursive: true, force: true });
 });
+
+test('a source that cannot be dialled leaves the rest of the list usable', async () => {
+  // `load()` memoized the rejected promise, and `add`, `remove` and
+  // `setEnabled` all begin by awaiting it - so one stored source whose URL the
+  // platform refuses (mixed content in a browser, a malformed URL on a phone)
+  // left the user unable to add a hub or remove the broken one, for good.
+  const { SourceManager, memoryStorage } = await import('@osqd/notifyjs-protocol');
+  const storage = memoryStorage();
+  await storage.set(
+    'notifyjs.sources',
+    JSON.stringify([
+      { id: 'broken', url: 'ws://192.0.2.1:7741', label: 'Broken', enabled: true, addedAt: 1 },
+      { id: 'quiet', url: 'ws://192.0.2.2:7741', label: 'Quiet', enabled: false, addedAt: 2 },
+    ]),
+  );
+
+  const manager = new SourceManager({
+    storage,
+    crypto: nodeCrypto,
+    createSocket: (url) => {
+      if (url.includes('192.0.2.1')) throw new Error('SecurityError: mixed content');
+      return new WebSocket(url);
+    },
+    platform: 'node-test',
+    deviceName: () => 'my-phone',
+    minSeverity: () => 'info',
+  });
+
+  await manager.load();
+  assert.equal(manager.list().length, 2, 'both sources are still listed');
+  assert.equal(
+    manager.list().find((s) => s.id === 'broken').status,
+    'error',
+    'the one that could not be dialled says so',
+  );
+
+  await manager.remove('broken');
+  assert.deepEqual(
+    manager.list().map((s) => s.id),
+    ['quiet'],
+    'and it can be removed rather than being stuck there',
+  );
+
+  manager.disconnectAll();
+});
