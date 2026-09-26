@@ -190,7 +190,7 @@ async function serve(argv: string[]): Promise<void> {
   const certFile = values['tls-cert'];
   const keyFile = values['tls-key'];
   if (Boolean(certFile) !== Boolean(keyFile)) {
-    throw new Error('--tls-cert and --tls-key must be given together');
+    throw new UsageError('--tls-cert and --tls-key must be given together');
   }
 
   const hub = new Notifier({
@@ -292,10 +292,20 @@ function onShutdown(close: () => void | Promise<void>): void {
 function port(value: string): number {
   const n = Number(value);
   if (!Number.isInteger(n) || n < 0 || n > 65535) {
-    throw new Error(`--port must be a number between 0 and 65535, not "${value}"`);
+    throw new UsageError(`--port must be a number between 0 and 65535, not "${value}"`);
   }
   return n;
 }
+
+/**
+ * Something wrong with what was typed, as opposed to something that went wrong.
+ *
+ * Kept apart because the exit code is what a script reads: 1 means a check
+ * failed or the work did not succeed, 2 means the invocation itself was no good.
+ * A wrapper retrying on 1 and giving up on 2 cannot tell the difference
+ * otherwise, and everything here used to exit 1.
+ */
+class UsageError extends Error {}
 
 /**
  * A severity, or a clear complaint. Same reasoning as `port`.
@@ -308,7 +318,7 @@ function port(value: string): number {
 function severity(value: string | undefined, fallback: Severity): Severity {
   if (value === undefined) return fallback;
   if (!isSeverity(value)) {
-    throw new Error(`--severity must be one of ${SEVERITIES.join(', ')}, not "${value}"`);
+    throw new UsageError(`--severity must be one of ${SEVERITIES.join(', ')}, not "${value}"`);
   }
   return value;
 }
@@ -317,7 +327,7 @@ function severity(value: string | undefined, fallback: Severity): Severity {
 function count(value: string, flag: string): number {
   const n = Number(value);
   if (!Number.isFinite(n) || n <= 0) {
-    throw new Error(`${flag} must be a positive number, not "${value}"`);
+    throw new UsageError(`${flag} must be a positive number, not "${value}"`);
   }
   return Math.floor(n);
 }
@@ -510,7 +520,10 @@ async function send(argv: string[]): Promise<void> {
     body: { type: 'string' },
   });
   const title = positionals.join(' ');
-  if (!title) throw new Error('usage: notifyjs send <title> [--body text] [--severity level]');
+  if (!title) throw new UsageError('usage: notifyjs send <title> [--body text] [--severity level]');
+  // Before the socket, not after: a flag nobody can act on should fail without
+  // a round trip, and a hub that happens to be down must not mask a typo.
+  const level = severity(values.severity as string | undefined, 'info');
 
   const client = makeClient(options);
   const done = ready(client);
@@ -521,7 +534,7 @@ async function send(argv: string[]): Promise<void> {
     title,
     body: values.body as string | undefined,
     channel: (values.channel as string) ?? 'default',
-    severity: severity(values.severity as string | undefined, 'info'),
+    severity: level,
   });
   process.stdout.write('sent\n');
   client.disconnect();
@@ -533,7 +546,8 @@ async function placeCall(argv: string[]): Promise<void> {
     channel: { type: 'string' },
   });
   const message = positionals.join(' ');
-  if (!message) throw new Error('usage: notifyjs call <message to speak>');
+  if (!message) throw new UsageError('usage: notifyjs call <message to speak>');
+  const level = severity(values.severity as string | undefined, 'critical');
 
   const client = makeClient(options);
   const done = ready(client);
@@ -543,7 +557,7 @@ async function placeCall(argv: string[]): Promise<void> {
   await client.admin('call.place', {
     message,
     channel: (values.channel as string) ?? 'default',
-    severity: severity(values.severity as string | undefined, 'critical'),
+    severity: level,
   });
   process.stdout.write('call placed\n');
   client.disconnect();
@@ -628,7 +642,7 @@ async function backup(argv: string[]): Promise<void> {
   if (sub !== 'import') throw new Error(`unknown backup command: ${sub}`);
 
   const from = values.from as string | undefined;
-  if (!from) throw new Error('which file? pass --from <file>');
+  if (!from) throw new UsageError('which file? pass --from <file>');
   const doc = JSON.parse(readFileSync(from, 'utf8')) as unknown;
   if (!isBackup(doc)) throw new Error(`${from} is not a NotifyJS backup`);
 
@@ -751,8 +765,10 @@ async function watch(argv: string[]): Promise<void> {
     description: { type: 'string' },
   });
   const name = positionals[0];
-  if (!name) throw new Error('usage: notifyjs watch <name> --every 24h [--grace 1h]');
-  if (!values.every) throw new Error('--every is required, e.g. --every 24h');
+  if (!name) throw new UsageError('usage: notifyjs watch <name> --every 24h [--grace 1h]');
+  if (!values.every) throw new UsageError('--every is required, e.g. --every 24h');
+  const level =
+    values.severity === undefined ? undefined : severity(values.severity as string, 'critical');
 
   const client = makeClient(options);
   const done = ready(client);
@@ -763,7 +779,7 @@ async function watch(argv: string[]): Promise<void> {
     name,
     every: values.every as string,
     grace: values.grace as string | undefined,
-    severity: values.severity === undefined ? undefined : severity(values.severity as string, 'critical'),
+    severity: level,
     description: values.description as string | undefined,
   });
   process.stdout.write(
@@ -778,7 +794,7 @@ async function watch(argv: string[]): Promise<void> {
 async function checkin(argv: string[]): Promise<void> {
   const { positionals, options } = common(argv);
   const name = positionals[0];
-  if (!name) throw new Error('usage: notifyjs checkin <name>');
+  if (!name) throw new UsageError('usage: notifyjs checkin <name>');
 
   const client = makeClient(options);
   const done = ready(client);
@@ -861,7 +877,20 @@ async function update(argv: string[]): Promise<void> {
   );
 }
 
+/**
+ * `parseArgs` raises these for a flag nobody defined or a value it cannot use,
+ * which is the same class of problem as the checks above and deserves the same
+ * exit code rather than the one that means "the work failed".
+ */
+const PARSE_ARGS_CODES = new Set([
+  'ERR_PARSE_ARGS_UNKNOWN_OPTION',
+  'ERR_PARSE_ARGS_INVALID_OPTION_VALUE',
+  'ERR_PARSE_ARGS_UNEXPECTED_POSITIONAL',
+]);
+
 main().catch((err: unknown) => {
   process.stderr.write(`${err instanceof Error ? err.message : String(err)}\n`);
-  process.exit(1);
+  const code = (err as { code?: unknown } | undefined)?.code;
+  const misuse = err instanceof UsageError || (typeof code === 'string' && PARSE_ARGS_CODES.has(code));
+  process.exit(misuse ? 2 : 1);
 });

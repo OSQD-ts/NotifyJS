@@ -190,3 +190,30 @@ test('a misspelled severity is refused rather than quietly downgraded', async ()
     'and nothing was sent at the wrong severity',
   );
 });
+
+test('bad arguments exit 2, while a failure to do the work exits 1', async () => {
+  // The exit code is what a script reads: a wrapper that retries on 1 and gives
+  // up on 2 could not tell a typo from an outage, because everything exited 1.
+  const codeOf = async (args) => {
+    try {
+      await cli(args);
+      return 0;
+    } catch (err) {
+      return err.code;
+    }
+  };
+
+  assert.equal(await codeOf(['send']), 2, 'no title at all');
+  assert.equal(await codeOf(['send', 'x', '--severity', 'nope']), 2, 'a severity that is not one');
+  assert.equal(await codeOf(['serve', '--port', 'http']), 2, 'a port that is not a number');
+  assert.equal(await codeOf(['send', 'x', '--nonsense']), 2, 'a flag nobody defined');
+  assert.equal(await codeOf(['import']), 2, 'a required flag left off');
+
+  // Unchanged: an unknown command is a failing check, not a malformed one.
+  assert.equal(await codeOf(['wat']), 1);
+  // And so is work that could not be done - here, a hub that is not there.
+  assert.equal(
+    await codeOf(['devices', '--url', 'ws://127.0.0.1:1', '--store', join(dir, 'absent.json')]),
+    1,
+  );
+});
