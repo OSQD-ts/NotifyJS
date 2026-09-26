@@ -47,6 +47,12 @@ export type CallEvent =
   | { type: 'ringing'; callId: string; deviceId: string; deviceName: string }
   | { type: 'answered'; callId: string; deviceId: string; deviceName: string }
   | { type: 'declined'; callId: string; deviceId: string }
+  /**
+   * A ringing device went away - its socket closed, or the liveness sweep
+   * dropped it. Separate from `declined` because nobody refused anything, and
+   * emitted so the audit log still records why the ladder moved on.
+   */
+  | { type: 'vanished'; callId: string; deviceId: string }
   | { type: 'ended'; callId: string; deviceId: string }
   | { type: 'missed'; callId: string };
 
@@ -262,6 +268,10 @@ export class CallOrchestrator {
   private vanish(call: ActiveCall, deviceId: string): void {
     call.vanished.add(deviceId);
     call.ringing.delete(deviceId);
+    // Recorded under its own name. Routing this through `decline()` used to write
+    // a `call.declined` audit row, which was wrong; writing nothing at all left
+    // an operator asking why a call escalated with no answer in the log.
+    this.emit({ type: 'vanished', callId: call.request.id, deviceId });
     if (call.ringing.size > 0) return;
 
     this.clearTimer(call);
