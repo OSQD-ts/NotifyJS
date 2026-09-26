@@ -315,12 +315,14 @@ export class Store {
     // Compacting only when the file has grown to twice the retained window
     // keeps rewrites rare while bounding the file to a predictable size.
     if (this.historyLines > this.limits.history * 2) {
-      this.compact(this.historyFile, this.historyCache);
-      this.historyLines = this.historyCache.length;
+      if (this.compact(this.historyFile, this.historyCache)) {
+        this.historyLines = this.historyCache.length;
+      }
     }
     if (this.auditLines > this.limits.audit * 2) {
-      this.compact(this.auditFile, this.auditCache);
-      this.auditLines = this.auditCache.length;
+      if (this.compact(this.auditFile, this.auditCache)) {
+        this.auditLines = this.auditCache.length;
+      }
     }
 
     if (!this.dirty) return;
@@ -358,13 +360,26 @@ export class Store {
     }
   }
 
-  private compact(file: string, entries: unknown[]): void {
+  /**
+   * Rewrites a log from the cache, and says whether it managed to.
+   *
+   * It used to swallow the failure and return nothing, while both callers went on
+   * to set the line count to the cache length as though the file had been
+   * rewritten. On a full or read-only filesystem that left the counter
+   * understating what is actually on disk, so later appends piled on top of
+   * content the count no longer described - and the next boot could read back two
+   * entries for one `seq`, which `since()` then replays twice.
+   */
+  private compact(file: string, entries: unknown[]): boolean {
     try {
       const tmp = `${file}.tmp`;
       writeFileSync(tmp, entries.map((e) => JSON.stringify(e) + '\n').join(''), { mode: 0o600 });
       renameSync(tmp, file);
+      return true;
     } catch {
-      /* best effort */
+      // Losing a compaction must never take down the app that embedded us; the
+      // caller keeps its old count and tries again on the next write.
+      return false;
     }
   }
 
@@ -687,12 +702,19 @@ export class Store {
    * the cache - which is bounded by the retention limit.
    */
   touchHistory(): void {
-    // The cache already contains everything still queued for append. Writing
-    // it out and then draining the queue would append those lines a second
-    // time, so the queue is dropped rather than flushed.
+    // The cache already contains everything still queued for append. Writing it
+    // out and then draining the queue would append those lines a second time, so
+    // the queue is dropped rather than flushed - but only once the rewrite has
+    // actually happened. Dropped first, it lost the queued lines from memory
+    // while the file still held the content they were meant to replace.
+    const pending = this.historyPending.slice();
     this.historyPending.length = 0;
-    this.compact(this.historyFile, this.historyCache);
-    this.historyLines = this.historyCache.length;
+    if (this.compact(this.historyFile, this.historyCache)) {
+      this.historyLines = this.historyCache.length;
+      return;
+    }
+    // The rewrite failed, so the lines still belong to the queue.
+    this.historyPending.unshift(...pending);
   }
 
   since(seq: number): Notification[] {
