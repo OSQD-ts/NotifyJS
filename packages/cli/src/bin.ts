@@ -54,6 +54,7 @@ serve options
   --data <dir>             Hub state directory (default .notifyjs)
   --no-dashboard           Do not serve the web dashboard
   --dashboard-dir <dir>    Serve dashboard assets from this directory
+                           (or $NOTIFYJS_DASHBOARD_DIR)
   --public-url <url>       Address devices should use (default: your LAN IP)
   --tls-cert <file>        Certificate for wss:// (see: notifyjs cert)
   --tls-key <file>         Private key for wss://
@@ -88,14 +89,14 @@ call options
 token options
   --role <name>            Role a created token publishes with (default viewer)
   --label <text>           What it is for, so two tokens can be told apart
-  --id <id>                Which token to revoke
+  --id <id>                Which token to revoke (or give the id as an argument)
 
 export / import options
   --data <dir>             Hub state directory (default .notifyjs)
   --out <file>             Write the backup here rather than to stdout
   --from <file>            Backup to restore
   --history                Include the alert and audit logs
-  --force                  Replace an existing store when restoring
+  --force                  Replace an existing store, history or audit log
 
 update options
   --check                  Report what is available without installing
@@ -439,7 +440,9 @@ function ready(client: NotifyClient, timeoutMs = 15_000): Promise<void> {
 }
 
 async function pair(argv: string[]): Promise<void> {
-  const { positionals, options } = common(argv, { role: { type: 'string' } });
+  // No `--role` here: it was accepted and never read - the role belongs to the code,
+  // which is minted by whoever has the authority to choose it.
+  const { positionals, options } = common(argv);
   let code = positionals[0];
 
   if (!code) {
@@ -600,12 +603,6 @@ async function devices(argv: string[]): Promise<void> {
 }
 
 /**
- * Mints, lists and revokes the bearer tokens that let something publish over
- * HTTP. Over the protocol rather than by editing the store, because a running
- * hub holds the store in memory and would write straight over a second
- * process's changes.
- */
-/**
  * Copies a hub's identity out of, and back into, a directory.
  *
  * Offline on purpose. A restorable backup contains the hub's secrets, and a
@@ -675,6 +672,12 @@ async function backup(argv: string[]): Promise<void> {
   );
 }
 
+/**
+ * Mints, lists and revokes the bearer tokens that let something publish over
+ * HTTP. Over the protocol rather than by editing the store, because a running
+ * hub holds the store in memory and would write straight over a second
+ * process's changes.
+ */
 async function token(argv: string[]): Promise<void> {
   const sub = argv[0] && !argv[0].startsWith('-') ? argv.shift() : 'list';
   const { values, positionals, options } = common(argv, {

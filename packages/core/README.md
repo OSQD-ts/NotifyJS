@@ -122,7 +122,8 @@ notify.checkIn('nightly-backup');   // at the end of the backup
 - **Calls escalate.** Ring devices one at a time, or define a policy with
   `upsertPolicy` to say exactly who rings, in what order, for how long.
 - **Offline devices get what they missed** on reconnect, filtered through their
-  *current* role. `requireAck: true` re-delivers until a human acknowledges.
+  *current* role. `requireAck: true` re-delivers until a device acknowledges - a device, not a
+  person: every client acks on receipt.
 - **Prometheus counters at `/metrics`** — counts only, no titles or channels,
   so scraping it cannot leak the content of an alert.
 

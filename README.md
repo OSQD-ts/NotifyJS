@@ -307,7 +307,12 @@ if (sent.reached === 0) await fallBackToSomethingElse();
 A service in a crash loop would otherwise buzz every device a thousand times.
 After a few repeats of the same alert within a window, further copies are
 counted rather than delivered, and released as one summary — `Deploy failed
-(x47 in 1 min)`. Nothing is dropped, and `critical` never waits:
+(x47 in 1 min)`. Nothing is dropped, and `critical` never waits — unless you
+supply a `dedupeKey` yourself, which says "these are the same thing" and is
+honoured whatever the severity: a crash loop is a thousand identical criticals,
+and collapsing those is the point. Past 5,000 distinct keys in one window the
+hub stops coalescing rather than start forgetting, so an alert too many beats an
+alert lost:
 
 ```ts
 new Notifier({ flood: { windowMs: 60_000, burst: 5, alwaysDeliver: ['critical'] } });
@@ -410,6 +415,13 @@ new Notifier({ tls: { cert: readFileSync('cert.pem'), key: readFileSync('key.pem
 or put it behind a reverse proxy and set `security.trustProxy = true` so
 rate limiting sees real client IPs rather than the proxy's.
 
+**If you have more than ten devices, raise `security.maxConnectionsPerIp`.** It
+defaults to 10 per address, and behind a reverse proxy with `trustProxy` off every
+device shares the proxy's address - so the limit applies to all of them together.
+Devices past it are refused and retry, which looks like alerts arriving late rather
+than like an error; the hub says so at startup when more devices are paired than the
+limit allows.
+
 ## Configuration
 
 Every value below is a default, so an empty `new Notifier()` is a working hub.
@@ -477,7 +489,8 @@ whose time has drifted still authenticates instead of failing forever.
 notify.on('device:paired', (device) => audit(device));
 notify.on('device:online', (device) => {});
 notify.on('ack', ({ notificationId, deviceId, action }) => {});
-notify.on('call', (event) => {});          // ringing | answered | declined | missed
+// ringing | answered | declined | vanished | ended | missed | failed
+notify.on('call', (event) => {});
 notify.on('heartbeat:missed', ({ heartbeat, overdueBy }) => {});
 notify.on('heartbeat:recovered', (heartbeat) => {});
 notify.on('auth:failed', ({ ip, reason }) => {});
@@ -602,7 +615,7 @@ notifyjs import --from hub-backup.json --data /new/path
 ```
 
 A device paired against the original authenticates against the restored hub
-with nothing re-paired. Add `--history` to carry the alert log across as well;
+with nothing re-paired. Add `--history` to carry the alert and audit logs across as well;
 without it you get the identity and the devices, which is what moving a hub
 actually needs.
 
@@ -948,7 +961,7 @@ machine that stays up (`notifyjs listen`) as a backup target.
 npm test
 ```
 
-74 tests over real sockets and a real DOM:
+Three hundred tests over real sockets and a real DOM:
 
 - **Protocol** — pairing, RBAC filtering, offline replay and its cap, call
   escalation and named policies, flood coalescing, resolve, snooze, push

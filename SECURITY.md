@@ -113,6 +113,25 @@ different address on every connection and walk past both the per-IP limits and
 any ban. Bind the hub to the loopback interface, or firewall the port to the
 proxy, whenever this is set.
 
+## Who may connect at all
+
+`security.allowIps` and `security.denyIps` are checked before anything else, on
+the WebSocket upgrade and on an HTTP publish alike. Each entry is a bare address
+or a CIDR range (`'10.0.0.5'`, `'10.0.0.0/24'`, `'2001:db8::/32'`), matched
+through `node:net`'s `BlockList` so a long list costs an attacker nothing extra
+per attempt. An entry that is neither is refused when the hub is constructed,
+rather than matching nothing quietly.
+
+**A list that is present and empty refuses everybody.** Only leaving the option
+out means "no rule": an allow list built from configuration that happened to be
+empty is a hub nobody can reach, which is loud, rather than a hub with an allow
+list that enforces nothing.
+
+An address the hub cannot parse matches no entry, so an allow list refuses it —
+the safe direction for a list that says "only these". A pairing code can carry
+its own `allowIps` in the same forms, which restricts where that one code may be
+redeemed.
+
 ## Cross-origin requests
 
 `allowedOrigins` defaults to `same-origin`: a browser `Origin` is accepted only
@@ -142,14 +161,16 @@ capability that puts a device on the receiving end of one channel would be a
 way to read every other.
 
 **No device can hand out authority it does not hold.** These capabilities —
-`notify.send`, `call.place`, `devices.manage`, `roles.manage`, `audit.read`,
-`admin` — may only be granted by a device that already has them, whether the
+`notify.act`, `notify.send`, `call.place`, `devices.manage`, `roles.manage`,
+`audit.read`, `admin` — may only be granted by a device that already has them, whether the
 grant is a new pairing code, a role change, or a rewritten role. Blocking
 `admin` alone was not enough: each of the others composes back into it in a
 move or two, since `devices.manage` mints pairing codes and `roles.manage`
 writes the role they point at. The receiving-side capabilities
 (`notify.receive`, `notify.ack`, `call.receive`) stay freely grantable, so
-issuing an ordinary viewer code does not require admin — the rule that makes
+issuing an ordinary viewer code does not require admin — `notify.act` is not one
+of them, because acting on an alert reaches into whatever the application does
+about it — the rule that makes
 delegation safe must not be the reason an operator hands out admin instead.
 
 What `roles.manage` *is* allowed to do is widen its own role's channel
@@ -360,8 +381,10 @@ control for that, and this arrangement makes review opt-in — mark the pull
 request as a draft, or label it `hold`, and it stays open until you say
 otherwise. Branches named `wip/*` or `draft/*` open as drafts already.
 
-Know what a merge reaches. A merge carrying a `Feat:` or a `Fix:` cuts a
-version tag and publishes it: npm under `latest`, a GitHub Release, installers
+Know what a merge reaches. A merge whose subject asks for a release — `Feat:`
+or `Feature:` for a minor, `Fix:`, `Bugfix:`, `Perf:`, `Refactor:`, `Revert:` or
+`Security:` for a patch, and any of them with a `!` for a major — cuts a version
+tag and publishes it: npm under `latest`, a GitHub Release, installers
 and an APK people download. That is further than a merge used to reach, and it
 is the reason the checks above gate the merge rather than merely report on it.
 The `hold` label and the draft state are the two places to stop it, and both
