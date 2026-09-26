@@ -2281,6 +2281,14 @@ export class Notifier extends EventEmitter<NotifierEvents> {
           if (wanted && !this.store.policy(wanted)) {
             return reply(false, undefined, `unknown escalation policy: ${wanted}`);
           }
+          // Checked here as well, because the ring cannot be awaited: `call()`
+          // would refuse the same value, but into a rejection this case discards -
+          // so a malformed `to` answered "call placed" and rang nobody.
+          try {
+            sanitizeTargeting(args.to as Targeting | undefined);
+          } catch (err) {
+            return reply(false, undefined, err instanceof Error ? err.message : String(err));
+          }
           // The checked value is the one that gets used. Validating the trimmed
           // name and then passing the original meant `policy: ' night-shift '`
           // walked through the guard and threw inside `call()` instead, into the
@@ -2899,10 +2907,19 @@ function sanitizeTargeting(to: Targeting | undefined): Targeting | undefined {
     if (!Array.isArray(list) || list.some((entry) => typeof entry !== 'string')) {
       throw new Error(`\`to.${key}\` must be an array of strings`);
     }
-    clean[key] = (list as string[]).slice(0, 200);
+    // Refused, not trimmed: every other malformed shape here is refused by name,
+    // and quietly delivering an alert aimed at 250 devices to 200 of them is the
+    // kind of silence this function exists to remove.
+    if (list.length > MAX_TARGETS) {
+      throw new Error(`\`to.${key}\` may name at most ${MAX_TARGETS} entries, not ${list.length}`);
+    }
+    clean[key] = list as string[];
   }
   return clean.devices || clean.roles ? clean : undefined;
 }
+
+/** Most devices or roles one alert may be aimed at. */
+const MAX_TARGETS = 200;
 
 /** Ceiling for a heartbeat that arrived over the wire. */
 const MAX_WIRE_HEARTBEAT_MS = 30 * 24 * 60 * 60_000;
