@@ -286,8 +286,23 @@ export class NotifyClient {
     this.serviceMissing = false;
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
     this.reconnectTimer = undefined;
-    this.socket?.close(1000, 'client closed');
+    // Detached before closing, exactly as `open()` does for the socket it
+    // replaces. `close()` only begins the closing handshake, so frames already
+    // queued on the host's event loop still dispatched into these handlers: a
+    // source the user had just muted could ring once more, and a `hello` whose
+    // signing resumed after a later `connect()` signed the stale nonce and sent
+    // it down the new socket, where `auth_failed` latches `rejected` - no more
+    // reconnects until the UI intervenes - and spends the address's ban budget.
+    const socket = this.socket;
     this.socket = undefined;
+    if (socket) {
+      socket.onopen = socket.onmessage = socket.onclose = socket.onerror = null;
+      try {
+        socket.close(1000, 'client closed');
+      } catch {
+        /* already closing */
+      }
+    }
     // Failed here rather than left to `onclose`: that handler ignores a socket
     // this method has already dropped, so an outstanding admin call would
     // otherwise sit until its own timeout with no connection left to answer it.

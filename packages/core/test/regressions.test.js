@@ -2379,3 +2379,39 @@ test('a watchdog spec with no numbers in it is ignored, not armed', async () => 
 
   client.disconnect();
 });
+
+test('disconnecting detaches the socket it drops', async () => {
+  // `close()` only begins the closing handshake, so frames already queued on
+  // the host's event loop still arrived at the handlers of a socket the client
+  // had let go: a source the user had just muted could ring once more, and a
+  // `hello` signed after a later `connect()` went down the new socket, where
+  // `auth_failed` latches `rejected` and stops every reconnect.
+  const { NotifyClient, memoryStorage } = await import('@osqd/notifyjs-protocol');
+
+  let socket;
+  const client = new NotifyClient({
+    url: 'ws://127.0.0.1:1',
+    crypto: nodeCrypto,
+    storage: memoryStorage(),
+    createSocket: () => {
+      socket = {
+        onopen: null,
+        onmessage: null,
+        onclose: null,
+        onerror: null,
+        send() {},
+        close() {},
+      };
+      return socket;
+    },
+    deviceName: 'muted',
+    platform: 'node-test',
+  });
+
+  await client.connect();
+  assert.equal(typeof socket.onmessage, 'function', 'attached while connected');
+
+  client.disconnect();
+  assert.equal(socket.onmessage, null, 'and detached the moment it is dropped');
+  assert.equal(socket.onclose, null);
+});
