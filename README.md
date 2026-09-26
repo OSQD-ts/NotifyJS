@@ -412,6 +412,16 @@ rate limiting sees real client IPs rather than the proxy's.
 
 ## Configuration
 
+Every value below is a default, so an empty `new Notifier()` is a working hub.
+This is what people reach for rather than the whole surface: `allowIps` and
+`denyIps` take addresses or CIDR ranges, `auditLimit` bounds the audit log the
+way `historyLimit` bounds history, `livenessIntervalMs` sets how often a device
+is asked to prove it is still running, and the remaining hostile-traffic knobs
+are in [SECURITY.md](SECURITY.md#rate-limiting-and-bans). `NotifierOptions` in
+`packages/core/src/options.ts` carries one comment per field, and a number that
+would quietly switch off the thing it configures is refused when the hub is
+constructed rather than months later.
+
 ```ts
 new Notifier({
   port: 7741,
