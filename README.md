@@ -201,9 +201,9 @@ Channel patterns take `*` as a wildcard and a leading `!` to exclude;
 exclusions always win, so `['*', '!debug.*']` reads the way you would say it.
 
 Capabilities are checked on every delivery and every privileged operation:
-`notify.receive`, `notify.ack`, `notify.send`, `call.receive`, `call.place`,
-`devices.manage`, `roles.manage`, `audit.read`, and `admin` (which implies the
-rest).
+`notify.receive`, `notify.ack`, `notify.act`, `notify.send`, `call.receive`,
+`call.place`, `devices.manage`, `roles.manage`, `audit.read`, and `admin` (which
+implies the rest).
 
 ## The blind spot, and how to close it
 
@@ -525,6 +525,9 @@ must be `https`. Turn it off with `--no-web-push`.
 
 Set `webPush.subject` (or `--web-push-subject`) to a `mailto:` or `https:` URI
 identifying you; RFC 8292 requires one, and Apple rejects a push without it.
+Leave it unset and the hub signs with this project's URL, which works but tells
+a push service that OSQD sent your alerts — and gives its operator somebody
+else to contact about your traffic.
 
 The keypair is generated on first use and kept in `store.json`. Do not delete
 it: a browser stores the key inside the subscription it created, so a new one
@@ -1044,11 +1047,11 @@ Nobody types a version number. After every merge,
 
 | Commit subject | Bump |
 | --- | --- |
-| `Feat: …` | minor |
-| `Fix: …`, `Refactor: …`, `Perf: …`, `Revert: …` | patch |
+| `Feat: …`, `Feature: …` | minor |
+| `Fix: …`, `Bugfix: …`, `Refactor: …`, `Perf: …`, `Revert: …`, `Security: …` | patch |
 | `CI: …`, `Docs: …`, `Chore: …`, `Test: …`, `Build: …`, `Style: …` | nothing |
 | anything unrecognised — `Init`, `License Rename` | nothing |
-| `Feat!: …`, or `BREAKING CHANGE:` in the body | see below |
+| any `!` before the colon — `Feat!: …`, `Fix!: …` — or `BREAKING CHANGE:` in the body | see below |
 
 The largest bump among the commits wins. If nothing asks for a release, no tag
 is cut and `main` just refreshes its rolling `latest` build. Otherwise the

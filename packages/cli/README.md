@@ -67,12 +67,15 @@ notifyjs watches                    # what the hub is expecting
 | `notifyjs watch <name>` | Expect a check-in, and alert when it stops |
 | `notifyjs checkin <name>` | Record a check-in for a watched job |
 | `notifyjs watches` | List what the hub is expecting |
+| `notifyjs export` | Write a backup of the hub's state, keys included |
+| `notifyjs import --from <file>` | Restore a hub from a backup |
+| `notifyjs token <cmd>` | Mint, list or revoke an HTTP publishing token |
 | `notifyjs update` | Check for and install a newer build |
 
 `notifyjs help` prints every option. The ones you will reach for first:
 
 ```
---url <ws://host:7741>   Hub to connect to (default ws://localhost:7741)
+--url <ws://host:7741>   Hub to connect to (default $NOTIFYJS_URL, else ws://localhost:7741)
 --store <path>           Credential file
 --name <name>            Name to register this device under
 

@@ -41,7 +41,7 @@ Usage
   notifyjs update [options]       Check for and install a newer build
 
 Common options
-  --url <ws://host:7741>   Hub to connect to (default ws://localhost:7741)
+  --url <ws://host:7741>   Hub to connect to (default $NOTIFYJS_URL, else ws://localhost:7741)
   --store <path>           Credential file (default ${defaultPath()})
   --name <name>            Name to register this device under
 
@@ -74,10 +74,14 @@ code options
   --ttl <seconds>          Lifetime of the code (default 600)
   --no-qr                  Do not print a QR code
 
-send / call options
+send options
   --severity <level>       debug|info|success|warning|error|critical
   --channel <name>         Channel to publish on (default default)
   --body <text>            Longer body text
+
+call options
+  --severity <level>       debug|info|success|warning|error|critical
+  --channel <name>         Channel to publish on (default default)
 
 token options
   --role <name>            Role a created token publishes with (default viewer)
