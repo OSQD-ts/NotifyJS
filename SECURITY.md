@@ -196,14 +196,14 @@ output.
 
 ## Push wake-ups
 
-Two transports, making two different trades.
+One transport, because the other one could not be made to keep its side of
+this document.
 
-**Expo (`push`) is off by default.** Turning it on is a deliberate trade
-against everything else here: the hub asks a push service to wake devices that
-are not connected, which means the notification title leaves your
-infrastructure and passes through Expo and then Apple or Google in the clear.
-The body is withheld unless you set `includeBody`. Point `endpoint` at a relay
-you run to keep the traffic in-house.
+**Expo push has been removed.** It sent the notification's title - and its body
+if you allowed it - in the clear through `exp.host` and then Apple or Google, on
+every alert. It was off by default, which is an honest way to ship a bad bargain
+but does not make it a good one. `push: {}` is no longer a valid option, and a
+device still offering an Expo token has it refused rather than stored.
 
 **Web Push (`webPush`) is on by default**, because the payload is encrypted
 before it leaves. The hub derives a key by ECDH against a public key the
@@ -220,8 +220,8 @@ Endpoints must be `https`. The hub POSTs to one on every alert, and an `http:`
 endpoint would announce in the clear, repeatedly, that something is wrong —
 most of what an observer wants to know.
 
-Both are supplied by the device and can be withdrawn by it at any time. A
-subscription the hub cannot encrypt to is refused at registration rather than
+A subscription is supplied by the device and can be withdrawn by it at any
+time. One the hub cannot encrypt to is refused at registration rather than
 stored, so a device never reads as reachable while receiving nothing. An
 endpoint a push service answers 404 or 410 for is retired automatically.
 
