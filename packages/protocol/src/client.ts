@@ -261,7 +261,13 @@ export class NotifyClient {
     const stored = await this.opts.storage.get(this.key('watchdog'));
     if (stored) {
       try {
-        this.watchdogSpec = JSON.parse(stored) as WatchdogSpec;
+        // Through the same check the frame gets. This path had none, so the bug
+        // that check exists for could come straight back through storage: a spec
+        // with no numbers in it makes `intervalMs + graceMs` NaN, `setTimeout`
+        // clamps that to 1ms, and a phone with no connectivity then probes in a
+        // loop. A spec written by an older build, or a half-written file, is
+        // exactly where such a thing comes from.
+        this.watchdogSpec = usableWatchdog(JSON.parse(stored) as WatchdogSpec);
       } catch {
         /* a corrupt spec just means we wait for the hub to resend it */
       }
@@ -621,19 +627,11 @@ export class NotifyClient {
         // speaks is the hub's own business, and a device watching one that dies
         // inside a second is a real configuration. Ignored rather than repaired
         // with invented numbers - no watchdog is honest, a wrong one is not.
-        const intervalMs = Number(spec.intervalMs);
-        const graceMs = Number(spec.graceMs);
-        const title = spec.alert?.title;
-        if (!Number.isFinite(intervalMs) || intervalMs <= 0) return;
-        if (typeof title !== 'string' || title.length === 0) return;
+        const usable = usableWatchdog(spec);
+        if (!usable) return;
 
-        this.watchdogSpec = {
-          enabled: spec.enabled === true,
-          intervalMs,
-          graceMs: Number.isFinite(graceMs) && graceMs >= 0 ? graceMs : 0,
-          alert: spec.alert,
-        };
-        await this.opts.storage.set(this.key('watchdog'), JSON.stringify(this.watchdogSpec));
+        this.watchdogSpec = usable;
+        await this.opts.storage.set(this.key('watchdog'), JSON.stringify(usable));
         this.armWatchdog();
         return;
       }
@@ -1102,6 +1100,32 @@ export function webStorage(): ClientStorage {
 }
 
 /** Storage for tests and short-lived processes. */
+/**
+ * A watchdog spec this client can actually arm, or nothing.
+ *
+ * Both the frame and the copy restored from storage go through here. The numbers
+ * are handed to `setTimeout`, so a spec without them makes the deadline NaN -
+ * which `setTimeout` clamps to 1ms, and the alarm then re-arms itself at that
+ * interval for as long as the device reports no connectivity. Only nonsense is
+ * refused: how often a hub speaks is the hub's business.
+ */
+function usableWatchdog(spec: WatchdogSpec | undefined): WatchdogSpec | undefined {
+  if (!spec || typeof spec !== 'object') return undefined;
+
+  const intervalMs = Number(spec.intervalMs);
+  const graceMs = Number(spec.graceMs);
+  const title = spec.alert?.title;
+  if (!Number.isFinite(intervalMs) || intervalMs <= 0) return undefined;
+  if (typeof title !== 'string' || title.length === 0) return undefined;
+
+  return {
+    enabled: spec.enabled === true,
+    intervalMs,
+    graceMs: Number.isFinite(graceMs) && graceMs >= 0 ? graceMs : 0,
+    alert: spec.alert,
+  };
+}
+
 export function memoryStorage(): ClientStorage {
   const map = new Map<string, string>();
   return {

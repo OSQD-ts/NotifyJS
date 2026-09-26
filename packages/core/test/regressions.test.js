@@ -3249,3 +3249,68 @@ test('a snoozed device is not pushed the alert its snooze held back', async () =
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('a watchdog spec restored from storage is checked like a fresh one', async () => {
+  // The frame gets validated; the stored copy did not, so the bug that validation
+  // exists for came straight back through storage - a spec with no numbers makes
+  // the deadline NaN, `setTimeout` clamps it to 1ms, and a phone reporting no
+  // connectivity then probes in a loop. An older build's spec, or a half-written
+  // file, is where one comes from.
+  const { NotifyClient, memoryStorage } = await import('@osqd/notifyjs-protocol');
+
+  const storage = memoryStorage();
+  await storage.set('notifyjs.deviceId', 'dev-1');
+  await storage.set('notifyjs.publicKey', 'pk');
+  await storage.set('notifyjs.secretSeed', 'seed');
+  await storage.set(
+    'notifyjs.watchdog',
+    JSON.stringify({ enabled: true, alert: { title: 'the hub may be down' } }),
+  );
+
+  const client = new NotifyClient({
+    url: 'ws://127.0.0.1:1',
+    crypto: nodeCrypto,
+    storage,
+    createSocket: () => ({
+      onopen: null,
+      onmessage: null,
+      onclose: null,
+      onerror: null,
+      send() {},
+      close() {},
+    }),
+    deviceName: 'restored',
+    platform: 'node-test',
+  });
+
+  assert.equal(await client.loadCredentials(), true, 'the credentials still load');
+  assert.equal(client.watchdog, undefined, 'but a spec with no numbers is not armed');
+
+  // One that is usable survives, which is the point of storing it at all.
+  await storage.set(
+    'notifyjs.watchdog',
+    JSON.stringify({
+      enabled: true,
+      intervalMs: 30_000,
+      graceMs: 30_000,
+      alert: { title: 'the hub may be down' },
+    }),
+  );
+  const second = new NotifyClient({
+    url: 'ws://127.0.0.1:1',
+    crypto: nodeCrypto,
+    storage,
+    createSocket: () => ({
+      onopen: null,
+      onmessage: null,
+      onclose: null,
+      onerror: null,
+      send() {},
+      close() {},
+    }),
+    deviceName: 'restored',
+    platform: 'node-test',
+  });
+  await second.loadCredentials();
+  assert.equal(second.watchdog?.intervalMs, 30_000, 'a usable spec is restored');
+});
