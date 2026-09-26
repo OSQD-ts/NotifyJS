@@ -130,8 +130,13 @@ class NotifyjsWatchService : HeadlessJsTaskService() {
       // is the user's choice, and it has to outlive both this process and the
       // reboot that ends it.
       WatchState.setWanted(context, true, hubName)
-      // Whatever a restart left standing is now answered.
+      // Whatever a restart left standing is now answered - including the record that
+      // it was shown. Cleared here rather than only in the alarm's success branch,
+      // because opening the app is the other way the service comes back: without this
+      // the flag stayed true for good, and the next time the alarm could not restart
+      // a killed service nobody was told their phone had stopped watching.
       CallNotification.cancelResume(context)
+      WatchState.setResumeNoticeShown(context, false)
       val intent = Intent(context, NotifyjsWatchService::class.java)
         .setAction(ACTION_START)
         .putExtra("hubName", hubName)

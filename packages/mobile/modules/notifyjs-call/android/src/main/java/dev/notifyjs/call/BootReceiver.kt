@@ -47,6 +47,10 @@ class BootReceiver : BroadcastReceiver() {
       NotifyjsWatchService.start(context, WatchState.hubName(context))
     }.isSuccess
 
-    if (!started) CallNotification.showResume(context)
+    if (!started) {
+      CallNotification.showResume(context)
+      // Recorded, so the alarm does not post a second copy nine minutes later.
+      WatchState.setResumeNoticeShown(context, true)
+    }
   }
 }
