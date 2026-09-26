@@ -41,7 +41,18 @@ export class Hub {
   private activeCall: ActiveCall | undefined;
   /** Set once the active call is answered, so a dropped connection leaves it be. */
   private answeredCallId: string | undefined;
-  private snoozedUntil = 0;
+  /**
+   * Read from the manager, which adopts it from each hub's `ready` frame - the
+   * hub is where a snooze is stored and enforced. Held locally it was a guess,
+   * and a restart during a snooze guessed "not snoozed" while the hub went on
+   * suppressing everything below critical: an operator looking at a normal feed
+   * would have believed they were on the pager.
+   */
+  private get snoozedUntil(): number {
+    return this.manager.snoozedUntil;
+  }
+
+  private snoozeEnds: NodeJS.Timeout | undefined;
   private sources = [] as AppState['sources'];
   private listeners: Partial<HubEvents> = {};
 
@@ -144,12 +155,19 @@ export class Hub {
    * the floor here, so nothing is lost - it arrives when the snooze ends.
    */
   setSnooze(durationMs: number): void {
-    if (durationMs > 0) {
-      this.manager.snoozeAll(durationMs);
-      this.snoozedUntil = Date.now() + durationMs;
-    } else {
-      this.manager.unsnoozeAll();
-      this.snoozedUntil = 0;
+    if (durationMs > 0) this.manager.snoozeAll(durationMs);
+    else this.manager.unsnoozeAll();
+
+    // Armed so the tray and the feed stop saying "snoozed" the moment it ends.
+    // `publish()` has always cleared an expired snooze, but it only runs when
+    // something else happens - so on a quiet evening the app went on claiming to
+    // be snoozed long after the hub had resumed delivering.
+    if (this.snoozeEnds) clearTimeout(this.snoozeEnds);
+    this.snoozeEnds = undefined;
+    const until = this.manager.snoozedUntil;
+    if (until > Date.now()) {
+      this.snoozeEnds = setTimeout(() => this.publish(), until - Date.now() + 250);
+      this.snoozeEnds.unref?.();
     }
     this.publish();
   }
@@ -245,9 +263,6 @@ export class Hub {
   }
 
   private publish(): void {
-    // A snooze that has run out should stop showing as one without waiting for
-    // the next alert to arrive.
-    if (this.snoozedUntil && this.snoozedUntil <= Date.now()) this.snoozedUntil = 0;
     this.listeners.state?.(this.snapshot());
   }
 }

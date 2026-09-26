@@ -299,3 +299,38 @@ test('a failed pairing leaves no client retrying in the background', async () =>
 
   assert.equal(after, before + 1, `expected one attempt, saw ${after - before}`);
 });
+
+test('a snooze survives a reconnect, because the hub is asked', async () => {
+  // The snooze lives on the hub - recorded on the device, enforced on delivery -
+  // and no frame ever carried it back, so a client that restarted mid-snooze
+  // showed no snooze at all while alerts were still being held. On the phone that
+  // also made the button useless: tapping it started a second thirty minutes
+  // instead of cancelling the first.
+  const sources = manager();
+  await sources.load();
+  const added = await sources.add({
+    url: WORK_URL,
+    code: work.createPairingCode({ role: 'oncall' }).code,
+  });
+
+  sources.snoozeAll(30 * 60_000);
+  await new Promise((r) => setTimeout(r, 300));
+  assert.ok(sources.list()[0].snoozedUntil > Date.now(), 'the tap shows at once');
+  assert.ok(sources.snoozedUntil > Date.now());
+
+  // A reconnect is where a client used to lose it.
+  await sources.setEnabled(added.id, false);
+  await new Promise((r) => setTimeout(r, 300));
+  await sources.setEnabled(added.id, true);
+  await new Promise((r) => setTimeout(r, 800));
+
+  const after = sources.list()[0];
+  assert.equal(after.status, 'ready');
+  assert.ok(after.snoozedUntil > Date.now(), `the hub reports it: ${after.snoozedUntil}`);
+
+  sources.unsnoozeAll();
+  await new Promise((r) => setTimeout(r, 300));
+  assert.equal(sources.snoozedUntil, 0, 'and resuming clears it');
+
+  sources.disconnectAll();
+});

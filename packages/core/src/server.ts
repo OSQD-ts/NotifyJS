@@ -1850,6 +1850,9 @@ export class Notifier extends EventEmitter<NotifierEvents> {
       capabilities: role.capabilities,
       seq: this.store.seq,
       serverTime: Date.now(),
+      // Only while it is still running: an expired one is not news.
+      snoozedUntil:
+        device.snoozedUntil && device.snoozedUntil > Date.now() ? device.snoozedUntil : undefined,
       // Minted on first use, so a hub with Web Push off never generates one.
       vapidPublicKey: this.opts.webPush.enabled
         ? this.store.vapid(generateVapidKeys).publicKey

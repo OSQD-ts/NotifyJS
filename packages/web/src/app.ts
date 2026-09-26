@@ -662,6 +662,10 @@ client.on('ready', (ready) => {
   $('device-line').textContent = `${ready.deviceName} · ${ready.role}`;
   $('devices-toggle').hidden = !canManage();
   $('snooze').hidden = false;
+  // The hub's answer, not this tab's memory of one: a snooze is stored on the
+  // device record and enforced on delivery, so a tab opened in the middle of one
+  // used to show "Snooze 30m" while alerts were being held back.
+  rememberSnooze(ready.snoozedUntil ?? 0);
   renderSnooze();
   $('settings-toggle').hidden = false;
   renderSettings();

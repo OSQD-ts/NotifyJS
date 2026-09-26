@@ -21,6 +21,15 @@ export interface SourceState extends Source {
   paired: boolean;
   /** Set when this source's own watchdog says the hub has gone quiet. */
   serviceDown?: { title: string; body?: string };
+  /**
+   * When a snooze on this hub runs out, if one is running.
+   *
+   * Adopted from the hub on every `ready`, because that is where a snooze
+   * actually lives: it is stored on the device record and enforced on delivery.
+   * A client holding its own copy in memory was guessing, and after a restart it
+   * guessed "not snoozed" while the hub was still holding alerts back.
+   */
+  snoozedUntil?: number;
 }
 
 /** A notification, plus which hub it came from. */
@@ -275,11 +284,33 @@ export class SourceManager {
   }
 
   snoozeAll(durationMs: number): void {
-    for (const client of this.clients.values()) client.snooze(durationMs);
+    // Recorded here as well as asked for, so the button reflects the tap at once
+    // rather than waiting for the next `ready` to confirm it.
+    const until = Date.now() + durationMs;
+    for (const [id, client] of this.clients) {
+      client.snooze(durationMs);
+      this.setState(id, { snoozedUntil: until });
+    }
+    this.publish();
   }
 
   unsnoozeAll(): void {
-    for (const client of this.clients.values()) client.unsnooze();
+    for (const [id, client] of this.clients) {
+      client.unsnooze();
+      this.setState(id, { snoozedUntil: undefined });
+    }
+    this.publish();
+  }
+
+  /** When the running snooze ends, across every source, or 0 if none is. */
+  get snoozedUntil(): number {
+    const now = Date.now();
+    let latest = 0;
+    for (const state of this.states.values()) {
+      const until = state.snoozedUntil ?? 0;
+      if (until > now && until > latest) latest = until;
+    }
+    return latest;
   }
 
   disconnectAll(): void {
@@ -379,7 +410,13 @@ export class SourceManager {
         known.label = client.serverName;
         void this.persist();
       }
-      this.setState(source.id, { status: 'ready', paired: true, role: ready.role });
+      this.setState(source.id, {
+        status: 'ready',
+        paired: true,
+        role: ready.role,
+        // The hub's answer wins, including when it says there is no snooze.
+        snoozedUntil: ready.snoozedUntil,
+      });
       this.publish();
     });
 
