@@ -1910,9 +1910,18 @@ export class Notifier extends EventEmitter<NotifierEvents> {
     // published itself.
     const claimed = typeof msg.action === 'string' ? msg.action.slice(0, 128) : undefined;
     const offered = claimed ? this.declaredActions(ids) : undefined;
+    // Built once for the frame. `takeAction` used to call `store.history()` -
+    // which copies the whole retained array - and then scan it linearly, per
+    // id, which is the scan `declaredActions` exists to avoid reintroduced one
+    // line below it.
+    const held = claimed
+      ? new Map(this.store.history().map((entry) => [entry.id, entry]))
+      : undefined;
+    let taken = false;
 
     for (const id of ids) {
-      const action = claimed ? this.takeAction(session, id, claimed, offered) : undefined;
+      const action = claimed ? this.takeAction(session, id, claimed, offered, held) : undefined;
+      if (action) taken = true;
       this.emit('ack', { notificationId: id, deviceId: session.device.id, action });
       // One acknowledgement is enough: a human has seen it, so stop retrying.
       const timer = this.ackWaiters.get(id);
@@ -1921,6 +1930,13 @@ export class Notifier extends EventEmitter<NotifierEvents> {
         this.ackWaiters.delete(id);
       }
     }
+    // One write for the frame, not one per id. `touchHistory()` is a synchronous
+    // serialise, write and rename of the entire retained history, and a device
+    // may acknowledge up to five hundred ids in a single frame - five hundred
+    // rewrites inside one message, during which the hub answers no pings and
+    // rings no calls.
+    if (taken) this.store.touchHistory();
+
     // Clamped to what the hub has actually issued: a device that reported a
     // cursor from the future - a bug, a bad clock, a hostile client - would
     // silently opt itself out of every replay from then on.
@@ -1954,6 +1970,7 @@ export class Notifier extends EventEmitter<NotifierEvents> {
     id: string,
     claimed: string,
     offered: Map<string, Set<string>> | undefined,
+    held: Map<string, Notification> | undefined,
   ): string | undefined {
     const refuse = (reason: string): undefined => {
       this.audit('ack.action.rejected', {
@@ -1969,12 +1986,13 @@ export class Notifier extends EventEmitter<NotifierEvents> {
     }
     if (!offered?.get(id)?.has(claimed)) return refuse('the notification did not offer it');
 
-    const n = this.store.history().find((entry) => entry.id === id);
+    const n = held?.get(id);
     if (!n) return refuse('unknown notification');
     if (n.actionTaken) return refuse(`already taken by ${n.actionTaken.deviceId}`);
 
+    // Marked on the entry the store holds, by reference; the caller persists
+    // once for the whole frame.
     n.actionTaken = { id: claimed, deviceId: session.device!.id, at: Date.now() };
-    this.store.touchHistory();
 
     this.audit('ack.action', { deviceId: session.device!.id, detail: { id, action: claimed } });
     this.emit('action', {
