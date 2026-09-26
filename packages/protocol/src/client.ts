@@ -159,6 +159,8 @@ export class NotifyClient {
    * device with a real backlog is never skipped past it.
    */
   private freshlyPaired = false;
+  /** The hub this device paired with, if it has been stored. */
+  private pairedWith: string | undefined;
   private backoff = 0;
   private reconnectTimer: ReturnType<typeof setTimeout> | undefined;
   private connectTimer: ReturnType<typeof setTimeout> | undefined;
@@ -245,16 +247,18 @@ export class NotifyClient {
   }
 
   async loadCredentials(): Promise<boolean> {
-    const [deviceId, publicKey, secretSeed, seq] = await Promise.all([
+    const [deviceId, publicKey, secretSeed, seq, pairedWith] = await Promise.all([
       this.opts.storage.get(this.key('deviceId')),
       this.opts.storage.get(this.key('publicKey')),
       this.opts.storage.get(this.key('secretSeed')),
       this.opts.storage.get(this.key('ackedSeq')),
+      this.opts.storage.get(this.key('serverId')),
     ]);
     if (!deviceId || !publicKey || !secretSeed) return false;
     this.deviceId = deviceId;
     this.keys = { publicKey, secretSeed };
     this.ackedSeq = seq ? Number(seq) : 0;
+    this.pairedWith = pairedWith ?? undefined;
 
     // The watchdog spec has to survive an app restart, or closing the app
     // would quietly disable the only thing watching the service.
@@ -275,6 +279,14 @@ export class NotifyClient {
     return true;
   }
 
+  /** Drops the watchdog contract without touching this device's identity. */
+  private async forgetWatchdog(): Promise<void> {
+    this.watchdogSpec = undefined;
+    this.disarmWatchdog();
+    this.serviceMissing = false;
+    await this.opts.storage.remove(this.key('watchdog')).catch(() => {});
+  }
+
   async forgetCredentials(): Promise<void> {
     this.deviceId = undefined;
     this.keys = undefined;
@@ -292,6 +304,7 @@ export class NotifyClient {
       this.opts.storage.remove(this.key('publicKey')),
       this.opts.storage.remove(this.key('secretSeed')),
       this.opts.storage.remove(this.key('ackedSeq')),
+      this.opts.storage.remove(this.key('serverId')),
       this.opts.storage.remove(this.key('watchdog')),
     ]);
   }
@@ -533,7 +546,24 @@ export class NotifyClient {
     this.noteHeardFrom();
 
     switch (msg.t) {
-      case 'hello':
+      case 'hello': {
+        // A hub that is not the one this device paired with gets nothing: not a
+        // signature, not an ack, and no chance to send a `revoked`. Nothing in the
+        // protocol authenticates a hub to a device, so an on-path party against a
+        // `ws://` hub - the documented LAN default - could otherwise answer at the
+        // address, be believed about this device's own role, forge a critical
+        // all-clear, ring the machine, and have it speak whatever it liked.
+        if (this.pairedWith && msg.serverId !== this.pairedWith) {
+          this.setStatus('error');
+          this.emit('error', {
+            code: 'wrong_hub',
+            message: 'this is not the hub this device paired with',
+          });
+          this.closedByUs = true;
+          this.socket?.close(1008, 'wrong hub');
+          this.socket = undefined;
+          return;
+        }
         this.hello = msg;
         this.clockOffset = msg.serverTime - Date.now();
         // A hub that predates keepalives says nothing here, and the default
@@ -545,9 +575,12 @@ export class NotifyClient {
             : DEFAULT_KEEPALIVE_MS;
         await this.handshake(msg);
         return;
+      }
 
       case 'paired':
         this.freshlyPaired = true;
+        // Pinned from the connection that enrolled this device.
+        this.pairedWith = this.hello?.serverId ?? this.pairedWith;
         this.deviceId = msg.deviceId;
         this.role = msg.role;
         this.capabilities = msg.capabilities;
@@ -657,8 +690,16 @@ export class NotifyClient {
       }
 
       case 'revoked':
+        // The status changes and the keypair stays. Deleting the seed here made an
+        // unauthenticated frame - see the `hello` case above - permanently de-pair a
+        // device, with no confirmation and nothing to recover from. A revoked device
+        // is refused by its hub anyway, so keeping the seed costs nothing, and
+        // removing the source still clears it.
         this.setStatus('revoked');
-        await this.forgetCredentials();
+        // The watchdog contract does go: a revoked device that kept it would go on
+        // raising "the service is down" about a hub it is no longer entitled to hear
+        // from. The keypair is what stays.
+        await this.forgetWatchdog();
         this.emit('revoked', { reason: msg.reason });
         return;
 
@@ -742,6 +783,12 @@ export class NotifyClient {
       this.opts.storage.set(this.key('deviceId'), this.deviceId),
       this.opts.storage.set(this.key('publicKey'), this.keys.publicKey),
       this.opts.storage.set(this.key('secretSeed'), this.keys.secretSeed),
+      // The hub this device belongs to, so a later connection can tell whether it
+      // is talking to the same one. Nothing in the protocol authenticates the hub
+      // to the device, so this is the one check available: it does not stop somebody
+      // who has read the hub's public `/hub.json`, but it does stop anything that
+      // simply answers at the address and claims to be a hub.
+      ...(this.hello ? [this.opts.storage.set(this.key('serverId'), this.hello.serverId)] : []),
     ]);
   }
 

@@ -31,7 +31,7 @@ import { connect } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import WebSocket from 'ws';
+import WebSocket, { WebSocketServer } from 'ws';
 
 import { Notifier, Store, CallOrchestrator, createLogStream, encodePayload } from '../dist/index.js';
 import {
@@ -3435,5 +3435,78 @@ test('a resolve tells each device only about alerts it could see', async () => {
   limited.ws.close();
   admin.ws.close();
   await hub.stop();
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test('a hub that is not the one this device paired with gets nothing', async () => {
+  // Nothing in the protocol authenticates a hub to a device, and the client signed
+  // whatever `serverId` arrived. So anything answering at the address - an on-path
+  // party against the `ws://` LAN default - was believed about the device's own role,
+  // could forge a critical all-clear, ring the machine, and then send `revoked`,
+  // which used to delete the device's Ed25519 seed outright.
+  const { NotifyClient, memoryStorage } = await import('@osqd/notifyjs-protocol');
+  const dir = tmp('wrong-hub');
+  const hub = hostileHub(dir);
+  await hub.start();
+
+  const storage = memoryStorage();
+  const port = Number(new URL(hub.url).port);
+  const real = new NotifyClient({
+    url: `ws://127.0.0.1:${port}`,
+    crypto: nodeCrypto,
+    storage,
+    createSocket: (url) => new WebSocket(url),
+    deviceName: 'pinned',
+    platform: 'node-test',
+  });
+  const ready = new Promise((resolve) => real.on('ready', resolve));
+  await real.pair(hub.createPairingCode({ role: 'oncall' }).code);
+  await ready;
+  real.disconnect();
+  await hub.stop();
+
+  // An impostor at the same address, claiming to be a hub.
+  const impostor = createServer();
+  const wss = new WebSocketServer({ server: impostor });
+  let sawAuth = false;
+  wss.on('connection', (ws) => {
+    ws.on('message', () => {
+      sawAuth = true;
+    });
+    ws.send(
+      JSON.stringify({
+        v: 1,
+        t: 'hello',
+        serverId: 'not-the-hub-you-paired-with',
+        nonce: 'nonce-1',
+        name: 'Totally Your Hub',
+        serverTime: Date.now(),
+      }),
+    );
+    // What the attack is for: a forged all-clear, and then a de-pairing.
+    ws.send(JSON.stringify({ v: 1, t: 'revoked', reason: 'go away' }));
+  });
+  await new Promise((resolve) => impostor.listen(port, '127.0.0.1', resolve));
+
+  const errors = [];
+  const client = new NotifyClient({
+    url: `ws://127.0.0.1:${port}`,
+    crypto: nodeCrypto,
+    storage,
+    createSocket: (url) => new WebSocket(url),
+    deviceName: 'pinned',
+    platform: 'node-test',
+  });
+  client.on('error', (e) => errors.push(e.code));
+  await client.connect();
+  await delay(400);
+
+  assert.ok(errors.includes('wrong_hub'), `the impostor is refused: ${errors.join(',')}`);
+  assert.equal(sawAuth, false, 'nothing was signed for it');
+  assert.ok(await storage.get('notifyjs.secretSeed'), 'and the keypair is still there');
+
+  client.disconnect();
+  wss.close();
+  await new Promise((resolve) => impostor.close(resolve));
   rmSync(dir, { recursive: true, force: true });
 });
