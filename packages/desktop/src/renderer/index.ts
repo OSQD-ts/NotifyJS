@@ -25,8 +25,16 @@ let answering = false;
 const actions: Actions = {
   addSource: async (input) => {
     const result = await bridge.addSource(input);
-    if (result.ok) view = 'feed';
-    render();
+    // Only on success. `render()` replaces the whole screen, so rebuilding it
+    // after a refusal left the caller writing its error message into nodes that
+    // had just been detached: no error appeared anywhere, the code box was empty,
+    // and the hub address the user had typed was replaced by the default. The
+    // rebuilt button was enabled again too, so a second attempt could be fired
+    // while the first was still in flight.
+    if (result.ok) {
+      view = 'feed';
+      render();
+    }
     return result;
   },
   removeSource: (id) => void bridge.removeSource(id),
