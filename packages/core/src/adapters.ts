@@ -41,7 +41,13 @@ export function captureCrashes(sink: AlertSink, options: CaptureOptions = {}): (
       title: `${kind}: ${error.message}`.slice(0, 200),
       body: error.stack ?? String(error),
       channel,
-      severity: 'critical' as const,
+      // `error`, not `critical`: the promise one line above this is that a crash
+      // loop does not become a thousand pages, and `flood.alwaysDeliver` holds
+      // `critical` by default - so at `critical` every repeat went out and the
+      // dedupe key below did nothing. A crash is an error the operator's own flood
+      // settings can collapse; the call it places for a real outage is still
+      // `critical`, and `severity` remains theirs to set.
+      severity: 'error' as const,
       // One crash loop should not become a thousand pages.
       dedupeKey: `${kind}:${error.message}`,
       requireAck: true,

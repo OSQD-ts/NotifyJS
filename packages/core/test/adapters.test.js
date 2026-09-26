@@ -151,7 +151,11 @@ test('an unhandled rejection is reported', async (t) => {
   stop();
   const alert = s.sent.find((a) => a.title?.includes('promise went bad'));
   assert.ok(alert, 'the rejection was published');
-  assert.equal(alert.severity, 'critical');
+  // `error`, deliberately: `flood.alwaysDeliver` holds `critical` by default, so a
+  // crash published at `critical` was never coalesced and the dedupe key beside it did
+  // nothing - which is the opposite of what this handler promises. The call it places
+  // for a real outage is still critical.
+  assert.equal(alert.severity, 'error');
   assert.equal(alert.channel, 'crash');
   assert.ok(alert.dedupeKey, 'a crash loop collapses instead of paging repeatedly');
 });

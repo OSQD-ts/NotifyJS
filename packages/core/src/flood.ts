@@ -54,17 +54,20 @@ export class FloodControl {
   shouldCoalesce(n: Notification, explicitKey?: string): boolean {
     if (!this.opts.enabled) return false;
 
-    // `alwaysDeliver` exempts a severity from the *severity* rule, not from a key
-    // the caller supplied. A `dedupeKey` is the caller saying "these are the same
-    // thing", and the adapters say it while sending `critical`: the crash handler's
-    // own comment is "one crash loop should not become a thousand pages", and a
-    // crash loop is precisely a thousand identical criticals. Checking the
-    // exemption first meant they all went out, each arming its own ack retry.
+    // `alwaysDeliver` wins, whatever key the caller supplied.
     //
-    // Nothing is withheld that the burst allowance would have let through: the
-    // first of a window always goes out, and what is collapsed is the repetition
-    // after it, released as a summary.
-    if (!explicitKey && this.opts.alwaysDeliver.includes(n.severity)) return false;
+    // This briefly did the opposite - honouring an explicit `dedupeKey` even for a
+    // severity the operator had exempted - to stop a crash loop becoming a thousand
+    // identical critical pages. That trade was wrong in two ways. It made a keyed
+    // critical wait up to a whole window, and the summary released afterwards is a
+    // *new* notification, so the original's targeting, `requireAck` and actions were
+    // dropped on the way. And it put a caller's argument above the operator's
+    // configuration, which is the wrong way round for the setting whose entire
+    // purpose is "these severities are never held back".
+    //
+    // A caller that wants its crash loop collapsed picks a severity the operator
+    // coalesces; `captureCrashes` now does exactly that.
+    if (this.opts.alwaysDeliver.includes(n.severity)) return false;
 
     const key = explicitKey ?? defaultKey(n);
     const existing = this.windows.get(key);

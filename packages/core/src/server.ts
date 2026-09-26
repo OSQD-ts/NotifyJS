@@ -453,7 +453,18 @@ export class Notifier extends EventEmitter<NotifierEvents> {
       channel: summary.sample.channel,
       severity: summary.sample.severity,
       tags: [...(summary.sample.tags ?? []), 'coalesced'],
+      // Carried across from the alert this stands for. A summary is a new
+      // notification, and building it from the title and body alone meant a
+      // restricted alert came back out as a broadcast: `to` was dropped, so the
+      // devices the original had deliberately excluded were told about it after all.
+      // `requireAck` went the same way, so a coalesced alert that was meant to keep
+      // nagging quietly stopped, and the caller's own `data` was replaced rather than
+      // extended.
+      to: summary.sample.to,
+      requireAck: summary.sample.requireAck,
+      actions: summary.sample.actions,
       data: {
+        ...(summary.sample.data ?? {}),
         occurrences: summary.total,
         suppressed: summary.suppressed,
         windowMs: summary.windowMs,
