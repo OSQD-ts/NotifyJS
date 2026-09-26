@@ -33,9 +33,15 @@ export interface SecurityOptions {
    * Guards against an authenticated peer that never drains its socket.
    */
   maxBufferedBytes: number;
-  /** When set, only these IPs may connect at all. */
+  /**
+   * When set, only these addresses may connect at all.
+   *
+   * Each entry is a bare address or a CIDR range (`'10.0.0.5'`,
+   * `'10.0.0.0/24'`, `'2001:db8::/32'`). An entry that is neither is refused
+   * when the hub is constructed rather than quietly matching nothing.
+   */
   allowIps?: string[];
-  /** Always refused, checked before anything else. */
+  /** Always refused, checked before anything else. Same forms as `allowIps`. */
   denyIps?: string[];
   /**
    * Browser `Origin` values accepted on upgrade.

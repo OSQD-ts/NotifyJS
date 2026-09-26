@@ -2441,3 +2441,73 @@ test('a call naming a policy that does not exist is refused, not reported placed
   await hub.stop();
   rmSync(dir, { recursive: true, force: true });
 });
+
+test('an IP allow list accepts the CIDR range it looks like it accepts', async () => {
+  // Both lists were sets of exact strings and nothing said so, so
+  // `allowIps: ['127.0.0.0/8']` - the obvious way to write "only my LAN" -
+  // matched no real address: the hub looked locked to a subnet and was locked to
+  // nobody, refusing every device it had. The same entry in `denyIps` refused
+  // nobody at all.
+  const dir = tmp('allow-cidr');
+  const dialled = (hub) =>
+    new Promise((resolve) => {
+      const ws = new WebSocket(hub.url.replace('localhost', '127.0.0.1'));
+      ws.on('open', () => {
+        ws.close();
+        resolve(true);
+      });
+      ws.on('error', () => resolve(false));
+    });
+
+  const allowing = new Notifier({
+    port: 0,
+    storeDir: join(dir, 'allow'),
+    dashboard: false,
+    logger: false,
+    security: { allowIps: ['127.0.0.0/8'] },
+  });
+  await allowing.start();
+  assert.equal(await dialled(allowing), true, 'an address inside the range gets in');
+  await allowing.stop();
+
+  const denying = new Notifier({
+    port: 0,
+    storeDir: join(dir, 'deny'),
+    dashboard: false,
+    logger: false,
+    security: { denyIps: ['127.0.0.0/8'] },
+  });
+  await denying.start();
+  assert.equal(await dialled(denying), false, 'and the same range can be refused');
+  await denying.stop();
+
+  const elsewhere = new Notifier({
+    port: 0,
+    storeDir: join(dir, 'elsewhere'),
+    dashboard: false,
+    logger: false,
+    security: { allowIps: ['10.0.0.0/24'] },
+  });
+  await elsewhere.start();
+  assert.equal(await dialled(elsewhere), false, 'a range that does not cover us still refuses');
+  await elsewhere.stop();
+
+  // Refused by name while the operator is still reading output, rather than by
+  // silently matching nothing once the hub is live.
+  for (const entry of ['10.0.0.0/', 'not-an-address', '10.0.0.0/64']) {
+    assert.throws(
+      () =>
+        new Notifier({
+          port: 0,
+          storeDir: join(dir, 'bad'),
+          dashboard: false,
+          logger: false,
+          security: { allowIps: [entry] },
+        }),
+      /not an IP address or CIDR range/,
+      `"${entry}" is refused`,
+    );
+  }
+
+  rmSync(dir, { recursive: true, force: true });
+});

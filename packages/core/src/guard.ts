@@ -1,3 +1,5 @@
+import { BlockList, isIPv4, isIPv6 } from 'node:net';
+
 import type { SecurityOptions } from './options.js';
 import type { Store } from './store.js';
 
@@ -29,15 +31,15 @@ export class Guard {
    * them on every TCP upgrade puts an attacker's own connection rate in charge
    * of how much work the hub does before it has rejected them.
    */
-  private readonly denyIps: ReadonlySet<string>;
-  private readonly allowIps: ReadonlySet<string> | undefined;
+  private readonly denyIps: BlockList | undefined;
+  private readonly allowIps: BlockList | undefined;
 
   constructor(
     private readonly sec: SecurityOptions,
     private readonly store: Store,
   ) {
-    this.denyIps = new Set(sec.denyIps ?? []);
-    this.allowIps = sec.allowIps ? new Set(sec.allowIps) : undefined;
+    this.denyIps = compileIpList('denyIps', sec.denyIps);
+    this.allowIps = compileIpList('allowIps', sec.allowIps);
     this.start();
   }
 
@@ -68,7 +70,11 @@ export class Guard {
    * these IPs may connect at all" has to mean it for that path too.
    */
   refused(ip: string): boolean {
-    return this.denyIps.has(ip) || (this.allowIps !== undefined && !this.allowIps.has(ip));
+    if (this.denyIps && matchesIp(this.denyIps, ip)) return true;
+    // An address that cannot be parsed matches nothing, so an allow list
+    // refuses it - which is the safe direction for a list that says "only
+    // these".
+    return this.allowIps !== undefined && !matchesIp(this.allowIps, ip);
   }
 
   /** Called on TCP upgrade, before a WebSocket session exists. */
@@ -266,6 +272,63 @@ export class MessageLimiter {
 }
 
 /** IPv4-mapped IPv6 (`::ffff:1.2.3.4`) must not read as a distinct IP. */
+
+/**
+ * Compiles an operator's allow or deny list, accepting CIDR ranges.
+ *
+ * Both lists used to be sets of exact strings, and nothing said so.
+ * `allowIps: ['10.0.0.0/24']` - the obvious way to write "only my LAN" - then
+ * matched no real address at all: the hub looked locked to a subnet and was
+ * locked to nobody, refusing every device it had. The same entry under
+ * `denyIps` refused nobody, which is the same failure pointing the other way.
+ *
+ * An entry that is neither an address nor a range is refused by name here, at
+ * construction, while the operator who wrote it is still reading output -
+ * rather than at the first connection, where the symptom is silence.
+ *
+ * `BlockList` keeps the matching native, so the lists can stay long without an
+ * attacker's connection rate deciding how much work the hub does per attempt.
+ */
+function compileIpList(
+  option: 'allowIps' | 'denyIps',
+  entries: readonly string[] | undefined,
+): BlockList | undefined {
+  if (!entries || entries.length === 0) return undefined;
+
+  const list = new BlockList();
+  for (const raw of entries) {
+    const entry = raw.trim();
+    const slash = entry.indexOf('/');
+    const address = slash === -1 ? entry : entry.slice(0, slash);
+    const family = isIPv4(address) ? 'ipv4' : isIPv6(address) ? 'ipv6' : undefined;
+    const bad = new Error(
+      `security.${option}: "${raw}" is not an IP address or CIDR range (try "10.0.0.5" or "10.0.0.0/24")`,
+    );
+    if (!family) throw bad;
+
+    try {
+      if (slash === -1) {
+        list.addAddress(address, family);
+      } else {
+        const prefix = entry.slice(slash + 1);
+        // Checked rather than passed to `Number`: `"10.0.0.0/"` would become a
+        // prefix of 0, which matches every address on the internet.
+        if (!/^\d{1,3}$/.test(prefix)) throw bad;
+        list.addSubnet(address, Number(prefix), family);
+      }
+    } catch {
+      throw bad;
+    }
+  }
+  return list;
+}
+
+/** Whether an address matches a compiled list. */
+function matchesIp(list: BlockList, ip: string): boolean {
+  const family = isIPv4(ip) ? 'ipv4' : isIPv6(ip) ? 'ipv6' : undefined;
+  return family !== undefined && list.check(ip, family);
+}
+
 export function normalizeIp(raw: string | undefined): string {
   if (!raw) return 'unknown';
   const ip = raw.trim();
