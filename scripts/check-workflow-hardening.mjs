@@ -89,7 +89,12 @@ for (const file of files) {
       //    the line. Untrusted text belongs in `env:`, where the shell sees a
       //    variable rather than syntax.
       if (typeof step?.run === 'string') {
-        for (const m of step.run.matchAll(/\$\{\{([^}]*)\}\}/g)) {
+        // Non-greedy to the first `}}`, rather than "anything but a brace":
+        // an expression may contain one - `format('{0}', github.event.head_commit.message)`
+        // is the idiomatic way to write these - and such an expression was
+        // skipped entirely by the pattern that was here, which is the one shape
+        // this check most needs to see.
+        for (const m of step.run.matchAll(/\$\{\{([\s\S]*?)\}\}/g)) {
           const expr = m[1].trim();
 
           // GitHub scans a whole run block for expressions and has no idea

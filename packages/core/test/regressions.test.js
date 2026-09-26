@@ -904,6 +904,31 @@ test('a run: block never carries an expression GitHub will choke on', () => {
     assert.equal(broken.status, 1, 'an empty expression in a run: block must fail');
     assert.match(broken.stderr, /empty expression/);
 
+    // An expression containing a brace was skipped entirely: the pattern matched
+    // "anything but a brace" between the delimiters, and `format('{0}', ...)` is
+    // the idiomatic way to write one - so the single shape this check most needs
+    // to catch walked straight past it.
+    const braced = join(dir, 'braced.yml');
+    writeFileSync(
+      braced,
+      [
+        'name: Braced',
+        'on: push',
+        'permissions:',
+        '  contents: read',
+        'jobs:',
+        '  a:',
+        '    runs-on: ubuntu-latest',
+        '    steps:',
+        '      - run: |',
+        "          echo \"${{ format('{0}', github.event.pull_request.title) }}\"",
+        '',
+      ].join('\n'),
+    );
+    const wrapped = spawnSync(process.execPath, [check, braced], { encoding: 'utf8' });
+    assert.equal(wrapped.status, 1, 'untrusted text wrapped in format() must fail');
+    assert.match(wrapped.stderr, /github\.event\./);
+
     // And the workflows this repository actually ships must stay loadable.
     // Running the checker over them here is what turns "GitHub rejected the
     // file" into a test failure before the push rather than after it.

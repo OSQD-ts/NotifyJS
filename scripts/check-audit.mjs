@@ -121,7 +121,13 @@ function baseWorktree(ref) {
 }
 
 let workPath = null;
-let status = 0;
+// Tracked apart, because they answer different questions: one directory that
+// could not be compared must never erase another's failure. Both were written
+// into a single `status`, and the catch below set it unconditionally - so a
+// registry timeout while auditing the largest tree turned a genuine new critical
+// advisory into a warning, and a green job that `merge` then landed.
+let failed = false;
+let unverifiable = false;
 try {
   workPath = baseWorktree(base);
 
@@ -132,6 +138,32 @@ try {
       continue;
     }
 
+    try {
+      auditOne(dir, label);
+    } catch (err) {
+      if (!(err instanceof Unverifiable)) throw err;
+      // Per directory, so one tree that cannot be read does not abandon the
+      // rest of them unaudited.
+      console.error(`  ??  ${label}: could not compare against ${base}: ${err.message}`);
+      unverifiable = true;
+    }
+  }
+} catch (err) {
+  if (!(err instanceof Unverifiable)) throw err;
+  console.error(`\ncould not compare against ${base}: ${err.message}`);
+  console.error('Nothing is known to be wrong; the check simply could not run.');
+  unverifiable = true;
+} finally {
+  if (workPath) {
+    spawnSync('git', ['worktree', 'remove', '--force', workPath], { stdio: 'ignore' });
+    rmSync(workPath, { recursive: true, force: true });
+  }
+}
+
+const status = failed ? 1 : unverifiable ? 2 : 0;
+
+function auditOne(dir, label) {
+  {
     const current = advisoriesIn(dir);
     const baseDir = join(workPath, dir);
     // A package that does not exist on the base ref is entirely new, and every
@@ -144,7 +176,7 @@ try {
     const failing = introduced.filter((a) => RANK[a.severity] >= threshold);
     const inherited = current.size - introduced.length;
 
-    if (failing.length > 0) status = 1;
+    if (failing.length > 0) failed = true;
 
     const verdict = failing.length > 0 ? 'FAIL' : introduced.length > 0 ? 'warn' : ' ok ';
     console.log(
@@ -156,16 +188,6 @@ try {
       console.log(`        ${mark} ${a.severity.padEnd(8)} ${a.title}`);
       console.log(`          via ${[...a.through].sort().join(', ')}  ${a.url}`);
     }
-  }
-} catch (err) {
-  if (!(err instanceof Unverifiable)) throw err;
-  console.error(`\ncould not compare against ${base}: ${err.message}`);
-  console.error('Nothing is known to be wrong; the check simply could not run.');
-  status = 2;
-} finally {
-  if (workPath) {
-    spawnSync('git', ['worktree', 'remove', '--force', workPath], { stdio: 'ignore' });
-    rmSync(workPath, { recursive: true, force: true });
   }
 }
 
