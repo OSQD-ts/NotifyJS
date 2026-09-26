@@ -283,6 +283,12 @@ export interface WebPushSenderOptions {
  * of parallel requests is the whole of it.
  */
 export class WebPushSender {
+  /** Cached `Authorization` headers, by push-service origin. See `authorization`. */
+  private readonly headers = new Map<string, { header: string; until: number }>();
+
+  /** The public key those cached headers were signed with. */
+  private signedFor: string | undefined;
+
   constructor(
     private readonly opts: WebPushSenderOptions,
     private readonly keys: () => VapidKeys,
@@ -312,6 +318,37 @@ export class WebPushSender {
     this.onResult(ok > 0, ok);
   }
 
+  /**
+   * The `Authorization` header for a push service, reused while it is valid.
+   *
+   * The JWT is scoped to the service's origin and lives for twelve hours, and this
+   * signed a fresh one per device per alert: a thousand phones on one push service
+   * meant a thousand ES256 signatures for a header that is identical across all of
+   * them. Measured at 0.26ms each, and every one of them runs before the first
+   * `await`, so the hub answered no pings and rang no call rungs meanwhile.
+   *
+   * Re-signed an hour before expiry, and keyed by origin so a header for one service
+   * is never sent to another. Dropped when the keys change, since a rotated keypair
+   * must not keep presenting the old signature.
+   */
+  private authorization(endpoint: string): string {
+    const keys = this.keys();
+    const origin = new URL(endpoint).origin;
+    const now = Date.now();
+
+    if (this.signedFor !== keys.publicKey) {
+      this.headers.clear();
+      this.signedFor = keys.publicKey;
+    }
+
+    const cached = this.headers.get(origin);
+    if (cached && cached.until > now) return cached.header;
+
+    const header = vapidAuthorization(endpoint, keys, this.opts.subject, now);
+    this.headers.set(origin, { header, until: now + 11 * 60 * 60_000 });
+    return header;
+  }
+
   private async sendOne(
     target: WebPushTarget & { deviceId: string },
     body: Buffer,
@@ -334,7 +371,7 @@ export class WebPushSender {
       const response = await fetch(target.endpoint, {
         method: 'POST',
         headers: {
-          authorization: vapidAuthorization(target.endpoint, this.keys(), this.opts.subject),
+          authorization: this.authorization(target.endpoint),
           'content-encoding': 'aes128gcm',
           'content-type': 'application/octet-stream',
           ttl: String(this.opts.ttlSeconds),
