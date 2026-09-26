@@ -952,7 +952,15 @@ export class Notifier extends EventEmitter<NotifierEvents> {
     // that `pair` already refuses.
     const clean = sanitizeName(name);
     if (!clean) return undefined;
-    return this.store.updateDevice(deviceId, { name: clean });
+    const updated = this.store.updateDevice(deviceId, { name: clean });
+    if (updated) {
+      // Refreshed on live sessions, exactly as a role change is. Without it the
+      // old name went on being used until the device reconnected - and it is the
+      // name that appears in a call's result, in the `action` event, and in the
+      // lines logged when a device is dropped for not reading its socket.
+      for (const session of this.byDevice.get(deviceId) ?? []) session.device = updated;
+    }
+    return updated;
   }
 
   setDeviceRole(deviceId: string, role: string): Device | undefined {
@@ -1982,9 +1990,17 @@ export class Notifier extends EventEmitter<NotifierEvents> {
     // Clamped to what the hub has actually issued: a device that reported a
     // cursor from the future - a bug, a bad clock, a hostile client - would
     // silently opt itself out of every replay from then on.
-    if (Number.isFinite(msg.seq) && (msg.seq as number) > session.device.ackedSeq) {
+    // Compared against the stored record rather than this session's copy of it. A
+    // device may hold two sessions - a phone with the app open and its watch
+    // service, a browser in two tabs - and each carried its own snapshot, so an
+    // ack on one could move the cursor *backwards* over the other's progress. The
+    // consequence is a replay of what was already seen rather than a loss, since
+    // every client dedupes by id, but it is still the hub forgetting something it
+    // had been told.
+    const known = this.store.device(session.device.id) ?? session.device;
+    if (Number.isFinite(msg.seq) && (msg.seq as number) > known.ackedSeq) {
       const seq = Math.min(msg.seq as number, this.store.seq);
-      if (seq > session.device.ackedSeq) {
+      if (seq > known.ackedSeq) {
         const updated = this.store.updateDevice(session.device.id, { ackedSeq: seq });
         if (updated) session.device = updated;
       }
