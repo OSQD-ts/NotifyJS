@@ -2795,6 +2795,22 @@ test('a store that lost its counter to a crash does not hand a number out twice'
   assert.equal(store.nextSeq(), 6, 'the counter carries on past what is on disk');
   store.close();
 
+  // And a line holding a number nothing could have issued is ignored, rather
+  // than pushing the counter somewhere it can never return from.
+  const tampered = tmp('seq-absurd');
+  writeFileSync(
+    join(tampered, 'store.json'),
+    JSON.stringify({ serverId: 'srv', seq: 4, devices: {}, roles: {}, codes: {}, bans: {} }),
+  );
+  writeFileSync(
+    join(tampered, 'history.jsonl'),
+    `${JSON.stringify({ id: 'n2', seq: 1e30, ts: Date.now(), channel: 'ops', severity: 'error', title: 'nonsense' })}\n`,
+  );
+  const guarded = new Store(tampered, { history: 50, audit: 50 }, () => 'unused');
+  assert.equal(guarded.nextSeq(), 5, 'an impossible sequence number is not adopted');
+  guarded.close();
+  rmSync(tampered, { recursive: true, force: true });
+
   rmSync(dir, { recursive: true, force: true });
 });
 

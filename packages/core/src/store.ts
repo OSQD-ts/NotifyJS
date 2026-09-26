@@ -201,7 +201,14 @@ export class Store {
     // than skipping it: a device whose cursor has already passed that number
     // never receives the second alert, because `since()` compares strictly, and
     // no amount of reconnecting will ever deliver it.
-    const highest = this.historyCache.reduce((max, n) => Math.max(max, n.seq ?? 0), 0);
+    // Only a number that could have been issued counts. A torn or tampered line
+    // may hold anything at all, and `1e30` taken at face value would push the
+    // counter somewhere it can never come back from - every later `seq` absurd,
+    // for the life of the store.
+    const highest = this.historyCache.reduce(
+      (max, n) => (Number.isSafeInteger(n.seq) && n.seq > max ? n.seq : max),
+      0,
+    );
     if (highest > this.data.seq) {
       this.data.seq = highest;
       this.markDirty();
