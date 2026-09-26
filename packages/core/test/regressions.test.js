@@ -371,7 +371,11 @@ test('an admin op naming an Object.prototype member is refused', async () => {
   // An admin device holds every capability, so a leaked prototype member would
   // pass the check that currently saves this by accident.
   for (const op of ['constructor', '__proto__', 'toString', 'hasOwnProperty']) {
-    await assert.rejects(() => client.admin(op), /forbidden|unknown op/, `op "${op}" is refused`);
+    // `forbidden` only. With the table on a plain object, `ADMIN_CAPABILITY.constructor`
+    // returns a truthy function, the capability check passes for an admin, and the
+    // switch answers "unknown op" - so accepting that message made this guard pass
+    // with its own bug reintroduced.
+    await assert.rejects(() => client.admin(op), /forbidden/, `op "${op}" is refused`);
   }
 
   // A real op on the same connection still works, so the test is not passing

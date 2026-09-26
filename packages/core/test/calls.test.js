@@ -166,3 +166,49 @@ test('a repeated ladder does not report a decline from an earlier pass', async (
   ]);
   assert.equal(result.outcome, 'missed', 'the pass nobody answered decides it');
 });
+
+test('a stranger cannot walk a call that has not started ringing yet', async () => {
+  // The guard this covers - `if (!call.ringing.has(deviceId)) return` - is not
+  // load-bearing while a rung is already ringing, because the rung advances on its
+  // own once everyone on it has answered. It matters during a `delaySeconds`
+  // window, when `ringing` is empty: without it, any device that has merely
+  // learned the call id walks the ladder forward and settles the page as missed.
+  const orch = new CallOrchestrator(30, () => {});
+  const phone = device('phone');
+  const stranger = device('stranger');
+
+  const settled = orch.place(request('c-delay'), [
+    { targets: [phone], ringSeconds: 1, delaySeconds: 1 },
+  ]);
+  assert.equal(phone.sent.length, 0, 'the rung has not started');
+
+  orch.decline('c-delay', 'stranger');
+  orch.answer('c-delay', 'stranger');
+  orch.ended('c-delay', 'stranger');
+  assert.equal(orch.activeCount, 1, 'the call is untouched');
+
+  // It then rings the device it was meant for, and that device can answer.
+  await new Promise((r) => setTimeout(r, 1100));
+  assert.ok(phone.sent.some((m) => m.t === 'call'), 'the rung rang after its delay');
+  orch.answer('c-delay', 'phone');
+  assert.equal((await settled).outcome, 'answered');
+});
+
+test('a device that vanishes mid-ring says so in the events', async () => {
+  // The outcome is covered above; this is the audit trail. Routing a lost socket
+  // through `decline()` wrote a `call.declined` row, which was wrong, and emitting
+  // nothing left an operator with no answer to "why did this escalate?".
+  const events = [];
+  const orch = new CallOrchestrator(30, (e) => events.push(e));
+  const phone = device('phone');
+
+  const settled = orch.place(request('c-vanish-event'), [rung([phone], 1)]);
+  orch.dropped('phone');
+  await settled;
+
+  assert.deepEqual(
+    events.map((e) => e.type),
+    ['ringing', 'vanished', 'missed'],
+    'the disappearance is named, and is not a decline',
+  );
+});

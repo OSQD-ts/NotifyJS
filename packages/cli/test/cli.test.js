@@ -55,8 +55,15 @@ after(async () => {
 
 test('help lists the commands', async () => {
   const { stdout } = await cli(['help']);
-  for (const command of ['serve', 'listen', 'pair', 'send', 'call', 'devices', 'code', 'cert']) {
-    assert.match(stdout, new RegExp(`notifyjs ${command}`), `${command} is documented`);
+  // Every command `main()` dispatches, so a command added or renamed without a
+  // line in the help text fails here. Eight of the seventeen were checked before,
+  // which let five be deleted from the help with the suite still green.
+  const commands = [
+    'serve', 'listen', 'pair', 'send', 'call', 'devices', 'code', 'cert',
+    'export', 'import', 'token', 'watch', 'checkin', 'watches', 'update',
+  ];
+  for (const command of commands) {
+    assert.match(stdout, new RegExp(`notifyjs ${command}\\b`), `${command} is documented`);
   }
 });
 

@@ -1,6 +1,6 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { rmSync, mkdtempSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -81,9 +81,14 @@ test('the token is only ever returned once, and never stored in the clear', asyn
   assert.equal(listed.token, undefined, 'the plaintext is not handed back');
   assert.equal(listed.hash, undefined, 'not even the hash leaves the hub');
 
-  // The value on disk must not be the token itself.
-  const raw = JSON.stringify(hub.devices());
-  assert.ok(!raw.includes(minted.token));
+  // The value on disk must not be the token itself - read from the file, because
+  // `hub.devices()` is an empty array on this hub and an assertion over nothing
+  // cannot fail however the token is stored.
+  // The store writes on a short debounce, so give it that long.
+  await new Promise((r) => setTimeout(r, 200));
+  const onDisk = readFileSync(join(storeDir, 'store.json'), 'utf8');
+  assert.ok(onDisk.includes(minted.id), 'the token record is in the file');
+  assert.ok(!onDisk.includes(minted.token), 'but not the token itself');
 });
 
 test('no token, a wrong token and a revoked token are all refused', async () => {

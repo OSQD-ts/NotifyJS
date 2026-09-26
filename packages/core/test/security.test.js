@@ -115,7 +115,11 @@ test('an oversized frame terminates the connection', async () => {
   const c = raw();
   await c.next();
   c.send({ v: PROTOCOL_VERSION, t: 'pair', code: 'A'.repeat(200_000) });
-  assert.ok(await c.closed(), 'connection closed rather than buffered');
+  // 1009 is "message too big", which `ws` sends when it refuses the frame at the
+  // limit. `assert.ok` accepted any non-zero code, so this passed just as well
+  // when the whole 200 KB was buffered and parsed and the close came from
+  // somewhere else entirely.
+  assert.equal(await c.closed(), 1009, 'refused at the frame limit, not after it');
 });
 
 test('a captured auth frame cannot be replayed on a new connection', async () => {

@@ -133,6 +133,7 @@ test('reconnects with a stored keypair and replays what it missed', async () => 
   // Sent while the device is offline.
   await hub.critical({ title: 'while you were away', channel: 'db' });
 
+  const enrolledBefore = hub.devices().length;
   const second = makeClient('laptop', { storage });
   const replayed = once(second, 'notification');
   await second.connect();
@@ -140,7 +141,10 @@ test('reconnects with a stored keypair and replays what it missed', async () => 
 
   assert.equal(ready.deviceId, deviceId, 'same identity, no re-pairing');
   assert.equal((await replayed).title, 'while you were away');
-  assert.equal(hub.devices().length, 3, 'reconnect must not enrol a new device');
+  // The count before this reconnect, not a hard-coded total of what earlier tests
+  // happened to leave behind - which made this fail when run alone and turned one
+  // unrelated change into three cascading failures.
+  assert.equal(hub.devices().length, enrolledBefore, 'reconnect must not enrol a new device');
   await disconnectAndWait(second, 'laptop');
 });
 

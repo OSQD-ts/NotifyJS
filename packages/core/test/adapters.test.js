@@ -226,8 +226,12 @@ test('a pino stream forwards errors and drops chatter', async () => {
 test('a malformed log line never breaks the logger', async () => {
   const s = sink();
   const stream = createLogStream(s);
-  stream.write('this is not json\n');
-  stream.write(JSON.stringify({ level: 50, msg: 'still working' }) + '\n');
+  // One chunk, which is the case that broke: a bad line used to abort the whole
+  // chunk, so the good record beside it was lost. Written separately - as this
+  // test used to - the precondition never occurs and the bug cannot show.
+  stream.write(
+    'this is not json\n' + JSON.stringify({ level: 50, msg: 'still working' }) + '\n',
+  );
   await new Promise((r) => setTimeout(r, 60));
   assert.equal(s.sent.length, 1);
   assert.equal(s.sent[0].title, 'still working');

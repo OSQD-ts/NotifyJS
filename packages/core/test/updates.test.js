@@ -86,6 +86,21 @@ test('prereleases are opt-in', async () => {
     repository: 'x/y', currentVersion: '0.1.0', includePrerelease: true, fetchImpl: feed,
   });
   assert.ok(rolling.available);
+
+  // And with nothing but a prerelease in the feed, the flag is what decides. The
+  // assertion above is satisfied by the stable `v0.2.0` on its own, so making
+  // `includePrerelease` inert left this test green.
+  const onlyPre = releaseFeed([release('v0.3.0-rc1', { prerelease: true })]);
+  const ignored = await checkForUpdate({
+    repository: 'x/y', currentVersion: '0.1.0', fetchImpl: onlyPre,
+  });
+  assert.equal(ignored.available, false, 'a prerelease is not offered by default');
+
+  const opted = await checkForUpdate({
+    repository: 'x/y', currentVersion: '0.1.0', includePrerelease: true, fetchImpl: onlyPre,
+  });
+  assert.equal(opted.available, true, 'opting in offers it');
+  assert.equal(opted.latest.tag, 'v0.3.0-rc1', 'and offers exactly it');
 });
 
 test('drafts are never offered', async () => {

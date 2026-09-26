@@ -1,6 +1,6 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { rmSync, mkdtempSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import WebSocket from 'ws';
@@ -193,6 +193,18 @@ test('a taken action is recorded on the notification, so a restart cannot undo i
   assert.ok(stored.actionTaken, 'the notification carries it');
   assert.equal(stored.actionTaken.id, 'restart');
   assert.ok(stored.actionTaken.at > 0);
+
+  // On disk, which is what "a restart cannot undo it" means. `hub.history()` is
+  // the in-memory cache and `takeAction` mutates it by reference, so reading that
+  // alone passed just as well with the write removed.
+  await new Promise((r) => setTimeout(r, 200));
+  const line = readFileSync(join(storeDir, 'history.jsonl'), 'utf8')
+    .split('\n')
+    .filter(Boolean)
+    .map((l) => JSON.parse(l))
+    .find((entry) => entry.id === n.id);
+  assert.ok(line?.actionTaken, 'and the file carries it too');
+  assert.equal(line.actionTaken.id, 'restart');
 });
 
 test('granting notify.act is treated as an escalation', () => {
