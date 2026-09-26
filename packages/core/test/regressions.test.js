@@ -2511,3 +2511,44 @@ test('an IP allow list accepts the CIDR range it looks like it accepts', async (
 
   rmSync(dir, { recursive: true, force: true });
 });
+
+test('the audit log says who rewrote a role, not just that it changed', async () => {
+  // `admin.denied` named the device that was turned away, while a change that
+  // succeeded left a line naming its target and nothing about the administrator
+  // behind it - and roles, policies and revoked pairing codes left no line at
+  // all. Rewriting a role is how somebody grants themselves the rest of the hub.
+  const dir = tmp('audit-actor');
+  const hub = hostileHub(dir);
+  await hub.start();
+  const device = await pairRaw(hub, 'admin', 'the-admin');
+
+  const upsert = await device.ask('roles.upsert', {
+    name: 'oncall',
+    channels: ['*'],
+    minSeverity: 'warning',
+    capabilities: ['notify.receive'],
+  });
+  assert.equal(upsert.ok, true, `upsert refused: ${upsert.error}`);
+
+  const applied = hub.auditLog(50).filter((e) => e.kind === 'admin.applied');
+  const line = applied.find((e) => e.detail?.op === 'roles.upsert');
+  assert.ok(line, 'the change is in the log at all');
+  assert.equal(line.deviceId, device.deviceId, 'attributed to the device that made it');
+  assert.equal(line.detail.target, 'oncall', 'and names what it changed');
+
+  // A refused one is still recorded as refused, and not as applied.
+  const viewer = await pairRaw(hub, 'viewer', 'a-viewer');
+  const denied = await viewer.ask('roles.delete', { name: 'oncall' });
+  assert.equal(denied.ok, false);
+  assert.equal(
+    hub.auditLog(50).filter((e) => e.kind === 'admin.applied' && e.detail?.op === 'roles.delete')
+      .length,
+    0,
+    'nothing claims the refused change was applied',
+  );
+
+  device.ws.close();
+  viewer.ws.close();
+  await hub.stop();
+  rmSync(dir, { recursive: true, force: true });
+});

@@ -2112,8 +2112,28 @@ export class Notifier extends EventEmitter<NotifierEvents> {
     session: Session,
     msg: Extract<ClientMessage, { t: 'admin' }>,
   ): Promise<void> {
-    const reply = (ok: boolean, data?: unknown, error?: string) =>
-      session.send({ v: PROTOCOL_VERSION, t: 'admin.result', id: msg.id, ok, data, error });
+    const reply = (ok: boolean, data?: unknown, error?: string) => {
+      // Says who exercised a privilege, and not only who was refused.
+      //
+      // `admin.denied` has always named the device turned away, while a change
+      // that succeeded left either a line naming its target and nothing about
+      // the administrator behind it, or - for roles, policies and revoked
+      // pairing codes - no line at all. An audit log that can say a role was
+      // rewritten but not by whom is half a log, and rewriting a role is how
+      // somebody grants themselves the rest of the hub.
+      //
+      // Here rather than in each method: this is the one place every admin
+      // frame passes through on its way back out, and it fires only for a
+      // mutation that actually succeeded.
+      if (ok && ATTRIBUTED_ADMIN_OPS.has(msg.op)) {
+        this.audit('admin.applied', {
+          ip: session.ip,
+          deviceId: session.deviceId,
+          detail: { op: msg.op, target: adminTarget(args) },
+        });
+      }
+      return session.send({ v: PROTOCOL_VERSION, t: 'admin.result', id: msg.id, ok, data, error });
+    };
 
     const role = session.role;
     if (!role) return reply(false, undefined, 'not ready');
@@ -2664,6 +2684,45 @@ const ADMIN_CAPABILITY: Record<string, Capability> = Object.assign(Object.create
   'audit.tail': 'audit.read',
   history: 'notify.receive',
 });
+
+/**
+ * Admin operations whose success is recorded with the device that asked for it.
+ *
+ * The configuration and authority changes only. `notify.send`, `call.place` and
+ * `heartbeat.checkin` are left out: the first two already write their own audit
+ * line, and all three are ordinary traffic rather than a change to what the hub
+ * is - attributing them would bury the lines that matter under the ones that do
+ * not.
+ */
+const ATTRIBUTED_ADMIN_OPS = new Set([
+  'devices.revoke',
+  'devices.rename',
+  'devices.setRole',
+  'pair.create',
+  'pair.revoke',
+  'ingest.create',
+  'ingest.revoke',
+  'roles.upsert',
+  'roles.delete',
+  'policies.upsert',
+  'policies.delete',
+  'heartbeat.expect',
+  'heartbeat.forget',
+]);
+
+/**
+ * What an admin frame was aimed at, for the audit line.
+ *
+ * Deliberately never `args.code`: a pairing code is a live credential until it
+ * is redeemed, and the audit log is readable by anybody holding `audit.read`.
+ */
+function adminTarget(args: Record<string, unknown>): string | undefined {
+  for (const key of ['deviceId', 'name', 'id', 'label', 'role']) {
+    const value = args[key];
+    if (typeof value === 'string' && value) return value.slice(0, 64);
+  }
+  return undefined;
+}
 
 /** A valid, throwaway key used to keep failed-auth timing flat. */
 const DECOY_PUBLIC_KEY = 'BdC4l3lXbNIqjRfjP8ycxHDCiMMVBpjs7ymEQR8lPFY';
