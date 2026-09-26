@@ -101,6 +101,12 @@ export function FeedScreen({
         }
         renderItem={({ item: entry }) => {
           const item = entry.notification;
+          // A live `resolve` frame marks the entry; a replayed notification that
+          // was already resolved carries it on the notification itself. Reading
+          // one field for the dimming and the other for the label meant neither
+          // state was ever drawn correctly: a resolution arriving now labelled the
+          // row at full brightness, and a replayed one dimmed it with no label.
+          const resolvedAt = entry.resolvedAt ?? item.resolvedAt;
           return (
           <View
             style={[
@@ -109,7 +115,7 @@ export function FeedScreen({
                 backgroundColor: t.surface,
                 borderColor: t.border,
                 borderLeftColor: SEVERITY_COLORS[item.severity] ?? t.accent,
-                opacity: item.resolvedAt ? 0.55 : 1,
+                opacity: resolvedAt ? 0.55 : 1,
               },
             ]}
             accessible
@@ -128,7 +134,7 @@ export function FeedScreen({
             </View>
             <Text style={[styles.title, { color: t.text }]}>{item.title}</Text>
             {item.body ? <Text style={[styles.body, { color: t.muted }]}>{item.body}</Text> : null}
-            {entry.resolvedAt ? (
+            {resolvedAt ? (
               <Text style={[styles.resolved, { color: SEVERITY_COLORS.success }]}>Resolved</Text>
             ) : null}
           </View>

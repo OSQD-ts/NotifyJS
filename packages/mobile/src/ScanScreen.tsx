@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import { StyleSheet, Text, TouchableOpacity, View } from 'react-native';
 import { CameraView, useCameraPermissions } from 'expo-camera';
 import { parsePairingLink, type PairingLink } from '@osqd/notifyjs-protocol';
@@ -19,7 +19,12 @@ interface Props {
 export function ScanScreen({ onScanned, onCancel }: Props) {
   const t = useTheme();
   const [permission, requestPermission] = useCameraPermissions();
-  const [handled, setHandled] = useState(false);
+  // A ref, not state: the camera fires per frame, and `setHandled(true)` only
+  // takes effect after React commits - so frames arriving in the same batch all
+  // saw `false` and submitted the same single-use code twice. The second attempt
+  // is refused by the hub, which dropped the user back on the pairing screen with
+  // an error moments after pairing had actually succeeded.
+  const handled = useRef(false);
   const [error, setError] = useState<string | undefined>();
 
   if (!permission) {
@@ -52,13 +57,13 @@ export function ScanScreen({ onScanned, onCancel }: Props) {
         barcodeScannerSettings={{ barcodeTypes: ['qr'] }}
         onBarcodeScanned={({ data }) => {
           // The camera fires continuously; one accepted scan is enough.
-          if (handled) return;
+          if (handled.current) return;
           const link = parsePairingLink(data);
           if (!link) {
             setError('That QR code is not a NotifyJS pairing code.');
             return;
           }
-          setHandled(true);
+          handled.current = true;
           onScanned(link);
         }}
       />

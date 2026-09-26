@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 
 import { promptIsFresh } from './state';
 import { secureStorage } from './storage';
@@ -52,7 +52,7 @@ export function useOneTimePrompt(key: PromptKey): {
       });
   }, [key]);
 
-  return { asked, markAsked };
+  return useMemo(() => ({ asked, markAsked }), [asked, markAsked]);
 }
 
 /**
@@ -103,5 +103,5 @@ export function useRecurringPrompt(
       });
   }, [key]);
 
-  return { asked, markAsked };
+  return useMemo(() => ({ asked, markAsked }), [asked, markAsked]);
 }
