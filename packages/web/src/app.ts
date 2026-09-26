@@ -33,7 +33,9 @@ const client = new NotifyClient({
   crypto: webCrypto,
   storage: webStorage(),
   createSocket: (url) => new WebSocket(url) as never,
-  deviceName: loadPreferences().deviceName,
+  // Read when it is needed, not captured here: this runs as the page loads,
+  // before anybody has typed a name into the pairing form.
+  deviceName: () => loadPreferences().deviceName,
   platform: 'web',
   model: navigator.userAgent.slice(0, 60),
   autoReconnect: true,

@@ -62,7 +62,16 @@ export interface NotifyClientOptions {
   crypto: CryptoProvider;
   storage: ClientStorage;
   createSocket(url: string): SocketLike;
-  deviceName: string;
+  /**
+   * How this device asks to be listed on the hub.
+   *
+   * A function is read when a name is actually needed, which is what a host
+   * whose name can change while the client lives has to pass: the dashboard
+   * builds its client when the page loads, long before anybody types a name into
+   * the pairing form, so a captured string meant the hub recorded every browser
+   * as `Browser` however carefully it had been named.
+   */
+  deviceName: string | (() => string);
   platform: string;
   model?: string;
   /** Reconnect with exponential backoff after an unexpected close. */
@@ -680,6 +689,12 @@ export class NotifyClient {
     }
   }
 
+  /** The name to send, resolved now rather than when the client was built. */
+  private deviceName(): string {
+    const name = this.opts.deviceName;
+    return typeof name === 'function' ? name() : name;
+  }
+
   private async handshake(hello: HelloMsg): Promise<void> {
     if (this.pendingCode && this.keys) {
       const transcript = canonical([
@@ -688,7 +703,7 @@ export class NotifyClient {
         hello.nonce,
         this.pendingCode,
         this.keys.publicKey,
-        this.opts.deviceName,
+        this.deviceName(),
         this.opts.platform,
       ]);
       this.send({
@@ -696,7 +711,7 @@ export class NotifyClient {
         t: 'pair',
         code: this.pendingCode,
         publicKey: this.keys.publicKey,
-        name: this.opts.deviceName,
+        name: this.deviceName(),
         platform: this.opts.platform,
         model: this.opts.model,
         sig: await this.opts.crypto.sign(this.keys, transcript),
