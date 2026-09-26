@@ -117,3 +117,52 @@ test('everyone declining reports declined, not missed', async () => {
   assert.equal(result.outcome, 'declined');
   assert.deepEqual(result.attempted, ['a', 'b']);
 });
+
+test('a phone that vanished mid-ring is a missed call, not a declined one', async () => {
+  // `dropped()` routed a lost socket through `decline()`, so a phone that lost
+  // Wi-Fi while ringing put the whole call's outcome at `declined` - telling the
+  // caller a human had refused, and leaving the `outcome === 'missed'` fallback
+  // every embedder is told to write unrun.
+  const orch = new CallOrchestrator(30, () => {});
+  const phone = device('phone');
+
+  const settled = orch.place(request('c-vanish'), [rung([phone], 1)]);
+  assert.ok(phone.sent.some((m) => m.t === 'call'), 'it rang');
+
+  orch.dropped('phone');
+
+  const result = await settled;
+  assert.equal(result.outcome, 'missed', 'nobody saw the page');
+  assert.deepEqual(result.attempted, ['phone']);
+});
+
+test('an explicit decline is still reported as declined', async () => {
+  const orch = new CallOrchestrator(30, () => {});
+  const phone = device('phone');
+
+  const settled = orch.place(request('c-decline'), [rung([phone], 1)]);
+  orch.decline('c-decline', 'phone');
+
+  assert.equal((await settled).outcome, 'declined');
+});
+
+test('a repeated ladder does not report a decline from an earlier pass', async () => {
+  // `declined` survived the repeat, so a phone that said no on the first pass
+  // and was simply not answered on the last one made the call report `declined`
+  // - a final pass nobody touched, indistinguishable from a refusal.
+  const orch = new CallOrchestrator(30, () => {});
+  const phone = device('phone');
+
+  // Ring for a moment, twice over: declined on the first pass, ignored on the
+  // second.
+  const settled = orch.place(request('c-repeat'), [rung([phone], 0.05)], 1);
+  orch.decline('c-repeat', 'phone');
+
+  // Every timer in the orchestrator is unref'd, so something has to hold the
+  // loop open while the second pass rings itself out.
+  const result = await Promise.race([
+    settled,
+    new Promise((resolve) => setTimeout(() => resolve({ outcome: 'never settled' }), 1000)),
+  ]);
+  assert.equal(result.outcome, 'missed', 'the pass nobody answered decides it');
+});

@@ -27,6 +27,12 @@ interface ActiveCall {
   repeat: number;
   attempted: string[];
   declined: Set<string>;
+  /**
+   * Devices that stopped ringing because they went away, not because anybody
+   * refused. Kept apart from [declined] because the two outcomes mean different
+   * things to whoever placed the call.
+   */
+  vanished: Set<string>;
   ringing: Set<string>;
   timer: NodeJS.Timeout | undefined;
   /** Drops an answered call whose `call.ended` never arrives. See `answer()`. */
@@ -94,6 +100,7 @@ export class CallOrchestrator {
         repeat,
         attempted: [],
         declined: new Set(),
+        vanished: new Set(),
         ringing: new Set(),
         timer: undefined,
         reaper: undefined,
@@ -113,6 +120,12 @@ export class CallOrchestrator {
         call.pass += 1;
         call.cursor = 0;
         call.ringing.clear();
+        // Cleared with it: a decline belongs to the pass it happened in. Left
+        // standing, a phone that declined on the first pass and was simply not
+        // answered on the last one made the whole call report `declined`, so a
+        // final pass nobody touched was indistinguishable from a refusal.
+        call.declined.clear();
+        call.vanished.clear();
         this.runStep(call);
         return;
       }
@@ -233,6 +246,29 @@ export class CallOrchestrator {
     this.runStep(call);
   }
 
+  /**
+   * A ringing device has gone: its socket closed, or the liveness sweep dropped
+   * it for not reading.
+   *
+   * Advances the rung exactly as a decline does, since there is nothing to be
+   * gained by ringing a phone that is not there - but it is recorded apart from
+   * the declines, because the difference is the entire reason two outcomes
+   * exist: somebody saw the page and said no, against nobody looking at their
+   * phone at all. Counted as a decline, a phone that lost Wi-Fi mid-ring told
+   * the caller a human had refused, so the `outcome === 'missed'` fallback every
+   * embedder is told to write never ran, and the dashboard said somebody had
+   * turned the page down.
+   */
+  private vanish(call: ActiveCall, deviceId: string): void {
+    call.vanished.add(deviceId);
+    call.ringing.delete(deviceId);
+    if (call.ringing.size > 0) return;
+
+    this.clearTimer(call);
+    call.cursor += 1;
+    this.runStep(call);
+  }
+
   private findTarget(call: ActiveCall, deviceId: string): CallTarget | undefined {
     return this.allTargets(call).find((t) => t.deviceId === deviceId);
   }
@@ -285,7 +321,7 @@ export class CallOrchestrator {
         continue;
       }
       if (!call.ringing.has(deviceId)) continue;
-      this.decline(call.request.id, deviceId);
+      this.vanish(call, deviceId);
     }
   }
 
