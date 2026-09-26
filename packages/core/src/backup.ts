@@ -1,4 +1,4 @@
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 /**
@@ -134,6 +134,25 @@ export function importStore(
 
   mkdirSync(dir, { recursive: true, mode: 0o700 });
   const file = join(dir, STORE_FILE);
+
+  // Every target is checked before anything is written. The store was written
+  // first and the logs checked afterwards, so a restore that refused had already
+  // replaced `store.json` - and with it the hub's `serverId`, which every paired
+  // device's auth signature is built on - while telling the operator that nothing
+  // had happened. A half-done restore is worse than either outcome.
+  //
+  // This is about ordering, not about the race: the `wx` flags below are what
+  // make the refusal itself unraceable, and they stay.
+  if (!options.force) {
+    const targets = [file];
+    if (doc.history?.length) targets.push(join(dir, HISTORY_FILE));
+    if (doc.audit?.length) targets.push(join(dir, AUDIT_FILE));
+    for (const target of targets) {
+      if (existsSync(target)) {
+        throw new Error(`${target} already exists; pass --force to replace it`);
+      }
+    }
+  }
 
   // `wx` fails if the file is already there, which is the same refusal as
   // asking first - except it cannot be raced. Asking and then writing leaves a

@@ -3038,6 +3038,11 @@ test('a restore will not land on logs that are still there', async () => {
   writeFileSync(join(target, 'audit.jsonl'), '{"kind":"pair.created","ts":1}\n');
 
   assert.throws(() => importStore(target, doc, {}), /already exists/, 'refused');
+  assert.equal(
+    existsSync(join(target, 'store.json')),
+    false,
+    'and refused before writing anything - a swapped serverId would invalidate every device',
+  );
   assert.match(
     readFileSync(join(target, 'history.jsonl'), 'utf8'),
     /live-incident/,
