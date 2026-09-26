@@ -1,4 +1,5 @@
 import { EventEmitter } from 'node:events';
+import { isIP, isIPv4 } from 'node:net';
 import { networkInterfaces } from 'node:os';
 import { createServer as createHttpServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { createServer as createHttpsServer } from 'node:https';
@@ -2199,7 +2200,9 @@ export class Notifier extends EventEmitter<NotifierEvents> {
         this.audit('push.rejected', { deviceId: session.device.id });
         this.opts.logger('rejected a web push subscription', {
           deviceId: session.device.id,
-          reason: keys ? 'endpoint is not an https URL' : 'missing or malformed keys',
+          reason: keys
+            ? 'endpoint is not a public https URL'
+            : 'missing or malformed keys',
         });
         return;
       }
@@ -2713,11 +2716,46 @@ export class Notifier extends EventEmitter<NotifierEvents> {
  * most of what an observer wants to know. See the metadata note in SECURITY.md.
  */
 function isPushEndpoint(value: string): boolean {
+  let url: URL;
   try {
-    return new URL(value).protocol === 'https:';
+    url = new URL(value);
   } catch {
     return false;
   }
+  if (url.protocol !== 'https:') return false;
+
+  // The endpoint is chosen by the device, and the hub then POSTs to it on every
+  // alert with a signed VAPID header - so `https` alone made this a request emitter
+  // pointed wherever a paired device liked, including at anything on the hub's own
+  // network that it could never otherwise reach. A push service lives on the public
+  // internet under a hostname; an address literal, or a name for this machine, is
+  // not one and is refused.
+  const host = url.hostname.replace(/^\[|\]$/g, '');
+  if (isIP(host)) return isPublicAddress(host);
+  return !/^(localhost|.*\.localhost|.*\.local|.*\.internal|.*\.home\.arpa)$/i.test(host);
+}
+
+/** Whether an address literal is one the internet could route to. */
+function isPublicAddress(host: string): boolean {
+  if (isIPv4(host)) {
+    const parts = host.split('.').map(Number) as [number, number, number, number];
+    const [a, b] = parts;
+    if (a === 10 || a === 127 || a === 0) return false;
+    if (a === 172 && b >= 16 && b <= 31) return false;
+    if (a === 192 && b === 168) return false;
+    if (a === 169 && b === 254) return false;
+    if (a === 100 && b >= 64 && b <= 127) return false;
+    if (a >= 224) return false;
+    return true;
+  }
+
+  const lower = host.toLowerCase();
+  if (lower === '::' || lower === '::1') return false;
+  // Link-local, unique-local, and anything IPv4-mapped goes through the rules above.
+  if (/^fe[89ab]/.test(lower) || /^f[cd]/.test(lower)) return false;
+  const mapped = /^::ffff:(.+)$/.exec(lower);
+  if (mapped?.[1] && isIPv4(mapped[1])) return isPublicAddress(mapped[1]);
+  return true;
 }
 
 /**
