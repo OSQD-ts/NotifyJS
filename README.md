@@ -459,8 +459,10 @@ new Notifier({
 Notifications carry a monotonic sequence number. Each device records how far it
 has acknowledged, so a device that was offline gets what it missed on
 reconnect — filtered through its *current* role, so demoting a device narrows
-its backlog retroactively. `requireAck: true` keeps re-delivering until a human
-acknowledges it or the TTL expires.
+its backlog retroactively. `requireAck: true` keeps re-delivering until a
+device acknowledges it or the TTL expires — a device, not a person: every client
+here acks as soon as it has the frame, so this confirms the alert reached
+something that could show it rather than that somebody read it.
 
 A device returning from a long absence gets the most recent `replayLimit`
 notifications plus a note saying how many older ones were skipped, rather than

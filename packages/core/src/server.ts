@@ -75,6 +75,12 @@ export interface NotifyInput {
   tags?: string[];
   data?: Record<string, unknown>;
   actions?: NotificationAction[];
+  /**
+   * Keep re-delivering until a device acknowledges it, or the TTL expires.
+   *
+   * A device, not a person: every client acks on receipt. See
+   * `scheduleAckRetry`.
+   */
   requireAck?: boolean;
   ttl?: number;
   to?: Targeting;
@@ -2532,9 +2538,16 @@ export class Notifier extends EventEmitter<NotifierEvents> {
   }
 
   /**
-   * Re-sends an unacknowledged notification until somebody acks it, its TTL
-   * runs out, or we hit the attempt ceiling. This is what makes `requireAck`
-   * mean "a person saw this" rather than "a socket was open at the time".
+   * Re-sends an unacknowledged notification until some device acks it, its TTL
+   * runs out, or we hit the attempt ceiling.
+   *
+   * What this guarantees is that the alert reached a device that could show it -
+   * not that anybody looked. Every client here acknowledges as soon as it has the
+   * frame, and `SourceManager` deliberately acks even an alert the person's own
+   * severity floor hides from them, on the grounds that "the person chose not to
+   * see it, which is not the same as never having received it". So this is
+   * delivery confirmation with teeth, and a claim about a human being would need a
+   * second kind of acknowledgement that no client sends.
    *
    * Tracked hub-wide in `ackWaiters`, keyed by notification, rather than per
    * session: one acknowledgement from any entitled device is what settles an
