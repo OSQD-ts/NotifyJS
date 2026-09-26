@@ -23,9 +23,22 @@ import type { ClientStorage } from '@osqd/notifyjs-protocol';
 export function fileStorage(path: string): ClientStorage {
   const load = (): Record<string, string> => {
     if (!existsSync(path)) return {};
+    // Read and parse are kept apart, because only one of them means the file is
+    // broken. A read can fail for reasons that may well pass - permissions, a
+    // file owned by another account, too many open files, a transient I/O error -
+    // and moving the file aside for one of those would cause exactly the loss this
+    // guard exists to prevent.
+    let raw: string;
+    try {
+      raw = readFileSync(path, 'utf8');
+    } catch (err) {
+      say(`notifyjs: ${path} could not be read (${(err as Error).message})`);
+      return {};
+    }
+
     let parsed: unknown;
     try {
-      parsed = JSON.parse(readFileSync(path, 'utf8'));
+      parsed = JSON.parse(raw);
     } catch {
       // The damaged file is kept, not read past. Returning `{}` here made this
       // device look unpaired against *every* hub, and the next `set()` - the
@@ -34,7 +47,7 @@ export function fileStorage(path: string): ClientStorage {
       // `save()` promises the opposite: a keypair cannot be regenerated. So the
       // evidence is moved aside first, exactly as the hub's own store does with a
       // corrupt `store.json`.
-      return setAside('it could not be read');
+      return setAside('it could not be parsed');
     }
     // `JSON.parse('null')` succeeds and yields null, which then threw on every
     // read; an array or a number is no more usable.
@@ -44,17 +57,38 @@ export function fileStorage(path: string): ClientStorage {
     return parsed as Record<string, string>;
   };
 
+  /**
+   * Says something where somebody might see it.
+   *
+   * Wrapped, because a packaged GUI app may have no stderr at all and writing to
+   * one that fails would throw out of `load()` - turning every credential read
+   * into a rejected promise. `console.error` as well, since that is what reaches
+   * an Electron main process's log.
+   */
+  const say = (line: string): void => {
+    try {
+      process.stderr.write(`${line}\n`);
+    } catch {
+      /* no stderr: a packaged windowed application */
+    }
+    try {
+      console.error(line);
+    } catch {
+      /* nothing to write to at all */
+    }
+  };
+
   /** Renames a file that cannot be used, and says where it went. */
   const setAside = (why: string): Record<string, string> => {
     const kept = `${path}.corrupt-${Date.now()}`;
     try {
       renameSync(path, kept);
-      process.stderr.write(
-        `notifyjs: ${path} was ignored because ${why}; it has been kept at ${kept}\n` +
-          'This device will need pairing again. The old file still holds its keys.\n',
+      say(
+        `notifyjs: ${path} was ignored because ${why}; it has been kept at ${kept}. ` +
+          'This device will need pairing again, and the old file still holds its keys.',
       );
     } catch {
-      process.stderr.write(`notifyjs: ${path} cannot be read or moved aside (${why})\n`);
+      say(`notifyjs: ${path} cannot be used (${why}) and could not be moved aside`);
     }
     return {};
   };

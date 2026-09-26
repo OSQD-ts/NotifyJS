@@ -275,11 +275,39 @@ function defaultStorage(): ClientStorage {
   const file = join(homedir(), '.notifyjs', 'credentials.json');
   const load = (): Record<string, string> => {
     if (!existsSync(file)) return {};
+
+    // Read and parse apart, and a file that cannot be parsed is moved aside
+    // rather than read as empty. This is the third copy of this loader - the CLI
+    // and the desktop app have the others - and it is the one that matters most,
+    // because it points at *the CLI's own file*, as the comment above says. Read
+    // as empty, the next `set()` here (load, mutate, save) wrote a file holding
+    // only the new key and destroyed the seeds `notifyjs pair` had put there.
+    let raw: string;
     try {
-      return JSON.parse(readFileSync(file, 'utf8')) as Record<string, string>;
+      raw = readFileSync(file, 'utf8');
     } catch {
+      // Might well pass next time - permissions, a transient error - so nothing
+      // is touched.
       return {};
     }
+
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      parsed = undefined;
+    }
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      return parsed as Record<string, string>;
+    }
+
+    const kept = `${file}.corrupt-${Date.now()}`;
+    try {
+      renameSync(file, kept);
+    } catch {
+      /* best effort; the point is not to write over it */
+    }
+    return {};
   };
   const save = (data: Record<string, string>) => {
     mkdirSync(dirname(file), { recursive: true, mode: 0o700 });
