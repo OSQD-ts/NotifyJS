@@ -48,6 +48,11 @@ export interface HubState {
    */
   answeredCallId?: string;
   prefs: ClientPreferences;
+  /**
+   * Set when a preference could not be written to storage, so the UI can say
+   * that a setting applies now but will not survive a restart.
+   */
+  prefsUnsaved?: string;
   loaded: boolean;
 }
 
@@ -377,7 +382,16 @@ class HubClient {
   async savePrefs(patch: Partial<ClientPreferences>): Promise<void> {
     const next = normalizePreferences({ ...this.state.prefs, ...patch }, this.state.prefs.deviceName);
     this.set({ prefs: next });
-    await this.storage.set(PREFS_KEY, JSON.stringify(next));
+    try {
+      await this.storage.set(PREFS_KEY, JSON.stringify(next));
+    } catch (err) {
+      // The keystore can refuse - locked just after boot, or corrupt - and the
+      // callers are `onChange` handlers that pass this promise nowhere, so the
+      // rejection used to surface as an unhandled one while the switch sat there
+      // looking saved. The setting still applies to this process; what is lost is
+      // its persistence, and that is worth saying rather than swallowing.
+      this.set({ prefsUnsaved: err instanceof Error ? err.message : String(err) });
+    }
   }
 
   clearFeed(): void {

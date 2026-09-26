@@ -23,6 +23,8 @@ import { SEVERITY_COLORS, useTheme } from './theme';
 
 interface Props {
   prefs: ClientPreferences;
+  /** Set when a setting applied but could not be written to storage. */
+  prefsUnsaved?: string;
   sources: SourceState[];
   onChange(patch: Partial<ClientPreferences>): void;
   onAddSource(): void;
@@ -33,6 +35,7 @@ interface Props {
 
 export function SettingsScreen({
   prefs,
+  prefsUnsaved,
   sources,
   onChange,
   onAddSource,
@@ -114,6 +117,18 @@ export function SettingsScreen({
       </View>
 
       <ScrollView contentContainerStyle={styles.body}>
+        {prefsUnsaved ? (
+          <View style={[styles.warn, { borderColor: SEVERITY_COLORS.warning, marginTop: 14 }]}>
+            <Text style={[styles.warnTitle, { color: SEVERITY_COLORS.warning }]}>
+              Settings are not being saved
+            </Text>
+            <Text style={[styles.rowHint, { color: t.muted }]}>
+              Changes apply while the app is running, but the phone refused to store them, so they
+              will be back as they were after a restart. {prefsUnsaved}
+            </Text>
+          </View>
+        ) : null}
+
         <Section theme={t} title={`Sources (${sources.length})`}>
           {sources.length === 0 ? (
             <Text style={[styles.empty, { color: t.muted }]}>

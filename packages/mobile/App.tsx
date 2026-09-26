@@ -41,7 +41,19 @@ function hostOf(url: string): string {
 
 export default function App() {
   const t = useTheme();
-  const { manager, sources, feed, activeCall, callAnswered, prefs, loaded, savePrefs, closeCall, markAnswered } =
+  const {
+    manager,
+    sources,
+    feed,
+    activeCall,
+    callAnswered,
+    prefs,
+    prefsUnsaved,
+    loaded,
+    savePrefs,
+    closeCall,
+    markAnswered,
+  } =
     useSources();
 
   const [view, setView] = useState<View_>('feed');
@@ -274,6 +286,7 @@ export default function App() {
         <StatusBar style={t.isDark ? 'light' : 'dark'} />
         <SettingsScreen
           prefs={prefs}
+          prefsUnsaved={prefsUnsaved}
           sources={sources}
           onChange={savePrefs}
           onAddSource={() => {

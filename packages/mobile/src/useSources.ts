@@ -42,6 +42,8 @@ export function useSources() {
     /** True when this call was already answered from the notification. */
     callAnswered: hub.callAnswered,
     prefs: state.prefs,
+    /** Set when a setting could not be written to storage. */
+    prefsUnsaved: state.prefsUnsaved,
     loaded: state.loaded,
     savePrefs,
     clearFeed,
