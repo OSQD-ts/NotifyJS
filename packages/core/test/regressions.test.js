@@ -2585,3 +2585,48 @@ test('a number that would switch off what it configures is refused by name', asy
 
   rmSync(dir, { recursive: true, force: true });
 });
+
+test('a freshly paired device is not handed the backlog from before it existed', async () => {
+  // The hub enrols a new device at the head on purpose, and the client undid it:
+  // `ackedSeq` was 0, so the `sync()` every app sends on `ready` - and on every
+  // foreground and wake - asked for everything from the beginning. A new phone
+  // rang for incidents that were over before anybody paired it.
+  const { NotifyClient, memoryStorage } = await import('@osqd/notifyjs-protocol');
+  const dir = tmp('fresh-cursor');
+  const hub = hostileHub(dir, { flood: { enabled: false } });
+  await hub.start();
+
+  for (let i = 0; i < 5; i += 1) {
+    await hub.notify({ title: `old incident ${i}`, severity: 'critical', channel: 'ops' });
+  }
+
+  const arrived = [];
+  const client = new NotifyClient({
+    url: `ws://127.0.0.1:${Number(new URL(hub.url).port)}`,
+    crypto: nodeCrypto,
+    storage: memoryStorage(),
+    createSocket: (url) => new WebSocket(url),
+    deviceName: 'new-phone',
+    platform: 'node-test',
+  });
+  client.on('notification', (n) => arrived.push(n.title));
+
+  const ready = new Promise((resolve) => client.on('ready', resolve));
+  await client.pair(hub.createPairingCode({ role: 'oncall' }).code);
+  await ready;
+
+  // What every app does on ready, on foreground and on wake.
+  client.sync();
+  await delay(300);
+
+  assert.deepEqual(arrived, [], 'nothing from before the device was paired');
+
+  // An alert raised now still arrives, and is still replayed after a reconnect.
+  await hub.notify({ title: 'a real incident', severity: 'critical', channel: 'ops' });
+  await delay(200);
+  assert.deepEqual(arrived, ['a real incident']);
+
+  client.disconnect();
+  await hub.stop();
+  rmSync(dir, { recursive: true, force: true });
+});

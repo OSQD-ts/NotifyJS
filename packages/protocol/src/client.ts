@@ -130,6 +130,13 @@ export class NotifyClient {
   private keys: KeyPair | undefined;
   private deviceId: string | undefined;
   private ackedSeq = 0;
+  /**
+   * Whether this connection is the one that enrolled the device.
+   *
+   * Only that connection may move the replay cursor to the hub's head, so a
+   * device with a real backlog is never skipped past it.
+   */
+  private freshlyPaired = false;
   private backoff = 0;
   private reconnectTimer: ReturnType<typeof setTimeout> | undefined;
   private closedByUs = false;
@@ -243,6 +250,7 @@ export class NotifyClient {
     this.deviceId = undefined;
     this.keys = undefined;
     this.ackedSeq = 0;
+    this.freshlyPaired = false;
     // The watchdog contract goes with them. A revoked device that kept its
     // spec would keep raising "the service is down" about a hub it is no
     // longer entitled to hear from - and would leave the key behind in
@@ -434,6 +442,7 @@ export class NotifyClient {
         return;
 
       case 'paired':
+        this.freshlyPaired = true;
         this.deviceId = msg.deviceId;
         this.role = msg.role;
         this.capabilities = msg.capabilities;
@@ -446,6 +455,25 @@ export class NotifyClient {
         this.backoff = 0;
         this.role = msg.role;
         this.capabilities = msg.capabilities;
+
+        // A device that has just been enrolled starts where the hub says it is.
+        // The hub deliberately puts a new device at the head - "a new device
+        // gets what happens next, not a replay of every incident from before it
+        // existed" - and this client undid that on its first `sync()`, which
+        // every app sends on `ready`, on returning to the foreground and on
+        // waking: `ackedSeq` was 0, so a freshly paired phone was handed up to
+        // `replayLimit` alerts from before it belonged to the hub, each one
+        // rendered, sounded and popped.
+        //
+        // Only the connection that did the pairing may do this. A device
+        // reconnecting has a cursor that means something, and moving it forward
+        // here would silently discard exactly the backlog replay exists for.
+        if (this.freshlyPaired && typeof msg.seq === 'number' && msg.seq > this.ackedSeq) {
+          this.ackedSeq = msg.seq;
+          void this.opts.storage.set(this.key('ackedSeq'), String(msg.seq)).catch(() => {});
+        }
+        this.freshlyPaired = false;
+
         this.startKeepalive();
         this.setStatus('ready');
         this.emit('ready', msg);
