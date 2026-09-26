@@ -132,3 +132,25 @@ export function nextRoleChoice(previous: string, roles: string[]): string {
   if (roles.includes('viewer')) return 'viewer';
   return roles[0] ?? 'viewer';
 }
+
+/**
+ * Repopulates the pairing-code role selector, keeping the operator's choice.
+ *
+ * The whole operation lives here rather than half of it, because the half that
+ * broke was the *ordering*: reading `value` after `replaceChildren` reads the
+ * first option, and the first default role is `admin`. With only the decision
+ * extracted, a test could not see that - and the ordering is not something a
+ * reviewer notices twice.
+ */
+export function populateRoleSelect(select: HTMLSelectElement, roles: string[]): void {
+  const previous = select.value;
+  select.replaceChildren(
+    ...roles.map((role) => {
+      const option = document.createElement('option');
+      option.value = role;
+      option.textContent = role;
+      return option;
+    }),
+  );
+  select.value = nextRoleChoice(previous, roles);
+}

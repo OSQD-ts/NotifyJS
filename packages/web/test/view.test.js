@@ -257,3 +257,22 @@ test('a refreshed role selector never silently lands on admin', () => {
     'with no viewer role at all there is nothing safer to pick',
   );
 });
+
+test('repopulating the role selector keeps the choice and never lands on admin', () => {
+  // The half of this that broke was the ordering - reading `value` after
+  // `replaceChildren` reads the first option, and the first default role is
+  // `admin` - so the whole operation is tested here, not just the decision.
+  const select = document.createElement('select');
+
+  view.populateRoleSelect(select, ['admin', 'oncall', 'viewer']);
+  assert.equal(select.value, 'viewer', 'an untouched selector starts somewhere safe');
+  assert.equal(select.options.length, 3);
+
+  select.value = 'oncall';
+  view.populateRoleSelect(select, ['admin', 'oncall', 'viewer']);
+  assert.equal(select.value, 'oncall', 'and a choice survives a refresh');
+
+  select.value = 'oncall';
+  view.populateRoleSelect(select, ['admin', 'viewer']);
+  assert.equal(select.value, 'viewer', 'a role that no longer exists falls back');
+});

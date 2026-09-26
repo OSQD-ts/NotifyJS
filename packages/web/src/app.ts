@@ -19,7 +19,7 @@ import {
   announcementFor,
   formatCodeInput,
   matchesFilter,
-  nextRoleChoice,
+  populateRoleSelect,
   qrDataUrl,
   renderNotificationItem,
 } from './view.js';
@@ -579,20 +579,8 @@ async function refreshDevices(): Promise<void> {
 
 async function refreshRoles(): Promise<void> {
   const data = await client.admin('roles.list');
-  const select = $<HTMLSelectElement>('code-role');
-  // Read before the options are replaced: replacing them resets the selection to
-  // the first entry, so reading it afterwards is reading `admin`.
-  const previous = select.value;
-  select.replaceChildren(
-    ...data.roles.map((role) => {
-      const opt = document.createElement('option');
-      opt.value = role.name;
-      opt.textContent = role.name;
-      return opt;
-    }),
-  );
-  select.value = nextRoleChoice(
-    previous,
+  populateRoleSelect(
+    $<HTMLSelectElement>('code-role'),
     data.roles.map((r) => r.name),
   );
 }
