@@ -2666,8 +2666,34 @@ function webPushTargets(
   return targets;
 }
 
-/** Stamped in at bundle time; falls back for source checkouts. */
-const NOTIFYJS_VERSION = process.env.NOTIFYJS_VERSION ?? '0.1.0';
+/**
+ * The version this build reports, and how it knows.
+ *
+ * `process.env.NOTIFYJS_VERSION` is stamped in at bundle time, which covers the
+ * released binaries and the container. Everything installed from npm has no such
+ * stamp, and the literal that used to stand in its place meant an
+ * `npm i -g @osqd/notifyjs-cli` hub reported `0.1.0` for ever: `serve` asked the
+ * release feed whether anything newer existed, was told yes on every start for
+ * the rest of the project's life, and the dashboard's own upgrade nudge compared
+ * a constant and could never fire. Read from the manifest beside the code
+ * instead, which is the version that was actually published.
+ */
+function ownVersion(fallback: string): string {
+  const stamped = process.env.NOTIFYJS_VERSION;
+  if (stamped) return stamped;
+  try {
+    // `dist/` sits one level under the package root. `createRequire` rather than
+    // a JSON import, which needs an attribute older runtimes reject outright.
+    const version = createRequire(import.meta.url)('../package.json').version as unknown;
+    return typeof version === 'string' && version ? version : fallback;
+  } catch {
+    // A checkout run straight from source, or a layout nobody expected: saying
+    // the wrong version is better than refusing to start over it.
+    return fallback;
+  }
+}
+
+const NOTIFYJS_VERSION = ownVersion('0.1.0');
 
 /** How precisely an ingest token's last use is recorded. See `handleIngest`. */
 const INGEST_LAST_USED_RESOLUTION_MS = 60_000;
