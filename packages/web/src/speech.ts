@@ -22,6 +22,14 @@ export class Ringer {
   }
 
   start(ringSeconds?: number): void {
+    // Already ringing: the tone carries on, but this call's own deadline
+    // replaces the one it would have inherited. A second call arriving late in
+    // the first one's window was cut off when that window expired - the first
+    // call's `ringSeconds`, not its own - leaving a call on screen, unanswered
+    // and silent, for the rest of the hub's ring. The Android ringer has always
+    // re-posted the deadline for the call now ringing.
+    if (this.deadline) clearTimeout(this.deadline);
+    this.deadline = setTimeout(() => this.stop(), maxRingMs(ringSeconds));
     if (this.timer) return;
     const beep = () => {
       if (!this.ctx || this.ctx.state !== 'running') return;
@@ -36,8 +44,6 @@ export class Ringer {
     if (this.ctx?.state === 'suspended') void this.ctx.resume().then(beep, () => {});
     beep();
     this.timer = setInterval(beep, 2000);
-
-    this.deadline = setTimeout(() => this.stop(), maxRingMs(ringSeconds));
   }
 
   stop(): void {
