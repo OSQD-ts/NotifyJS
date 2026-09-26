@@ -15,6 +15,7 @@ object WatchState {
   private const val PREFS = "notifyjs.watch"
   private const val KEY_WANTED = "wanted"
   private const val KEY_HUB = "hubName"
+  private const val KEY_RESUME_SHOWN = "resumeNoticeShown"
 
   private fun prefs(context: Context) =
     context.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
@@ -35,6 +36,20 @@ object WatchState {
   }
 
   fun isWanted(context: Context): Boolean = prefs(context).getBoolean(KEY_WANTED, false)
+
+  /**
+   * Whether the "not watching" notice is already standing.
+   *
+   * So the alarm posts it once rather than every nine minutes: starting the service
+   * cancels the notice before it tries, so re-posting on each refusal took it down
+   * and put it back for as long as the refusal lasted.
+   */
+  fun resumeNoticeShown(context: Context): Boolean =
+    prefs(context).getBoolean(KEY_RESUME_SHOWN, false)
+
+  fun setResumeNoticeShown(context: Context, shown: Boolean) {
+    prefs(context).edit().putBoolean(KEY_RESUME_SHOWN, shown).apply()
+  }
 
   fun hubName(context: Context): String = prefs(context).getString(KEY_HUB, null) ?: "NotifyJS"
 }

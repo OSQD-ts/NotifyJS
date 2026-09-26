@@ -100,23 +100,35 @@ class WatchAlarmReceiver : BroadcastReceiver() {
     // uses when that is refused - an inexact alarm is not one of the exemptions
     // that permits starting a foreground service from the background, so being
     // refused is the expected case rather than the surprising one.
-    if (wanted && !WatchEvents.hasListener()) {
+    // Nothing wanted, nothing to do. `stop()` cancels the alarm, but one that was
+    // already in flight arrives afterwards, and re-arming here kept the nine-minute
+    // cycle alive for an install that had switched watching off.
+    if (!wanted) return
+
+    if (!WatchEvents.hasListener()) {
       val started = runCatching {
         NotifyjsWatchService.start(context, WatchState.hubName(context))
       }.isSuccess
-      if (!started) {
+
+      if (started) {
+        WatchState.setResumeNoticeShown(context, false)
+      } else if (!WatchState.resumeNoticeShown(context)) {
+        // Once, not every nine minutes. `start()` cancels the standing notice
+        // before it tries, so posting it again on each refusal took the notice down
+        // and put it back for as long as the refusal lasted - which on Android 12
+        // and later is the expected case, since an inexact alarm is not one of the
+        // exemptions that permits starting a foreground service from the
+        // background.
         CallNotification.ensureChannels(context)
         CallNotification.showResume(context)
+        WatchState.setResumeNoticeShown(context, true)
       }
-      WatchAlarm.schedule(context)
-      return
+    } else {
+      WatchEvents.wake(context, "alarm")
     }
 
-    if (wanted) WatchEvents.wake(context, "alarm")
-
-    // Re-armed even if nothing was listening. The alarm is what makes the app
-    // recoverable at all, so the one thing it must never do is stop - but only
-    // while watching is still wanted; `stop()` cancels it otherwise.
+    // The alarm is what makes the app recoverable at all, so while watching is
+    // wanted the one thing it must never do is stop.
     WatchAlarm.schedule(context)
   }
 }
