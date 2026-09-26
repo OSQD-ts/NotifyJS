@@ -2404,7 +2404,7 @@ export class Notifier extends EventEmitter<NotifierEvents> {
       actions: input.actions?.slice(0, 5),
       requireAck: input.requireAck,
       ttl: input.ttl,
-      to: input.to,
+      to: sanitizeTargeting(input.to),
       resolveKey: input.resolveKey,
     };
   }
@@ -2437,7 +2437,7 @@ export class Notifier extends EventEmitter<NotifierEvents> {
         this.opts.defaultRingSeconds,
       ),
       repeat: input.repeat,
-      to: input.to,
+      to: sanitizeTargeting(input.to),
       escalate: input.escalate,
       policy: input.policy,
     };
@@ -2834,9 +2834,48 @@ function randomId(bytes: number): string {
 
 /** Whether a device satisfies an explicit role/device restriction. */
 function matchesTargeting(to: Targeting, deviceId: string, role: string): boolean {
-  if (to.devices?.length && !to.devices.includes(deviceId)) return false;
-  if (to.roles?.length && !to.roles.includes(role)) return false;
+  // Guarded like `canDeliver`: an unreadable restriction matches nothing.
+  if (to.devices !== undefined) {
+    if (!Array.isArray(to.devices)) return false;
+    if (to.devices.length > 0 && !to.devices.includes(deviceId)) return false;
+  }
+  if (to.roles !== undefined) {
+    if (!Array.isArray(to.roles)) return false;
+    if (to.roles.length > 0 && !to.roles.includes(role)) return false;
+  }
   return true;
+}
+
+/**
+ * Validates an explicit device or role restriction.
+ *
+ * Refused rather than repaired, and refused here, because this value is
+ * persisted with the notification: `notify()` writes to history *before* it
+ * delivers. A `to` of `{ devices: { length: 1 } }` - accepted from the lowest
+ * publishing capability there is, and one an HTTP ingest token holds - was
+ * stored verbatim, and `canDeliver` then threw on `.includes` inside `deliver()`
+ * and, far worse, inside `replay()`. Every client syncs on `ready`, on returning
+ * to the foreground and on waking, so every device on the hub was closed with an
+ * internal error and reconnected into the same failure, indefinitely, across
+ * restarts - recoverable only by editing `history.jsonl` by hand, while the hub
+ * went on looking healthy because new alerts still delivered.
+ */
+function sanitizeTargeting(to: Targeting | undefined): Targeting | undefined {
+  if (to === undefined || to === null) return undefined;
+  if (typeof to !== 'object' || Array.isArray(to)) {
+    throw new Error('`to` must be an object with `devices` or `roles`');
+  }
+
+  const clean: Targeting = {};
+  for (const key of ['devices', 'roles'] as const) {
+    const list = (to as Record<string, unknown>)[key];
+    if (list === undefined || list === null) continue;
+    if (!Array.isArray(list) || list.some((entry) => typeof entry !== 'string')) {
+      throw new Error(`\`to.${key}\` must be an array of strings`);
+    }
+    clean[key] = (list as string[]).slice(0, 200);
+  }
+  return clean.devices || clean.roles ? clean : undefined;
 }
 
 /** Ceiling for a heartbeat that arrived over the wire. */

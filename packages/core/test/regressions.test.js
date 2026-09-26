@@ -3062,3 +3062,75 @@ test('a restore will not land on logs that are still there', async () => {
   rmSync(source, { recursive: true, force: true });
   rmSync(target, { recursive: true, force: true });
 });
+
+test('a malformed device restriction is refused, and never poisons the store', async () => {
+  // `to` was copied from the frame and persisted before delivery, and
+  // `canDeliver` then called `.includes` on it. `{ devices: { length: 1 } }` -
+  // accepted from the lowest publishing capability there is - threw inside
+  // `deliver()` and, far worse, inside `replay()`: every client syncs on `ready`,
+  // on foregrounding and on waking, so every device was closed with an internal
+  // error and reconnected into the same failure, across restarts, while the hub
+  // went on looking healthy because new alerts still delivered.
+  const dir = tmp('poison-to');
+  const hub = hostileHub(dir);
+  await hub.start();
+  const publisher = await pairRaw(hub, 'admin', 'publisher');
+
+  const refused = await publisher.ask('notify.send', {
+    title: 'poison',
+    channel: 'ops',
+    to: { devices: { length: 1 } },
+  });
+  assert.equal(refused.ok, false, 'refused at the boundary');
+  assert.match(refused.error, /to\.devices/);
+  assert.equal(hub.history().length, 0, 'and nothing was written to the store');
+
+  // Targeting that is well formed still restricts.
+  const phone = await pairRaw(hub, 'oncall', 'phone');
+  await hub.notify({ title: 'for the phone', severity: 'critical', channel: 'ops', to: { devices: [phone.deviceId] } });
+  await delay(200);
+  assert.equal(hub.history().length, 1);
+
+  publisher.ws.close();
+  phone.ws.close();
+  await hub.stop();
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test('a poisoned alert already in the store does not disconnect every device', async () => {
+  // Defence in depth for the hub that already has one: `replay()` runs the
+  // delivery check against whatever the store holds, and a throw there closed the
+  // session with an internal error - which the client then reconnected into.
+  const dir = tmp('poison-stored');
+  writeFileSync(
+    join(dir, 'history.jsonl'),
+    `${JSON.stringify({
+      id: 'poisoned',
+      seq: 1,
+      ts: Date.now(),
+      channel: 'ops',
+      severity: 'critical',
+      title: 'already in the store',
+      to: { devices: { length: 1 } },
+    })}\n`,
+  );
+
+  const hub = hostileHub(dir);
+  await hub.start();
+  const device = await pairRaw(hub, 'oncall', 'phone');
+
+  // What every client does on ready, on foreground and on wake.
+  device.send({ v: 1, t: 'sync', since: 0 });
+  await delay(300);
+
+  const alive = await Promise.race([
+    device.ask('heartbeats.list', {}).then(() => 'answered'),
+    delay(1000).then(() => 'silent'),
+  ]);
+  assert.equal(alive, 'answered', 'the session survived the replay');
+  assert.equal(device.ws.readyState, 1, 'and was not closed');
+
+  device.ws.close();
+  await hub.stop();
+  rmSync(dir, { recursive: true, force: true });
+});
