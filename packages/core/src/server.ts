@@ -2380,7 +2380,21 @@ export class Notifier extends EventEmitter<NotifierEvents> {
       lang: input.lang,
       rate: input.rate,
       pitch: input.pitch,
-      ringSeconds: input.ringSeconds ?? this.opts.defaultRingSeconds,
+      // Clamped like every other number a timer will consume. This one reaches
+      // `setTimeout(ringSeconds * 1000)` for every rung of the ladder, and it
+      // arrived straight off the wire: `"soon"` multiplied out to NaN, which
+      // `setTimeout` fires at 1ms, so each phone got a `call` frame followed
+      // immediately by `call.cancel: missed`, nothing rang audibly, and the
+      // caller was told the page was missed. A negative value did the same, and
+      // `1e12` - which reads like "ring for a long time" - overflowed the timer
+      // into the same instant collapse. `sanitizePolicy` already clamps a
+      // policy's own steps; this is the value they fall back to.
+      ringSeconds: clampNumber(
+        input.ringSeconds,
+        1,
+        MAX_RING_SECONDS,
+        this.opts.defaultRingSeconds,
+      ),
       repeat: input.repeat,
       to: input.to,
       escalate: input.escalate,

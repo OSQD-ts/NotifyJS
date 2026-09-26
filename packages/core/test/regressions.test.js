@@ -2675,3 +2675,44 @@ test('a socket that never opens is given up on rather than waited on for ever', 
 
   client.disconnect();
 });
+
+test('a ring time off the wire cannot collapse the whole ladder', async () => {
+  // `ringSeconds` went from the frame into `setTimeout(ringSeconds * 1000)` for
+  // every rung, unclamped: `"soon"` is NaN, which fires at 1ms, so the phone got
+  // a call frame followed at once by `call.cancel: missed`, nothing rang, and
+  // the caller was told the page was missed. `1e12` reads like "ring for a long
+  // time" and overflowed into the same instant collapse.
+  const dir = tmp('ring-clamp');
+  const hub = hostileHub(dir);
+  await hub.start();
+  // Two devices: `ask()` consumes frames until the admin result, so the call
+  // frame has to arrive somewhere else to be looked at.
+  const caller = await pairRaw(hub, 'admin', 'caller');
+  const phone = await pairRaw(hub, 'oncall', 'phone');
+
+  for (const asked of ['soon', -5, 1e12, 0]) {
+    const placed = await caller.ask('call.place', {
+      message: 'the disk is full',
+      ringSeconds: asked,
+    });
+    assert.equal(placed.ok, true, `ringSeconds: ${asked}`);
+
+    let frame;
+    for (let i = 0; i < 8 && !frame; i += 1) {
+      const next = await Promise.race([phone.next(), delay(500).then(() => undefined)]);
+      if (!next) break;
+      if (next.t === 'call') frame = next;
+    }
+    assert.ok(frame, `a call still rings for ringSeconds: ${asked}`);
+    assert.ok(
+      frame.c.ringSeconds >= 1 && frame.c.ringSeconds <= 600,
+      `and for a usable length, got ${frame.c.ringSeconds}`,
+    );
+    hub.cancelCall(frame.c.id);
+  }
+
+  caller.ws.close();
+  phone.ws.close();
+  await hub.stop();
+  rmSync(dir, { recursive: true, force: true });
+});
