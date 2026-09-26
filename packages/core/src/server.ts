@@ -380,9 +380,25 @@ export class Notifier extends EventEmitter<NotifierEvents> {
     this.store.touchHistory();
 
     const ids = matched.map((n) => n.id);
+
+    // Filtered per device, like every other fan-out in this file. This was the one
+    // that was not: it sent every resolved id and the `resolveKey` to every
+    // connected device, and resolve keys are written to be descriptive -
+    // `incident:ceo-laptop`, `heartbeat:nightly-payroll` - so a role excluded from a
+    // channel learned the names of incidents on it anyway. The rule this breaks is
+    // stated plainly in SECURITY.md: reading is filtered the same way as delivery,
+    // or the capability that puts a device on the receiving end of one channel is a
+    // way to read every other.
+    //
+    // A device whose role has narrowed since it saw the alert no longer gets the
+    // resolution, which is the same retroactive narrowing replay already applies.
     for (const session of this.sessions.values()) {
       if (session.state !== 'ready') continue;
-      session.send({ v: PROTOCOL_VERSION, t: 'resolve', ids, key: spec.key });
+      const visible = matched
+        .filter((n) => this.allowed(session, n.channel, n.severity, n.to, false))
+        .map((n) => n.id);
+      if (visible.length === 0) continue;
+      session.send({ v: PROTOCOL_VERSION, t: 'resolve', ids: visible, key: spec.key });
     }
 
     // A resolved alert must stop nagging, or `requireAck` outlives the incident.
@@ -892,7 +908,9 @@ export class Notifier extends EventEmitter<NotifierEvents> {
             return list;
           })(input.allowIps.filter((ip) => typeof ip === 'string').slice(0, 50))
         : undefined,
-      label: typeof input.label === 'string' ? input.label.slice(0, 64) : undefined,
+      // Through the same filter as a name: a label is printed by `notifyjs token
+      // list` and by the dashboard.
+      label: input.label === undefined ? undefined : sanitizeName(input.label),
     });
     this.audit('pair.created', { detail: { role: roleName, expiresAt } });
 
@@ -1031,6 +1049,34 @@ export class Notifier extends EventEmitter<NotifierEvents> {
       'Content-Security-Policy',
       "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self' ws: wss:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
     );
+
+    // The operator's allow and deny lists, and any ban, apply to this port as a
+    // whole - not only to the WebSocket upgrade and the HTTP publish, which were
+    // the only two paths that consulted the guard. A hub locked to one subnet
+    // still served `/hub.json`, `/metrics` and the entire dashboard to anybody who
+    // asked, and a banned address kept all of that too: everything an attacker
+    // wants for reconnaissance, including a metrics endpoint that reports how their
+    // own attempt is going.
+    // The publish endpoints check the guard themselves and answer in their own
+    // shape - deliberately not distinguishing a ban from a deny list, so a caller
+    // cannot tell which it tripped - so they are left to it.
+    const publishing = url.pathname === '/api/notify' || url.pathname === '/api/call';
+    const ip = this.clientIp(req);
+    if (!publishing && this.guard.refused(ip)) {
+      this.audit('http.refused', { ip, detail: { path: url.pathname } });
+      res.writeHead(403, { 'content-type': 'text/plain' });
+      res.end('Forbidden\n');
+      return;
+    }
+    const banned = publishing ? 0 : this.guard.bannedFor(ip);
+    if (banned > 0) {
+      res.writeHead(429, {
+        'content-type': 'text/plain',
+        'retry-after': String(Math.ceil(banned / 1000)),
+      });
+      res.end('Too Many Requests\n');
+      return;
+    }
 
     if (url.pathname === '/health') {
       res.writeHead(200, { 'content-type': 'application/json' });
@@ -1437,7 +1483,11 @@ export class Notifier extends EventEmitter<NotifierEvents> {
       id,
       hash,
       role: input.role,
-      label: input.label,
+      // Filtered here, where every caller passes through - the admin path filtered
+      // its own copy and an embedding application's did not, and this label is
+      // printed by `notifyjs token list`, where an escape sequence can redraw the
+      // row above and make a live token look like a revoked one.
+      label: input.label === undefined ? undefined : sanitizeMessage(input.label, 120) || undefined,
       createdAt: Date.now(),
     });
     this.audit('ingest.token.created', { detail: { token: id, role: input.role } });
@@ -2263,7 +2313,7 @@ export class Notifier extends EventEmitter<NotifierEvents> {
           // a role you do not hold is privilege escalation with an extra step.
           const wanted = String(args.role ?? 'viewer');
           this.assertMayGrantRole(session, role, wanted);
-          const label = typeof args.label === 'string' ? args.label.slice(0, 120) : undefined;
+          const label = typeof args.label === 'string' ? args.label : undefined;
           return reply(true, this.createIngestToken({ role: wanted, label }));
         }
         case 'ingest.list':
@@ -2460,7 +2510,7 @@ export class Notifier extends EventEmitter<NotifierEvents> {
       channel: sanitizeChannel(input.channel),
       severity: coerceSeverity(input.severity, 'critical'),
       from: sanitizeName(input.from) || this.opts.name,
-      message: String(input.message ?? '').slice(0, 2000),
+      message: sanitizeMessage(input.message, 2000),
       lang: input.lang,
       rate: input.rate,
       pitch: input.pitch,
@@ -3158,6 +3208,32 @@ function isIpAddress(value: string): boolean {
  * control characters keeps a device from smuggling ANSI escapes into an
  * operator's terminal or breaking a log line in two.
  */
+/**
+ * Text that will reach somebody's terminal, with the control characters removed.
+ *
+ * `sanitizeName` does this for names and channels, and SECURITY.md says titles and
+ * bodies are handled at the CLI - which left a call's spoken message and an ingest
+ * token's label as the two strings that reached a terminal raw. An escape sequence in
+ * a call message clears the operator's screen and repaints whatever it likes:
+ * `notifyjs listen` prints it the moment a call arrives, which is exactly when
+ * somebody is looking. Newlines are kept, because a message may legitimately have
+ * them and they cannot reposition a cursor.
+ */
+function sanitizeMessage(value: unknown, limit: number): string {
+  if (typeof value !== 'string') return '';
+  let out = '';
+  for (const ch of value) {
+    const code = ch.codePointAt(0) ?? 0;
+    if (ch === '\n') {
+      out += ch;
+      continue;
+    }
+    if (code < 0x20 || code === 0x7f || (code >= 0x80 && code <= 0x9f)) continue;
+    out += ch;
+  }
+  return out.slice(0, limit);
+}
+
 function sanitizeName(value: unknown): string {
   if (typeof value !== 'string') return '';
   let out = '';

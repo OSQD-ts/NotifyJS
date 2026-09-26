@@ -3358,3 +3358,82 @@ test('a hub started a second time still writes to disk', async () => {
   await hub.stop();
   rmSync(dir, { recursive: true, force: true });
 });
+
+test('a denied address gets nothing over HTTP either', async () => {
+  // The allow and deny lists, and every ban, were consulted on the WebSocket
+  // upgrade and on an HTTP publish - and nowhere else. So a hub locked to one subnet
+  // still served `/hub.json`, `/metrics` and the whole dashboard to anybody who
+  // asked, and a banned address kept all of it: the hub's name, its serverId, device
+  // counts, auth-failure and ban counters - which is a live readout of how an
+  // attacker's own attempt is going.
+  const dir = tmp('http-guard');
+  const hub = new Notifier({
+    port: 0,
+    storeDir: dir,
+    dashboard: false,
+    logger: false,
+    // Nothing on this machine is in that range, so we are the denied case.
+    security: { allowIps: ['10.99.0.0/24'] },
+  });
+  await hub.start();
+
+  for (const path of ['/health', '/hub.json', '/metrics']) {
+    const res = await fetch(`${hub.dashboardUrl}${path}`);
+    assert.equal(res.status, 403, `${path} is refused`);
+  }
+
+  await hub.stop();
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test('a resolve tells each device only about alerts it could see', async () => {
+  // The one fan-out with no role filter: every resolved id and the `resolveKey` went
+  // to every connected device. Resolve keys are written to be descriptive, so a role
+  // excluded from a channel learned the names of incidents on it anyway.
+  const dir = tmp('resolve-leak');
+  const hub = hostileHub(dir);
+  await hub.start();
+
+  hub.upsertRole({
+    name: 'public-only',
+    channels: ['public.*'],
+    minSeverity: 'info',
+    capabilities: ['notify.receive', 'notify.ack'],
+  });
+  const limited = await pairRaw(hub, 'public-only', 'limited');
+  const admin = await pairRaw(hub, 'admin', 'everything');
+
+  await hub.notify({
+    title: 'CEO laptop exfiltrating data',
+    channel: 'secret.incident',
+    severity: 'critical',
+    resolveKey: 'incident:ceo-laptop',
+  });
+  await delay(200);
+
+  await hub.resolve({ key: 'incident:ceo-laptop' });
+  await delay(300);
+
+  const resolves = [];
+  for (let i = 0; i < 4; i += 1) {
+    const frame = await Promise.race([limited.next(), delay(300).then(() => undefined)]);
+    if (!frame) break;
+    if (frame.t === 'resolve') resolves.push(frame);
+  }
+  assert.deepEqual(resolves, [], 'the excluded device is told nothing about it');
+
+  // The device that could see the alert still gets its resolution.
+  let told;
+  for (let i = 0; i < 6 && !told; i += 1) {
+    const frame = await Promise.race([admin.next(), delay(400).then(() => undefined)]);
+    if (!frame) break;
+    if (frame.t === 'resolve') told = frame;
+  }
+  assert.ok(told, 'a device that saw it is told');
+  assert.equal(told.key, 'incident:ceo-laptop');
+
+  limited.ws.close();
+  admin.ws.close();
+  await hub.stop();
+  rmSync(dir, { recursive: true, force: true });
+});
