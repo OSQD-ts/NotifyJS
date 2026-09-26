@@ -31,6 +31,22 @@ object CallSpeaker {
   private var generation = 0
 
   /**
+   * How to settle the request currently speaking, if one is.
+   *
+   * Held because the engine's own callbacks cannot be relied on to do it. A new
+   * request replaces the utterance listener before it flushes the queue, so the
+   * interrupted request's `onStop` is delivered to the *new* listener; and a
+   * hang-up moves the generation on before the stop arrives at all. Either way
+   * the caller of the earlier request is still waiting on a promise that nothing
+   * else will resolve, and on the phone that promise is what closes the call
+   * screen.
+   */
+  private var pending: ((String?) -> Unit)? = null
+
+  /** Which request [pending] belongs to, so only that request may clear it. */
+  private var pendingToken = 0
+
+  /**
    * Speaks [text] [repeat] times, then calls [onDone] once.
    *
    * The engine takes a moment to initialise on first use, so the request is
@@ -54,13 +70,27 @@ object CallSpeaker {
     var finished = false
     val finish = { error: String? ->
       synchronized(this) {
-        // A stopped or superseded request must not resolve the current one.
-        if (!finished && token == generation) {
+        // Guarded by `finished` alone. Comparing against the live `generation`
+        // meant a stopped request never settled at all: `stop()` moves the
+        // generation on before the engine reports the stop, so the one callback
+        // that would have resolved the promise was discarded and the promise was
+        // left dangling for the life of the process. A request settles exactly
+        // once, and it settles even when it was cut short - that is what the
+        // caller is waiting to hear.
+        if (!finished) {
           finished = true
+          if (pendingToken == token) pending = null
           onDone(error)
         }
       }
     }
+
+    // Whatever was speaking is superseded by this request. Settled here rather
+    // than left to the engine: the flush below interrupts it, and its `onStop`
+    // will arrive at the listener installed for *this* request.
+    pending?.invoke(null)
+    pending = finish
+    pendingToken = token
 
     withEngine(context.applicationContext) { engine ->
       if (engine == null) {
@@ -69,6 +99,14 @@ object CallSpeaker {
       }
       if (token != generation) return@withEngine
 
+      // Every callback is gated on the utterance belonging to this request. The
+      // queue is flushed below, which interrupts whatever was speaking, and the
+      // engine delivers that utterance's `onStop` to the listener installed
+      // here: taken at face value it resolved this request before it had said a
+      // word, and on the phone that closes the call screen and tells the hub the
+      // call is finished while the message is still to be read.
+      val mine = { utteranceId: String? -> utteranceId?.startsWith("notifyjs-$token-") == true }
+
       engine.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
         override fun onStart(utteranceId: String?) = Unit
         override fun onDone(utteranceId: String?) {
@@ -76,12 +114,19 @@ object CallSpeaker {
         }
 
         @Deprecated("required by the base class")
-        override fun onError(utteranceId: String?) = finish("speech failed")
-        override fun onError(utteranceId: String?, errorCode: Int) = finish("speech failed")
+        override fun onError(utteranceId: String?) {
+          if (mine(utteranceId)) finish("speech failed")
+        }
+
+        override fun onError(utteranceId: String?, errorCode: Int) {
+          if (mine(utteranceId)) finish("speech failed")
+        }
 
         // Stopping is a deliberate hang-up, not a failure, but the caller
         // still has to hear that nothing more is coming.
-        override fun onStop(utteranceId: String?, interrupted: Boolean) = finish(null)
+        override fun onStop(utteranceId: String?, interrupted: Boolean) {
+          if (mine(utteranceId)) finish(null)
+        }
       })
 
       engine.setAudioAttributes(ALARM_ATTRS)
@@ -107,11 +152,13 @@ object CallSpeaker {
     }
   }
 
-  /** Hanging up mid-sentence; the utterance listener reports the stop. */
+  /** Hanging up mid-sentence. Settles the caller rather than waiting on the engine. */
   @Synchronized
   fun stop() {
     generation++
     runCatching { tts?.stop() }
+    pending?.invoke(null)
+    pending = null
   }
 
   @Synchronized
@@ -120,6 +167,8 @@ object CallSpeaker {
     runCatching { tts?.stop() }
     runCatching { tts?.shutdown() }
     tts = null
+    pending?.invoke(null)
+    pending = null
   }
 
   /** Reuses the engine once initialised; the first call pays the startup cost. */
