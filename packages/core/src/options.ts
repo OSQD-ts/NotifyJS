@@ -281,6 +281,21 @@ export interface ResolvedOptions
   logger: (line: string, meta?: Record<string, unknown>) => void;
 }
 
+/**
+ * Drops keys whose value is `undefined`, so a spread cannot erase a default.
+ *
+ * `{ ...defaults, ...caller }` copies an explicit `undefined` over the value
+ * beneath it, and an application wiring its options from its own configuration
+ * produces exactly that: `{ intervalMs: cfg.watchdogMs }` with that key unset
+ * replaced a working default with nothing. For the device watchdog the result
+ * was shipped to every paired device, where the numbers it needs became
+ * `setTimeout(NaN)`.
+ */
+function defined<T extends object>(o: T | undefined): Partial<T> {
+  if (!o) return {};
+  return Object.fromEntries(Object.entries(o).filter(([, v]) => v !== undefined)) as Partial<T>;
+}
+
 export function resolveOptions(o: NotifierOptions = {}): ResolvedOptions {
   const log = o.logger === false ? () => {} : o.logger ?? defaultLogger;
   return {
@@ -314,16 +329,16 @@ export function resolveOptions(o: NotifierOptions = {}): ResolvedOptions {
       intervalMs: 30_000,
       graceMs: 30_000,
       severity: 'critical',
-      ...o.deviceWatchdog,
+      ...defined(o.deviceWatchdog),
     },
     flood: {
       enabled: true,
       windowMs: 60_000,
       burst: 5,
       alwaysDeliver: ['critical'],
-      ...o.flood,
+      ...defined(o.flood),
     },
-    actions: { enabled: false, ...o.actions },
+    actions: { enabled: false, ...defined(o.actions) },
     ingest: {
       enabled: false,
       allowInsecure: false,
@@ -331,7 +346,7 @@ export function resolveOptions(o: NotifierOptions = {}): ResolvedOptions {
       // buffering from an unauthenticated caller.
       maxBodyBytes: 64 * 1024,
       ratePerMinute: 120,
-      ...o.ingest,
+      ...defined(o.ingest),
     },
     webPush: {
       enabled: true,
@@ -341,7 +356,7 @@ export function resolveOptions(o: NotifierOptions = {}): ResolvedOptions {
       // Four hours. Long enough to survive a closed laptop over lunch, short
       // enough that a pager alert never arrives stale enough to mislead.
       ttlSeconds: 4 * 60 * 60,
-      ...o.webPush,
+      ...defined(o.webPush),
     },
     security: {
       maxConnectionsPerIp: 10,
@@ -354,13 +369,20 @@ export function resolveOptions(o: NotifierOptions = {}): ResolvedOptions {
       banBaseMs: 60_000,
       banMaxMs: 24 * 60 * 60_000,
       maxMessageBytes: 64 * 1024,
-      messageRate: { points: 60, windowMs: 10_000 },
       clockSkewMs: 60_000,
       maxBufferedBytes: 1024 * 1024,
       allowedOrigins: 'same-origin',
       trustProxy: false,
       uniformFailureMs: 250,
-      ...o.security,
+      ...defined(o.security),
+      // After the spread, and merged rather than replaced: this is the one
+      // nested object in here, and a caller supplying just one of its two
+      // fields would otherwise lose the other to `undefined`.
+      messageRate: {
+        points: 60,
+        windowMs: 10_000,
+        ...defined(o.security?.messageRate),
+      },
     },
   };
 }

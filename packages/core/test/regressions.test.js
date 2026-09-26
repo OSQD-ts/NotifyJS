@@ -2284,3 +2284,98 @@ test('a heartbeat asked for over the wire cannot page on every tick', async () =
   await hub.stop();
   rmSync(dir, { recursive: true, force: true });
 });
+
+test('an option left unset keeps its default rather than erasing it', async () => {
+  // `{ ...defaults, ...caller }` copies an explicit `undefined` over the value
+  // beneath it, which is what an application wiring options from its own
+  // config produces for a key that is not set. The watchdog spec was then sent
+  // to every paired device with no numbers in it.
+  const dir = tmp('undefined-option');
+  const hub = hostileHub(dir, {
+    deviceWatchdog: { enabled: true, intervalMs: undefined, graceMs: undefined },
+  });
+  await hub.start();
+  const device = await pairRaw(hub, 'oncall', 'watching');
+
+  let spec;
+  for (let i = 0; i < 8 && !spec; i += 1) {
+    const frame = await Promise.race([device.next(), delay(500).then(() => undefined)]);
+    if (!frame) break;
+    if (frame.t === 'watchdog') spec = frame;
+  }
+  assert.ok(spec, 'the device is told what to watch for');
+  assert.equal(spec.intervalMs, 30_000, 'with the default interval, not undefined');
+  assert.equal(spec.graceMs, 30_000, 'and the default grace');
+
+  device.ws.close();
+  await hub.stop();
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test('a watchdog spec with no numbers in it is ignored, not armed', async () => {
+  // `intervalMs + graceMs` of `undefined` is NaN, which `setTimeout` clamps to
+  // 1ms: the alarm fired a millisecond after connecting and, when `isOnline()`
+  // said the device had no connectivity, re-armed itself at the same 1ms - an
+  // unbounded loop of probes on a phone in a tunnel, persisted to storage so it
+  // outlived a restart.
+  const { NotifyClient, memoryStorage } = await import('@osqd/notifyjs-protocol');
+
+  let socket;
+  const client = new NotifyClient({
+    url: 'ws://127.0.0.1:1',
+    crypto: nodeCrypto,
+    storage: memoryStorage(),
+    createSocket: () => {
+      socket = {
+        onopen: null,
+        onmessage: null,
+        onclose: null,
+        onerror: null,
+        sent: [],
+        send(d) {
+          this.sent.push(d);
+        },
+        close() {},
+      };
+      return socket;
+    },
+    deviceName: 'in-a-tunnel',
+    platform: 'node-test',
+    isOnline: () => false,
+  });
+
+  await client.connect();
+  const frame = (extra) =>
+    socket.onmessage({
+      data: JSON.stringify({
+        v: 1,
+        t: 'watchdog',
+        enabled: true,
+        alert: { title: 'the hub may be down', severity: 'critical' },
+        ...extra,
+      }),
+    });
+
+  frame({});
+  await delay(50);
+  assert.equal(client.watchdog, undefined, 'a spec with no numbers is refused');
+
+  frame({ intervalMs: 'soon', graceMs: 0 });
+  await delay(50);
+  assert.equal(client.watchdog, undefined, 'and so is one whose interval is not a number');
+
+  frame({ intervalMs: -1, graceMs: 0 });
+  await delay(50);
+  assert.equal(client.watchdog, undefined, 'and so is a negative one');
+
+  // A short interval is the hub's business rather than nonsense, so it stands.
+  frame({ intervalMs: 200, graceMs: 100 });
+  await delay(50);
+  assert.equal(client.watchdog?.intervalMs, 200, 'a fast hub is still watched');
+
+  frame({ intervalMs: 30_000, graceMs: 30_000 });
+  await delay(50);
+  assert.equal(client.watchdog?.intervalMs, 30_000, 'while a usable one is armed');
+
+  client.disconnect();
+});

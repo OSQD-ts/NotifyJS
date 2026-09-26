@@ -460,10 +460,34 @@ export class NotifyClient {
 
       case 'watchdog': {
         const spec = msg as unknown as WatchdogSpec & { t: string };
+
+        // These two numbers are handed to `setTimeout`, so they have to be real
+        // durations. A frame arriving without them made `intervalMs + graceMs`
+        // NaN, which `setTimeout` clamps to 1ms: the alarm fired about a
+        // millisecond after connecting and, whenever `isOnline()` reported no
+        // connectivity, re-armed itself at the same 1ms - an unbounded loop of
+        // connectivity probes on a phone in a tunnel. The spec was persisted, so
+        // it outlived a restart.
+        //
+        // A hub produces such a frame from its own configuration without anybody
+        // making a mistake: `{ ...defaults, ...caller }` copies an explicit
+        // `undefined` over the default, so one unset key in an application's
+        // config was enough.
+        //
+        // Only nonsense is refused, never a short interval: how often a hub
+        // speaks is the hub's own business, and a device watching one that dies
+        // inside a second is a real configuration. Ignored rather than repaired
+        // with invented numbers - no watchdog is honest, a wrong one is not.
+        const intervalMs = Number(spec.intervalMs);
+        const graceMs = Number(spec.graceMs);
+        const title = spec.alert?.title;
+        if (!Number.isFinite(intervalMs) || intervalMs <= 0) return;
+        if (typeof title !== 'string' || title.length === 0) return;
+
         this.watchdogSpec = {
-          enabled: spec.enabled,
-          intervalMs: spec.intervalMs,
-          graceMs: spec.graceMs,
+          enabled: spec.enabled === true,
+          intervalMs,
+          graceMs: Number.isFinite(graceMs) && graceMs >= 0 ? graceMs : 0,
           alert: spec.alert,
         };
         await this.opts.storage.set(this.key('watchdog'), JSON.stringify(this.watchdogSpec));
