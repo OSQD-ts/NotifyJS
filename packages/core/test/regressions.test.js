@@ -2692,6 +2692,62 @@ test('a number that would switch off what it configures is refused by name', asy
   rmSync(dir, { recursive: true, force: true });
 });
 
+test('a number one object deep cannot switch off what it configures either', async () => {
+  // Validation stopped at the top level, so every number in `security`, `flood`,
+  // `ingest`, `webPush` and `deviceWatchdog` was taken as given.
+  // `maxMessageBytes: 0` dropped every frame the hub was sent and disconnected the
+  // sender; `maxConnectionsPerIp: 0` refused every device. Worse than any zero is
+  // what an unset environment variable produces: `Number(undefined)` is `NaN`, it
+  // compares false against everything, so the limit was not low but absent - and
+  // `livenessIntervalMs` carried it into `setInterval`, which treats `NaN` as one
+  // millisecond and pings every connected device that often.
+  const dir = tmp('bad-nested');
+  const cases = [
+    [{ security: { maxConnectionsPerIp: 0 } }, /security\.maxConnectionsPerIp must be between 1/],
+    [{ security: { maxMessageBytes: 0 } }, /security\.maxMessageBytes must be between 1/],
+    [{ security: { messageRate: { windowMs: 0 } } }, /security\.messageRate\.windowMs must be between 1/],
+    [{ security: { maxBufferedBytes: -1 } }, /security\.maxBufferedBytes must be between 1/],
+    [{ flood: { windowMs: 0 } }, /flood\.windowMs must be between 1/],
+    [{ flood: { burst: -1 } }, /flood\.burst must be between 0/],
+    [{ ingest: { maxBodyBytes: 0 } }, /ingest\.maxBodyBytes must be between 1/],
+    [{ ingest: { ratePerMinute: 0 } }, /ingest\.ratePerMinute must be between 1/],
+    [{ webPush: { ttlSeconds: Number.NaN } }, /webPush\.ttlSeconds must be between 0 and \d+, not NaN/],
+    [{ deviceWatchdog: { intervalMs: Number.NaN } }, /deviceWatchdog\.intervalMs must be between 1 and \d+, not NaN/],
+    [{ livenessIntervalMs: Number(process.env.NOT_SET_ANYWHERE) }, /livenessIntervalMs must be between 1 and \d+, not NaN/],
+  ];
+  for (const [extra, pattern] of cases) {
+    assert.throws(
+      () => new Notifier({ port: 0, storeDir: dir, dashboard: false, logger: false, ...extra }),
+      pattern,
+      JSON.stringify(extra),
+    );
+  }
+
+  // The values this repository and its documentation actually use still resolve,
+  // including the one option that is a rate and would be floored to "never" by a
+  // whole-number rule, and the zeros that mean something.
+  const fine = new Notifier({
+    port: 0,
+    storeDir: dir,
+    dashboard: false,
+    logger: false,
+    security: {
+      connectionRefillPerSec: 0.5,
+      uniformFailureMs: 0,
+      banBaseMs: 0,
+      clockSkewMs: 0,
+      messageRate: { points: 1, windowMs: 50 },
+    },
+    deviceWatchdog: { intervalMs: 40, graceMs: 0 },
+    flood: { burst: 0 },
+    webPush: { ttlSeconds: 0 },
+  });
+  await fine.start();
+  await fine.stop();
+
+  rmSync(dir, { recursive: true, force: true });
+});
+
 test("a flag set to the string 'false' does not mean true", async () => {
   // `security: { trustProxy: process.env.TRUST_PROXY }` is how an application
   // wires this, and with that variable set to 'false' the string is truthy: the

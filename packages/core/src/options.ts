@@ -305,6 +305,7 @@ function bounded(
   value: unknown,
   min: number,
   max = Number.MAX_SAFE_INTEGER,
+  whole = true,
 ): number {
   // A numeric string is accepted and converted. The types say `number`, but this
   // library is imported from plain JavaScript - the examples in this repository
@@ -321,11 +322,37 @@ function bounded(
         : NaN;
 
   if (!Number.isFinite(n) || n < min || n > max) {
-    throw new Error(`${option} must be between ${min} and ${max}, not ${JSON.stringify(value)}`);
+    throw new Error(`${option} must be between ${min} and ${max}, not ${describe(value)}`);
   }
-  // Whole numbers throughout: these are ports, counts and milliseconds, and a
-  // fractional one only ever arrives from a bad division.
-  return Math.floor(n);
+  // Whole numbers almost throughout: these are ports, counts and milliseconds, and
+  // a fractional one only ever arrives from a bad division. The exception is a
+  // rate, where the default itself is 0.5 per second and flooring it would mean
+  // never refilling at all.
+  return whole ? Math.floor(n) : n;
+}
+
+/**
+ * Applies `bounded` to the named fields of a merged group of options.
+ *
+ * The floors are not decoration. Validation used to stop at the top level, and
+ * every number one object deeper was taken as given: `security.maxMessageBytes: 0`
+ * dropped every frame the hub was sent and disconnected the sender,
+ * `maxConnectionsPerIp: 0` refused every device, and `flood.windowMs: 0` opened a
+ * window that closed in the same tick. Worse than any zero was what an unset
+ * environment variable produces - `Number(undefined)` is `NaN`, which compares
+ * false against everything, so the limit was not low but absent.
+ */
+function numbers<T>(
+  prefix: string,
+  group: T,
+  mins: Partial<Record<keyof T & string, number | { min: number; max?: number; whole?: boolean }>>,
+): T {
+  const bag = group as Record<string, unknown>;
+  for (const [key, spec] of Object.entries(mins)) {
+    const rule = typeof spec === 'number' ? { min: spec } : (spec as { min: number; max?: number; whole?: boolean });
+    bag[key] = bounded(prefix + key, bag[key], rule.min, rule.max, rule.whole);
+  }
+  return group;
 }
 
 /**
@@ -354,14 +381,55 @@ function flag(option: string, value: unknown): boolean {
     if (s === 'true' || s === '1' || s === 'yes' || s === 'on') return true;
     if (s === 'false' || s === '0' || s === 'no' || s === 'off') return false;
   }
-  throw new Error(`${option} must be true or false, not ${JSON.stringify(value)}`);
+  throw new Error(`${option} must be true or false, not ${describe(value)}`);
 }
 
-/** Applies `flag` to the named fields of an already-merged group of options. */
-function flags<T>(prefix: string, group: T, keys: readonly (keyof T & string)[]): T {
+/**
+ * How a refused value is quoted back.
+ *
+ * `JSON.stringify(NaN)` is `'null'`, and `NaN` is the value these options most
+ * often hold - it is what `Number(process.env.MISSING)` produces - so the message
+ * an operator read named something they had not written.
+ */
+function describe(value: unknown): string {
+  if (typeof value === 'number' && !Number.isFinite(value)) return String(value);
+  return JSON.stringify(value) ?? String(value);
+}
+
+/**
+ * Validates a merged group of options in place: the booleans through `flag`, the
+ * numbers through `bounded` with each field's own floor.
+ *
+ * The floors are not decoration. Validation used to stop at the top level and
+ * every number one object deeper was taken as given: `security.maxMessageBytes: 0`
+ * dropped every frame the hub was sent and disconnected the sender,
+ * `maxConnectionsPerIp: 0` refused every device, and `flood.windowMs: 0` opened a
+ * window that closed in the same tick. Worse than any zero is what an unset
+ * environment variable produces - `Number(undefined)` is `NaN`, which compares
+ * false against everything, so the limit was not low but absent.
+ */
+function checked<T>(
+  prefix: string,
+  group: T,
+  rules: {
+    flags?: readonly (keyof T & string)[];
+    numbers?: Partial<Record<keyof T & string, number | NumberRule>>;
+  },
+): T {
   const bag = group as Record<string, unknown>;
-  for (const key of keys) bag[key] = flag(prefix + key, bag[key]);
+  for (const key of rules.flags ?? []) bag[key] = flag(prefix + key, bag[key]);
+  for (const [key, spec] of Object.entries(rules.numbers ?? {})) {
+    const rule: NumberRule = typeof spec === 'number' ? { min: spec } : (spec as NumberRule);
+    bag[key] = bounded(prefix + key, bag[key], rule.min, rule.max, rule.whole);
+  }
   return group;
+}
+
+interface NumberRule {
+  min: number;
+  max?: number;
+  /** Set false for the one option that is a rate rather than a count. */
+  whole?: boolean;
 }
 
 /**
@@ -381,6 +449,22 @@ function defined<T extends object>(o: T | undefined): Partial<T> {
 
 export function resolveOptions(o: NotifierOptions = {}): ResolvedOptions {
   const log = o.logger === false ? () => {} : o.logger ?? defaultLogger;
+  // Resolved before the rest because `livenessIntervalMs` defaults to its cadence,
+  // and borrowing the validated number means a bad one is refused under the name
+  // the caller actually wrote rather than the one that read it.
+  const deviceWatchdog = checked(
+    'deviceWatchdog.',
+    {
+      // On by default: the failure it catches is the one that matters most, and
+      // it costs one small frame every 30 seconds per device.
+      enabled: true,
+      intervalMs: 30_000,
+      graceMs: 30_000,
+      severity: 'critical' as Severity,
+      ...defined(o.deviceWatchdog),
+    },
+    { flags: ['enabled'], numbers: { intervalMs: 1, graceMs: 0 } },
+  );
   return {
     port: bounded('port', o.port ?? DEFAULT_PORT, 0, 65535),
     host: o.host ?? '0.0.0.0',
@@ -397,28 +481,21 @@ export function resolveOptions(o: NotifierOptions = {}): ResolvedOptions {
     heartbeatTickMs: bounded('heartbeatTickMs', o.heartbeatTickMs ?? 5_000, 1),
     // Matches the device watchdog's own cadence, so a hub with both on sends
     // one frame and one ping on the same tick rather than two timers' worth.
+    //
+    // Floored rather than refused, because the floor is the documented behaviour,
+    // but the value still has to be a number: `Number(process.env.X)` with that
+    // variable unset is `NaN`, `Math.max(1_000, NaN)` is `NaN`, and
+    // `setInterval(NaN)` is a one-millisecond loop pinging every live device.
     livenessIntervalMs: Math.max(
       1_000,
-      o.livenessIntervalMs ?? o.deviceWatchdog?.intervalMs ?? 30_000,
+      bounded('livenessIntervalMs', o.livenessIntervalMs ?? deviceWatchdog.intervalMs, 1),
     ),
     metrics: flag('metrics', o.metrics ?? true),
     metricsToken: o.metricsToken,
     publicUrl: o.publicUrl,
     logger: log,
-    deviceWatchdog: flags(
-      'deviceWatchdog.',
-      {
-        // On by default: the failure it catches is the one that matters most,
-        // and it costs one small frame every 30 seconds per device.
-        enabled: true,
-        intervalMs: 30_000,
-        graceMs: 30_000,
-        severity: 'critical' as Severity,
-        ...defined(o.deviceWatchdog),
-      },
-      ['enabled'],
-    ),
-    flood: flags(
+    deviceWatchdog,
+    flood: checked(
       'flood.',
       {
         enabled: true,
@@ -427,10 +504,12 @@ export function resolveOptions(o: NotifierOptions = {}): ResolvedOptions {
         alwaysDeliver: ['critical'] as Severity[],
         ...defined(o.flood),
       },
-      ['enabled'],
+      { flags: ['enabled'], numbers: { windowMs: 1, burst: 0 } },
     ),
-    actions: flags('actions.', { enabled: false, ...defined(o.actions) }, ['enabled']),
-    ingest: flags(
+    actions: checked('actions.', { enabled: false, ...defined(o.actions) }, {
+      flags: ['enabled'],
+    }),
+    ingest: checked(
       'ingest.',
       {
         enabled: false,
@@ -441,9 +520,12 @@ export function resolveOptions(o: NotifierOptions = {}): ResolvedOptions {
         ratePerMinute: 120,
         ...defined(o.ingest),
       },
-      ['enabled', 'allowInsecure'],
+      {
+        flags: ['enabled', 'allowInsecure'],
+        numbers: { maxBodyBytes: 1, ratePerMinute: 1 },
+      },
     ),
-    webPush: flags(
+    webPush: checked(
       'webPush.',
       {
         enabled: true,
@@ -455,9 +537,12 @@ export function resolveOptions(o: NotifierOptions = {}): ResolvedOptions {
         ttlSeconds: 4 * 60 * 60,
         ...defined(o.webPush),
       },
-      ['enabled', 'includeBody', 'evenWhenOnline'],
+      {
+        flags: ['enabled', 'includeBody', 'evenWhenOnline'],
+        numbers: { ttlSeconds: 0 },
+      },
     ),
-    security: flags(
+    security: checked(
       'security.',
       {
         maxConnectionsPerIp: 10,
@@ -479,13 +564,36 @@ export function resolveOptions(o: NotifierOptions = {}): ResolvedOptions {
         // After the spread, and merged rather than replaced: this is the one
         // nested object in here, and a caller supplying just one of its two
         // fields would otherwise lose the other to `undefined`.
-        messageRate: {
-          points: 60,
-          windowMs: 10_000,
-          ...defined(o.security?.messageRate),
+        messageRate: checked(
+          'security.messageRate.',
+          {
+            points: 60,
+            windowMs: 10_000,
+            ...defined(o.security?.messageRate),
+          },
+          { numbers: { points: 1, windowMs: 1 } },
+        ),
+      },
+      {
+        flags: ['trustProxy'],
+        numbers: {
+          maxConnectionsPerIp: 1,
+          connectionBurst: 1,
+          // The one rate in here, and so the one option that keeps its fraction:
+          // the default is half a connection per second.
+          connectionRefillPerSec: { min: 0, whole: false },
+          maxUnauthenticated: 1,
+          handshakeTimeoutMs: 1,
+          maxFailuresBeforeBan: 1,
+          failureWindowMs: 1,
+          banBaseMs: 0,
+          banMaxMs: 0,
+          maxMessageBytes: 1,
+          clockSkewMs: 0,
+          maxBufferedBytes: 1,
+          uniformFailureMs: 0,
         },
       },
-      ['trustProxy'],
     ),
   };
 }
