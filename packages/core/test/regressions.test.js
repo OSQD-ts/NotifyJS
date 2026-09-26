@@ -641,6 +641,10 @@ test('a hub reaches a disconnected browser, and the push service cannot read it'
   const dir = tmp('webpush');
   const sent = [];
   const realFetch = globalThis.fetch;
+  // Restored by the `finally` further down. Everything between the stub and that
+  // `try` used to be unprotected, and a throw there left every later test in this
+  // file with a `fetch` that answers 201 with no body - which breaks the `/health`
+  // and `/metrics` tests in a way that points nowhere near the cause.
   globalThis.fetch = async (url, init) => {
     sent.push({ url: String(url), init });
     return new Response(null, { status: 201 });
@@ -1744,13 +1748,20 @@ test('channel matching agrees with a reference implementation', async () => {
   const { channelMatches } = await import('@osqd/notifyjs-protocol');
 
   const alphabet = ['a', 'b', '.', '*'];
+  // Seeded, so a mismatch can be reproduced. Unseeded `Math.random` meant a
+  // failure printed a case nobody could get back to.
+  let seed = 0x2f6e2b1;
+  const random = () => {
+    seed = (seed * 1103515245 + 12345) & 0x7fffffff;
+    return seed / 0x7fffffff;
+  };
   const pick = (n) =>
-    Array.from({ length: n }, () => alphabet[Math.floor(Math.random() * alphabet.length)]).join('');
+    Array.from({ length: n }, () => alphabet[Math.floor(random() * alphabet.length)]).join('');
 
   const mismatches = [];
   for (let i = 0; i < 20_000; i++) {
-    const pattern = pick(Math.floor(Math.random() * 7));
-    const value = pick(Math.floor(Math.random() * 7)).replace(/\*/g, 'c');
+    const pattern = pick(Math.floor(random() * 7));
+    const value = pick(Math.floor(random() * 7)).replace(/\*/g, 'c');
     if (channelMatches([pattern], value) !== referenceGlob(pattern, value)) {
       mismatches.push({ pattern, value });
       if (mismatches.length > 4) break;
@@ -1812,10 +1823,22 @@ test('quiet hours wrap past midnight', async () => {
 
 /** A socket speaking the wire protocol by hand, for things a client will not do. */
 function rawSocket(hub) {
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
     const ws = new WebSocket(hub.url.replace('localhost', '127.0.0.1'));
     const queue = [];
     let waiting;
+
+    // A refused connection is what a connection-limit or allow-list regression
+    // produces, and this used to wait for an `open` that was never coming - so
+    // the test hung at an `await` before reaching a single assertion, with no
+    // output at all. It has to fail instead.
+    const deadline = setTimeout(() => reject(new Error('the hub never accepted the socket')), 5000);
+    deadline.unref?.();
+    ws.on('error', (err) => {
+      clearTimeout(deadline);
+      reject(err);
+    });
+
     ws.on('message', (m) => {
       const frame = JSON.parse(m.toString());
       if (waiting) {
@@ -1823,14 +1846,26 @@ function rawSocket(hub) {
         waiting = undefined;
       } else queue.push(frame);
     });
-    ws.on('open', () =>
+    ws.on('open', () => {
+      clearTimeout(deadline);
       resolve({
         ws,
         send: (o) => ws.send(JSON.stringify(o)),
+        // Bounded for the same reason: a frame that never arrives is a failure,
+        // not a reason to sit there.
         next: () =>
-          queue.length ? Promise.resolve(queue.shift()) : new Promise((r) => (waiting = r)),
-      }),
-    );
+          queue.length
+            ? Promise.resolve(queue.shift())
+            : new Promise((r, rejectNext) => {
+                const timer = setTimeout(() => rejectNext(new Error('no frame arrived')), 5000);
+                timer.unref?.();
+                waiting = (frame) => {
+                  clearTimeout(timer);
+                  r(frame);
+                };
+              }),
+      });
+    });
   });
 }
 

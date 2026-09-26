@@ -26,7 +26,11 @@ let creds;
 
 /** Runs the CLI the way a user would, as a separate process. */
 function cli(args) {
-  return run(process.execPath, [BIN, ...args], { timeout: 20_000 });
+  // 30s, not 20: a command that cannot reach a hub gives up on its own after the
+  // client's 15-second handshake timeout, and the exit-code assertions depend on
+  // that happening rather than on this kill - which left about four seconds of
+  // margin on a loaded machine.
+  return run(process.execPath, [BIN, ...args], { timeout: 30_000 });
 }
 
 before(async () => {
