@@ -103,8 +103,29 @@ export function compareVersions(a: string, b: string): number {
 
   // Two previews of the same release: ordered by their suffix, numerically, so
   // `main.10` comes after `main.9` rather than before it.
-  const order = left.pre.localeCompare(right.pre, undefined, { numeric: true });
-  return order > 0 ? 1 : order < 0 ? -1 : 0;
+  //
+  // Compared by hand rather than with `localeCompare`'s `numeric` option, which
+  // needs `Intl`: a React Native build of Hermes without it ignores the option
+  // silently and sorts `main.10` before `main.9`, offering an older preview as an
+  // update.
+  const chunks = (pre: string) => pre.split(/(\d+)/).filter((part) => part !== '');
+  const leftParts = chunks(left.pre);
+  const rightParts = chunks(right.pre);
+
+  for (let i = 0; i < Math.max(leftParts.length, rightParts.length); i++) {
+    const a = leftParts[i];
+    const b = rightParts[i];
+    if (a === undefined) return -1;
+    if (b === undefined) return 1;
+    const both = /^\d+$/.test(a) && /^\d+$/.test(b);
+    if (both) {
+      const diff = Number(a) - Number(b);
+      if (diff !== 0) return diff > 0 ? 1 : -1;
+      continue;
+    }
+    if (a !== b) return a > b ? 1 : -1;
+  }
+  return 0;
 }
 
 export function isNewer(candidate: string, current: string): boolean {
