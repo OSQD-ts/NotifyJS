@@ -54,7 +54,7 @@ import {
 } from './ingest.js';
 import { Session } from './session.js';
 import { CallOrchestrator, type CallEvent, type CallStep, type CallTarget } from './calls.js';
-import { Watchdog, formatDuration, type Heartbeat, type HeartbeatSpec } from './watchdog.js';
+import { Watchdog, formatDuration, type Heartbeat, type HeartbeatSpec, parseDuration } from './watchdog.js';
 import { Metrics } from './metrics.js';
 import { FloodControl, summaryTitle, type FloodSummary } from './flood.js';
 import { WebPushSender, generateVapidKeys } from './webpush.js';
@@ -2193,10 +2193,15 @@ export class Notifier extends EventEmitter<NotifierEvents> {
           return reply(true, { resolved: await this.resolve(args as { id?: string; key?: string }) });
         case 'heartbeats.list':
           return reply(true, { heartbeats: this.heartbeats() });
-        case 'heartbeat.expect':
+        case 'heartbeat.expect': {
+          const floor = this.opts.heartbeatTickMs;
           return reply(true, {
-            heartbeat: this.expect(String(args.name), args as unknown as HeartbeatSpec),
+            heartbeat: this.expect(
+              String(args.name),
+              sanitizeHeartbeat(args as unknown as HeartbeatSpec, floor),
+            ),
           });
+        }
         case 'heartbeat.checkin':
           return reply(true, { known: this.checkIn(String(args.name)) });
         case 'heartbeat.forget':
@@ -2657,6 +2662,44 @@ function matchesTargeting(to: Targeting, deviceId: string, role: string): boolea
   if (to.devices?.length && !to.devices.includes(deviceId)) return false;
   if (to.roles?.length && !to.roles.includes(role)) return false;
   return true;
+}
+
+/** Ceiling for a heartbeat that arrived over the wire. */
+const MAX_WIRE_HEARTBEAT_MS = 30 * 24 * 60 * 60_000;
+
+/**
+ * Bounds a heartbeat asked for over the wire.
+ *
+ * `heartbeat.expect` was the one wire-reachable path that armed a timer with
+ * nothing clamping it, and it needs only `notify.send` - the lowest publishing
+ * capability, and one an HTTP ingest token can hold. `{ every: 1, repeat: true }`
+ * was taken as written: the sweep found it overdue on every tick, `repeat`
+ * re-armed the clock, and each miss raised a `critical` alert - which flood
+ * control never collapses and `requireAck` then re-sends for twenty rounds. The
+ * beat is stored, so it outlived both a restart and the device that set it.
+ *
+ * The floor is the sweep interval itself, and nothing more: a deadline shorter
+ * than the tick that checks it is missed on the next tick however honest the
+ * task, while anything above it is a cadence somebody may genuinely want -
+ * `RemoteNotifier.keepAlive` is the documented way for a monitored process to
+ * check in, and it comes through here. A programmatic caller on the hub's own
+ * side keeps the unbounded API; it is describing its own process rather than
+ * pointing a repeating page at somebody else's phone.
+ */
+function sanitizeHeartbeat(input: HeartbeatSpec, floorMs: number): HeartbeatSpec {
+  const raw = (input ?? {}) as Partial<HeartbeatSpec>;
+  if (raw.every === undefined) throw new Error('a heartbeat needs an interval');
+
+  const asked = parseDuration(raw.every);
+  const clean: HeartbeatSpec = {
+    every: Math.min(MAX_WIRE_HEARTBEAT_MS, Math.max(floorMs, asked)),
+    grace: Math.min(MAX_WIRE_HEARTBEAT_MS, raw.grace === undefined ? 0 : parseDuration(raw.grace)),
+    severity: coerceSeverity(raw.severity, 'critical'),
+    repeat: raw.repeat === true,
+  };
+  if (typeof raw.channel === 'string') clean.channel = raw.channel;
+  if (typeof raw.description === 'string') clean.description = raw.description;
+  return clean;
 }
 
 /** Ceilings for a ladder that arrived over the wire. */

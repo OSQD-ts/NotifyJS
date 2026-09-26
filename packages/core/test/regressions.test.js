@@ -2247,3 +2247,40 @@ test('a restarted hub no longer counts the sockets it was holding', async () => 
   await hub.stop();
   rmSync(dir, { recursive: true, force: true });
 });
+
+test('a heartbeat asked for over the wire cannot page on every tick', async () => {
+  // `heartbeat.expect` was the one wire-reachable path with no ceiling, and it
+  // needs only `notify.send`. `{ every: 1, repeat: true }` was accepted as
+  // written: overdue on every sweep, re-armed each time, raising a critical
+  // alert that flood control never collapses - and stored, so it outlived both
+  // a restart and the device that set it.
+  const dir = tmp('heartbeat-floor');
+  const hub = hostileHub(dir, { heartbeatTickMs: 500 });
+  await hub.start();
+  const device = await pairRaw(hub, 'admin', 'setter');
+
+  const result = await device.ask('heartbeat.expect', {
+    name: 'evil',
+    every: 1,
+    repeat: 'yes',
+    severity: 'not-a-severity',
+  });
+  assert.equal(result.ok, true, 'the beat is still accepted');
+  assert.equal(
+    result.data.heartbeat.every,
+    500,
+    'with an interval the sweep can actually satisfy',
+  );
+  assert.equal(result.data.heartbeat.repeat, false, 'and `repeat` only honours a real boolean');
+  assert.equal(result.data.heartbeat.severity, 'critical', 'and an unknown severity falls back');
+
+  // A cadence somebody may genuinely want is left exactly as asked for, and the
+  // hub's own programmatic API is not bounded at all.
+  const asked = await device.ask('heartbeat.expect', { name: 'honest', every: 900 });
+  assert.equal(asked.data.heartbeat.every, 900);
+  assert.equal(hub.expect('mine', { every: 80 }).every, 80);
+
+  device.ws.close();
+  await hub.stop();
+  rmSync(dir, { recursive: true, force: true });
+});
