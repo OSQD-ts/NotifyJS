@@ -167,3 +167,26 @@ test('an export over a file that already exists is still kept to 0600', async (t
 
   assert.equal((statSync(out).mode & 0o777).toString(8), '600', 'nobody else can read it');
 });
+
+test('a misspelled severity is refused rather than quietly downgraded', async () => {
+  // The hub coerces an unrecognised severity to a default and says nothing,
+  // which is right for a frame off the wire and wrong for a flag somebody
+  // typed: `--severity crittical` went out at `info`, under the floor every
+  // on-call role filters on, and exited 0 as though somebody had been paged.
+  await assert.rejects(
+    () =>
+      cli([
+        'send', 'the database is down', '--severity', 'crittical',
+        '--url', HUB_URL, '--store', creds,
+      ]),
+    (err) => {
+      assert.match(err.stderr, /--severity must be one of/);
+      return true;
+    },
+  );
+
+  assert.ok(
+    !hub.history().some((n) => n.title === 'the database is down'),
+    'and nothing was sent at the wrong severity',
+  );
+});

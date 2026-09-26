@@ -12,7 +12,7 @@ import {
   isBackup,
   type Severity,
 } from '@osqd/notifyjs';
-import { NotifyClient, isPairingCodeValid } from '@osqd/notifyjs-protocol';
+import { NotifyClient, SEVERITIES, isPairingCodeValid, isSeverity } from '@osqd/notifyjs-protocol';
 import { nodeCrypto } from '@osqd/notifyjs-protocol/node';
 
 import { chmodSync, readFileSync, writeFileSync } from 'node:fs';
@@ -293,6 +293,22 @@ function port(value: string): number {
   return n;
 }
 
+/**
+ * A severity, or a clear complaint. Same reasoning as `port`.
+ *
+ * The hub coerces an unrecognised severity to a default and says nothing, which
+ * is right for a frame from the wire and wrong for a flag somebody typed:
+ * `--severity crittical` sent the alert at `info`, below the floor every
+ * on-call role filters on, and exited 0 as though it had paged somebody.
+ */
+function severity(value: string | undefined, fallback: Severity): Severity {
+  if (value === undefined) return fallback;
+  if (!isSeverity(value)) {
+    throw new Error(`--severity must be one of ${SEVERITIES.join(', ')}, not "${value}"`);
+  }
+  return value;
+}
+
 /** A positive whole number, or a clear complaint. Same reasoning as `port`. */
 function count(value: string, flag: string): number {
   const n = Number(value);
@@ -497,7 +513,7 @@ async function send(argv: string[]): Promise<void> {
     title,
     body: values.body as string | undefined,
     channel: (values.channel as string) ?? 'default',
-    severity: ((values.severity as string) ?? 'info') as Severity,
+    severity: severity(values.severity as string | undefined, 'info'),
   });
   process.stdout.write('sent\n');
   client.disconnect();
@@ -519,7 +535,7 @@ async function placeCall(argv: string[]): Promise<void> {
   await client.admin('call.place', {
     message,
     channel: (values.channel as string) ?? 'default',
-    severity: ((values.severity as string) ?? 'critical') as Severity,
+    severity: severity(values.severity as string | undefined, 'critical'),
   });
   process.stdout.write('call placed\n');
   client.disconnect();
@@ -739,7 +755,7 @@ async function watch(argv: string[]): Promise<void> {
     name,
     every: values.every as string,
     grace: values.grace as string | undefined,
-    severity: values.severity as string | undefined,
+    severity: values.severity === undefined ? undefined : severity(values.severity as string, 'critical'),
     description: values.description as string | undefined,
   });
   process.stdout.write(
