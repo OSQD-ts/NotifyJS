@@ -1,7 +1,7 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { rmSync, mkdtempSync } from 'node:fs';
+import { chmodSync, mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -147,4 +147,23 @@ test('serve refuses half a TLS configuration', async () => {
       return true;
     },
   );
+});
+
+test('an export over a file that already exists is still kept to 0600', async (t) => {
+  // `writeFileSync`'s `mode` is only honoured when the write creates the file.
+  // Exporting over a path that already existed - touched beforehand, left by an
+  // earlier run, checked out of a repository - kept whatever permissions it had,
+  // usually 0644, with the hub's signing key and every device secret in it.
+  if (process.platform === 'win32') {
+    t.skip('POSIX modes only');
+    return;
+  }
+
+  const out = join(dir, 'backup.json');
+  writeFileSync(out, 'from an earlier run\n');
+  chmodSync(out, 0o644);
+
+  await cli(['export', '--data', join(dir, 'hub'), '--out', out]);
+
+  assert.equal((statSync(out).mode & 0o777).toString(8), '600', 'nobody else can read it');
 });

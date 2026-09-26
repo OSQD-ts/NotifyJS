@@ -15,7 +15,7 @@ import {
 import { NotifyClient, isPairingCodeValid } from '@osqd/notifyjs-protocol';
 import { nodeCrypto } from '@osqd/notifyjs-protocol/node';
 
-import { readFileSync, writeFileSync } from 'node:fs';
+import { chmodSync, readFileSync, writeFileSync } from 'node:fs';
 import { fileStorage, defaultPath } from './storage.js';
 import { generateSelfSigned } from './cert.js';
 import { apply as applyUpdate, check as checkUpdate } from './selfupdate.js';
@@ -580,7 +580,18 @@ async function backup(argv: string[]): Promise<void> {
       process.stdout.write(json + '\n');
     } else {
       // 0600, and said out loud: this file is enough to impersonate the hub.
+      //
+      // `mode` is only honoured when the write creates the file, so an export
+      // over a path that already existed - `touch backup.json` first, a file
+      // from a previous run, anything checked out of a repository - kept
+      // whatever permissions it had, usually 0644. The chmod is what actually
+      // holds the guarantee this comment makes.
       writeFileSync(out, json + '\n', { mode: 0o600 });
+      try {
+        chmodSync(out, 0o600);
+      } catch {
+        /* a filesystem without POSIX modes, or a file we do not own */
+      }
       process.stderr.write(
         `wrote ${out}\n\nThis file contains:\n` +
           backupSecrets(doc).map((s) => `  - ${s}\n`).join('') +
