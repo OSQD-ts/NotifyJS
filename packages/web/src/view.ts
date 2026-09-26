@@ -115,3 +115,20 @@ function stamp(ts: unknown): { iso: string; shown: string } {
   if (Number.isNaN(at.getTime())) return { iso: '', shown: '\u2014' };
   return { iso: at.toISOString(), shown: at.toLocaleTimeString() };
 }
+
+/**
+ * Which role a refreshed pairing-code selector should be left on.
+ *
+ * Lives here, and takes the previous value as an argument, because the version
+ * that read it off the element got this dangerously wrong: replacing a
+ * single-select's options resets `selectedIndex` to 0, so reading `value`
+ * afterwards returned the *first* role rather than the operator's choice - and
+ * the first default role is `admin`. Opening Devices and clicking "Create
+ * pairing code" then minted an admin code for a click that used to mint a viewer
+ * one.
+ */
+export function nextRoleChoice(previous: string, roles: string[]): string {
+  if (previous && roles.includes(previous)) return previous;
+  if (roles.includes('viewer')) return 'viewer';
+  return roles[0] ?? 'viewer';
+}

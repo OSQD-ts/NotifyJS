@@ -240,3 +240,20 @@ test('a notification with an unusable timestamp still renders', () => {
     assert.equal(li.querySelector('h3').textContent, 'Disk almost full', 'the alert still shows');
   }
 });
+
+test('a refreshed role selector never silently lands on admin', () => {
+  // Replacing a single-select's options resets the selection to the first entry,
+  // and the first default role is `admin` - so a version of this that read the
+  // element after repopulating it turned "Create pairing code" into an admin code
+  // for a click that used to mint a viewer one.
+  const roles = ['admin', 'oncall', 'viewer'];
+
+  assert.equal(view.nextRoleChoice('', roles), 'viewer', 'nothing chosen yet');
+  assert.equal(view.nextRoleChoice('oncall', roles), 'oncall', 'a choice is kept');
+  assert.equal(view.nextRoleChoice('gone', roles), 'viewer', 'a role that no longer exists');
+  assert.equal(
+    view.nextRoleChoice('', ['admin', 'oncall']),
+    'admin',
+    'with no viewer role at all there is nothing safer to pick',
+  );
+});

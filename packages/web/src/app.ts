@@ -19,6 +19,7 @@ import {
   announcementFor,
   formatCodeInput,
   matchesFilter,
+  nextRoleChoice,
   qrDataUrl,
   renderNotificationItem,
 } from './view.js';
@@ -579,6 +580,9 @@ async function refreshDevices(): Promise<void> {
 async function refreshRoles(): Promise<void> {
   const data = await client.admin('roles.list');
   const select = $<HTMLSelectElement>('code-role');
+  // Read before the options are replaced: replacing them resets the selection to
+  // the first entry, so reading it afterwards is reading `admin`.
+  const previous = select.value;
   select.replaceChildren(
     ...data.roles.map((role) => {
       const opt = document.createElement('option');
@@ -587,12 +591,10 @@ async function refreshRoles(): Promise<void> {
       return opt;
     }),
   );
-  // The previous choice survives the drawer being closed and opened again;
-  // `viewer` is only the starting point.
-  const wanted = select.value || 'viewer';
-  select.value = data.roles.some((r) => r.name === wanted)
-    ? wanted
-    : (data.roles[0]?.name ?? 'viewer');
+  select.value = nextRoleChoice(
+    previous,
+    data.roles.map((r) => r.name),
+  );
 }
 
 $('devices-toggle').addEventListener('click', () => {
