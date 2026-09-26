@@ -2209,3 +2209,41 @@ test('a source that cannot be dialled leaves the rest of the list usable', async
 
   manager.disconnectAll();
 });
+
+test('a restarted hub no longer counts the sockets it was holding', async () => {
+  // `stop()` emptied the session map before each socket's close event arrived,
+  // so `closeSession` returned at its `delete` guard without releasing the
+  // connection slot. The guard outlives `stop()`, so a hub cycled with devices
+  // connected came back refusing the very devices it had been holding.
+  const dir = tmp('restart-slots');
+  const hub = new Notifier({
+    port: 0,
+    storeDir: dir,
+    dashboard: false,
+    logger: false,
+    security: { maxConnectionsPerIp: 2 },
+  });
+  await hub.start();
+
+  const dial = (port) =>
+    new Promise((resolve, reject) => {
+      const ws = new WebSocket(`ws://127.0.0.1:${port}`);
+      ws.on('open', () => resolve(ws));
+      ws.on('error', reject);
+    });
+
+  const first = await dial(Number(new URL(hub.url).port));
+  const second = await dial(Number(new URL(hub.url).port));
+
+  await hub.stop();
+  await hub.start();
+
+  const again = await dial(Number(new URL(hub.url).port)).catch(() => undefined);
+  assert.ok(again, 'the slots those two sockets held were given back');
+
+  first.close();
+  second.close();
+  again.close();
+  await hub.stop();
+  rmSync(dir, { recursive: true, force: true });
+});

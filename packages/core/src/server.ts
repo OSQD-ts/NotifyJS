@@ -614,7 +614,17 @@ export class Notifier extends EventEmitter<NotifierEvents> {
     for (const timer of this.ackWaiters.values()) clearTimeout(timer);
     this.ackWaiters.clear();
 
-    for (const session of [...this.sessions.values()]) session.close(1001, 'shutting down');
+    // Torn down here rather than left to each socket's close event. That
+    // event arrives a tick later, by which time the map has been emptied and
+    // `closeSession` returns at its `delete` guard - before releasing the
+    // connection slot. The `Guard` is built once and outlives `stop()`, so
+    // those phantom counts were still charged after the next `start()`: a hub
+    // cycled a few times with devices connected refused the very devices it
+    // had been holding, and the sweeper could never reclaim them.
+    for (const session of [...this.sessions.values()]) {
+      session.close(1001, 'shutting down');
+      this.closeSession(session);
+    }
     this.sessions.clear();
     this.byDevice.clear();
 
