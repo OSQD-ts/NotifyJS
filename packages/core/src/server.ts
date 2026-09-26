@@ -633,6 +633,22 @@ export class Notifier extends EventEmitter<NotifierEvents> {
       dashboard: this.opts.dashboard ? this.dashboardUrl : false,
       devices: this.store.devices().length,
     });
+    // Said out loud, because the failure it warns about is silence. Devices past the
+    // per-address limit are answered `too_many_connections` and retry, so they come
+    // back in waves or not at all, and nobody sees an error: the operator sees a phone
+    // that is "sometimes late". Behind a reverse proxy with `trustProxy` off - the
+    // default - every device shares the proxy's address, so the limit applies to all of
+    // them together, and ten is the default.
+    const paired = this.store.devices().filter((d) => d.status === 'active').length;
+    if (paired > this.opts.security.maxConnectionsPerIp) {
+      this.opts.logger(
+        `${paired} devices are paired and security.maxConnectionsPerIp is ` +
+          `${this.opts.security.maxConnectionsPerIp}: devices sharing an address beyond that ` +
+          'are refused and retry, which looks like alerts arriving late',
+        { devices: paired, maxConnectionsPerIp: this.opts.security.maxConnectionsPerIp },
+      );
+    }
+
     this.emit('listening', { url: this.url, port: this.opts.port });
     return this;
   }
