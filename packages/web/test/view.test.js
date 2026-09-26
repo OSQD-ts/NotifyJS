@@ -227,3 +227,16 @@ test('a ring stops itself even when nothing tells it to', async () => {
     assert.ok(ms >= 30_000 && ms <= 15 * 60_000, `bounded for ${String(hostile)}: ${ms}`);
   }
 });
+
+test('a notification with an unusable timestamp still renders', () => {
+  // `toISOString()` throws `RangeError` for a `ts` that is not a finite number
+  // in range, and that throw landed mid-render - before the `ack` that follows
+  // it, so the frame was never acknowledged, was replayed on every sync, and
+  // threw again each time: one bad timestamp froze the feed for good.
+  for (const ts of [NaN, undefined, 8.64e15 + 1, 'yesterday']) {
+    const li = view.renderNotificationItem({ ...base, ts }, { onAction() {} });
+    assert.equal(li.querySelector('.time').getAttribute('datetime'), '');
+    assert.equal(li.querySelector('.time').textContent, '\u2014');
+    assert.equal(li.querySelector('h3').textContent, 'Disk almost full', 'the alert still shows');
+  }
+});

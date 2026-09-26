@@ -122,11 +122,7 @@ function feedItem(entry: FeedEntry): HTMLElement {
       { class: 'item-top' },
       el('span', { class: 'sev', text: n.severity.toUpperCase() }),
       el('span', { class: 'channel', text: `${entry.sourceLabel} · ${n.channel}` }),
-      el('time', {
-        class: 'time',
-        datetime: new Date(n.ts).toISOString(),
-        text: new Date(n.ts).toLocaleTimeString(),
-      }),
+      el('time', { class: 'time', datetime: stamp(n.ts).iso, text: stamp(n.ts).shown }),
     ),
     el('h3', { text: n.title }),
     n.body ? el('p', { class: 'body', text: n.body }) : null,
@@ -384,4 +380,20 @@ export function callScreen(state: AppState, actions: Actions, speaking: boolean)
           button('Answer', () => actions.answer(), { class: 'big go' }),
         ),
   );
+}
+
+/**
+ * A timestamp pair, or a dash, rather than an exception.
+ *
+ * `toISOString()` throws `RangeError` for a `ts` that is not a finite number in
+ * range. That throw lands in the middle of rendering the feed - before the `ack`
+ * that follows - so the notification carrying it is never acknowledged, is
+ * replayed on every sync, and throws again each time: one malformed frame
+ * freezes the feed for good. The client swallows the exception, so nothing says
+ * why.
+ */
+function stamp(ts: unknown): { iso: string; shown: string } {
+  const at = new Date(typeof ts === 'number' ? ts : NaN);
+  if (Number.isNaN(at.getTime())) return { iso: '', shown: '\u2014' };
+  return { iso: at.toISOString(), shown: at.toLocaleTimeString() };
 }

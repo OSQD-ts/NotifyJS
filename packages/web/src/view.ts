@@ -48,10 +48,11 @@ export function renderNotificationItem(n: Notification, callbacks: ItemCallbacks
   channel.className = 'channel';
   channel.textContent = n.channel;
 
+  const at = stamp(n.ts);
   const time = document.createElement('time');
   time.className = 'time';
-  time.dateTime = new Date(n.ts).toISOString();
-  time.textContent = new Date(n.ts).toLocaleTimeString();
+  time.dateTime = at.iso;
+  time.textContent = at.shown;
 
   top.append(sev, channel, time);
 
@@ -97,4 +98,20 @@ export function renderNotificationItem(n: Notification, callbacks: ItemCallbacks
  */
 export function announcementFor(n: Notification): string {
   return `${n.severity} alert on ${n.channel}: ${n.title}`;
+}
+
+/**
+ * A timestamp pair, or a dash, rather than an exception.
+ *
+ * `toISOString()` throws `RangeError` for a `ts` that is not a finite number in
+ * range. That throw lands in the middle of rendering the feed - before the `ack`
+ * that follows - so the notification carrying it is never acknowledged, is
+ * replayed on every sync, and throws again each time: one malformed frame
+ * freezes the feed for good. The client swallows the exception, so nothing says
+ * why.
+ */
+function stamp(ts: unknown): { iso: string; shown: string } {
+  const at = new Date(typeof ts === 'number' ? ts : NaN);
+  if (Number.isNaN(at.getTime())) return { iso: '', shown: '\u2014' };
+  return { iso: at.toISOString(), shown: at.toLocaleTimeString() };
 }
