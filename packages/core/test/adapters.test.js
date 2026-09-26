@@ -267,3 +267,28 @@ test('adapters work against a real hub', async () => {
     'the hub recorded what the middleware published',
   );
 });
+
+test('HTTP errors group by route, not by query string', async () => {
+  // `originalUrl` carries the query string, so the dedupe key was unique per
+  // request: a broken route hit by a paginating client opened a flood-control
+  // window per `?page=n` and coalesced nothing, turning a thousand requests into
+  // a thousand notifications - the noise flood control exists to prevent.
+  const keys = [];
+  const sink = {
+    notify: async (input) => {
+      keys.push(input.dedupeKey);
+      return { id: 'x', reached: 0, deliveredTo: [], coalesced: false };
+    },
+  };
+
+  const handler = expressErrorHandler(sink);
+  const err = Object.assign(new Error('items blew up'), { status: 500 });
+  for (const page of [1, 2, 3]) {
+    handler(err, { method: 'GET', originalUrl: `/api/items?page=${page}` }, {}, () => {});
+  }
+  await new Promise((r) => setTimeout(r, 20));
+
+  assert.equal(new Set(keys).size, 1, `one key for one route, got ${[...new Set(keys)].join(' | ')}`);
+  assert.match(keys[0], /GET \/api\/items/);
+  assert.ok(!keys[0].includes('page='), 'and it does not carry the query string');
+});

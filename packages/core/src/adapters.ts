@@ -106,7 +106,17 @@ export function expressErrorHandler(sink: AlertSink, options: HttpErrorOptions =
   ): void {
     const status = err.status ?? err.statusCode ?? 500;
     if (status >= minStatus) {
-      const route = `${req.method ?? 'GET'} ${req.originalUrl ?? req.url ?? '/'}`;
+      const full = req.originalUrl ?? req.url ?? '/';
+      // The query string is dropped for grouping, and only for grouping.
+      // `originalUrl` carries it, so the key was unique per *request* rather than
+      // per route: a broken `/api/items` hit by a paginating client produced a
+      // fresh dedupe key for every `?page=n`, flood control opened a window for
+      // each one and coalesced nothing, and a thousand requests were a thousand
+      // notifications and a thousand live timers. That is the outcome flood
+      // control exists to prevent - "the alert becomes noise to be silenced,
+      // which is how real incidents get missed".
+      const path = full.split('?')[0] ?? full;
+      const route = `${req.method ?? 'GET'} ${path}`;
       void sink
         .notify({
           title: `${status} on ${route}`,
@@ -115,7 +125,9 @@ export function expressErrorHandler(sink: AlertSink, options: HttpErrorOptions =
           severity: options.severity ?? 'error',
           // Group by route and message, not by request.
           dedupeKey: `http:${route}:${err.message}`,
-          data: { status, route },
+          // The whole URL is still reported, since it is what somebody debugging
+          // the failure actually needs.
+          data: { status, route, url: full },
         })
         .catch(() => {});
     }
