@@ -2415,3 +2415,29 @@ test('disconnecting detaches the socket it drops', async () => {
   assert.equal(socket.onmessage, null, 'and detached the moment it is dropped');
   assert.equal(socket.onclose, null);
 });
+
+test('a call naming a policy that does not exist is refused, not reported placed', async () => {
+  // Both `notify.send` and `call.place` started the work, discarded the
+  // rejection and replied `ok`. `call()` raises for a policy it cannot find, so
+  // `notifyjs call --policy nigt-shift` printed "call placed" and rang nobody at
+  // all - the failure mode a pager can least afford.
+  const dir = tmp('bad-policy');
+  const hub = hostileHub(dir);
+  await hub.start();
+  const device = await pairRaw(hub, 'admin', 'caller');
+
+  const bad = await device.ask('call.place', { message: 'the disk is full', policy: 'nigt-shift' });
+  assert.equal(bad.ok, false, 'the caller is told');
+  assert.match(bad.error, /unknown escalation policy/);
+
+  hub.upsertPolicy({ name: 'night-shift', steps: [{ ringSeconds: 5 }] });
+  const good = await device.ask('call.place', { message: 'the disk is full', policy: 'night-shift' });
+  assert.equal(good.ok, true, 'a policy that exists still places the call');
+
+  const sent = await device.ask('notify.send', { title: 'and an ordinary alert' });
+  assert.equal(sent.ok, true);
+
+  device.ws.close();
+  await hub.stop();
+  rmSync(dir, { recursive: true, force: true });
+});

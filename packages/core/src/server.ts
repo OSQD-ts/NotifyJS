@@ -2182,11 +2182,26 @@ export class Notifier extends EventEmitter<NotifierEvents> {
         case 'roles.delete':
           return reply(true, { deleted: this.deleteRole(String(args.name)) });
         case 'notify.send':
-          void this.notify(args as NotifyInput).catch(() => {});
+          // Awaited. Sending touches no network - the Web Push fan-out is
+          // deliberately left to run on its own - so there is nothing to wait
+          // for beyond the work itself, and the caller hears about a failure
+          // instead of being told `ok` while the rejection was discarded.
+          await this.notify(args as NotifyInput);
           return reply(true, {});
-        case 'call.place':
+        case 'call.place': {
+          // A call rings for as long as its ladder says, so this one reply
+          // cannot wait for the outcome. It must still not claim success for a
+          // call that never got off the ground: the one failure raised before
+          // anything rings is a policy name that does not exist, and that is
+          // precisely the typo a caller needs to hear about. `notifyjs call
+          // --policy nigt-shift` printed "call placed" and rang nobody.
+          const wanted = typeof args.policy === 'string' ? args.policy.trim() : '';
+          if (wanted && !this.store.policy(wanted)) {
+            return reply(false, undefined, `unknown escalation policy: ${wanted}`);
+          }
           void this.call(args as CallInput).catch(() => {});
           return reply(true, {});
+        }
         case 'notify.resolve':
           // Awaited: replying with the promise itself serialises to `{}`, so
           // every caller was told nothing had been resolved.
