@@ -2630,3 +2630,48 @@ test('a freshly paired device is not handed the backlog from before it existed',
   await hub.stop();
   rmSync(dir, { recursive: true, force: true });
 });
+
+test('a socket that never opens is given up on rather than waited on for ever', async () => {
+  // The keepalive only starts at `ready`, the watchdog only arms once a frame
+  // has arrived, and `resume()` - what a phone calls on waking - treats
+  // `connecting` as progress. A socket that neither opens nor closes nor errors,
+  // which is what a radio changing network mid-connect produces, left the client
+  // in `connecting` for ever with no timer pending anywhere.
+  const { NotifyClient, memoryStorage } = await import('@osqd/notifyjs-protocol');
+
+  const sockets = [];
+  const statuses = [];
+  const client = new NotifyClient({
+    url: 'ws://192.0.2.1:7741',
+    crypto: nodeCrypto,
+    storage: memoryStorage(),
+    // A black hole: connects to nothing and reports nothing either way.
+    createSocket: () => {
+      const socket = {
+        onopen: null,
+        onmessage: null,
+        onclose: null,
+        onerror: null,
+        send() {},
+        close() {},
+      };
+      sockets.push(socket);
+      return socket;
+    },
+    deviceName: 'mid-handover',
+    platform: 'node-test',
+    connectTimeoutMs: 120,
+  });
+  client.on('status', (v) => statuses.push(v));
+
+  await client.connect();
+  assert.equal(sockets.length, 1, 'one socket is dialled');
+
+  // Long enough for the deadline and the first backoff, which is jittered
+  // between half a second and a second.
+  await delay(1600);
+  assert.ok(statuses.includes('reconnecting'), 'the client notices and retries');
+  assert.ok(sockets.length > 1, `and dials again, sockets: ${sockets.length}`);
+
+  client.disconnect();
+});

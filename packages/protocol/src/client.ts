@@ -29,6 +29,14 @@ const DEFAULT_KEEPALIVE_MS = 30_000;
 const KEEPALIVE_MISSES = 2.5;
 
 /**
+ * How long a socket has to open and finish its handshake before it is retried.
+ *
+ * Comfortably above the hub's own handshake timeout, so a slow but working
+ * connection is never given up on first.
+ */
+const DEFAULT_CONNECT_TIMEOUT_MS = 20_000;
+
+/**
  * The three things a client needs from its host platform. Supplying these is
  * the entire porting effort: the dashboard, the phone app and the CLI daemon
  * all run the identical handshake, reconnect and replay logic below.
@@ -61,6 +69,11 @@ export interface NotifyClientOptions {
   autoReconnect?: boolean;
   /** Namespaces stored credentials so one app can hold several identities. */
   storagePrefix?: string;
+  /**
+   * How long to wait for a socket to open and finish its handshake, in
+   * milliseconds, before dropping it and retrying. Defaults to 20 seconds.
+   */
+  connectTimeoutMs?: number;
   /**
    * Whether this device currently has any network at all.
    *
@@ -139,6 +152,7 @@ export class NotifyClient {
   private freshlyPaired = false;
   private backoff = 0;
   private reconnectTimer: ReturnType<typeof setTimeout> | undefined;
+  private connectTimer: ReturnType<typeof setTimeout> | undefined;
   private closedByUs = false;
   private pendingCode: string | undefined;
   /**
@@ -294,6 +308,7 @@ export class NotifyClient {
     this.serviceMissing = false;
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
     this.reconnectTimer = undefined;
+    this.clearConnectDeadline();
     // Detached before closing, exactly as `open()` does for the socket it
     // replaces. `close()` only begins the closing handshake, so frames already
     // queued on the host's event loop still dispatched into these handlers: a
@@ -346,6 +361,7 @@ export class NotifyClient {
     this.setStatus(this.backoff > 0 ? 'reconnecting' : 'connecting');
     const socket = this.opts.createSocket(this.opts.url);
     this.socket = socket;
+    this.armConnectDeadline(socket);
 
     socket.onopen = () => {
       // Nothing to do: the hub speaks first with `hello`, and we cannot sign
@@ -396,6 +412,44 @@ export class NotifyClient {
       }
       this.scheduleReconnect();
     };
+  }
+
+  /**
+   * Gives up on a socket that never finished connecting.
+   *
+   * Nothing else would. The keepalive only starts at `ready`, the watchdog only
+   * arms once a frame has arrived, and `resume()` - the one thing a phone calls
+   * on waking - treats `connecting` as progress and declines to interfere. A
+   * socket that neither opens nor closes nor errors, which is what a radio
+   * switching network mid-connect produces, therefore left the client in
+   * `connecting` for ever, receiving nothing, with not one timer pending.
+   */
+  private armConnectDeadline(socket: SocketLike): void {
+    this.clearConnectDeadline();
+    this.connectTimer = setTimeout(() => {
+      // Only the socket this was armed for, and only while it is still trying.
+      if (this.socket !== socket || this.closedByUs) return;
+      if (this.status === 'ready') return;
+
+      socket.onopen = socket.onmessage = socket.onclose = socket.onerror = null;
+      this.socket = undefined;
+      try {
+        socket.close(1000, 'handshake timed out');
+      } catch {
+        /* already closing */
+      }
+      // Through the backoff rather than straight back out, so a hub that
+      // accepts connections and says nothing is not dialled every twenty
+      // seconds for the life of the app.
+      this.scheduleReconnect();
+    }, this.opts.connectTimeoutMs ?? DEFAULT_CONNECT_TIMEOUT_MS);
+    // Never let this be the reason a process stays alive.
+    (this.connectTimer as { unref?: () => void }).unref?.();
+  }
+
+  private clearConnectDeadline(): void {
+    if (this.connectTimer) clearTimeout(this.connectTimer);
+    this.connectTimer = undefined;
   }
 
   private scheduleReconnect(): void {
@@ -452,6 +506,7 @@ export class NotifyClient {
         return;
 
       case 'ready':
+        this.clearConnectDeadline();
         this.backoff = 0;
         this.role = msg.role;
         this.capabilities = msg.capabilities;
