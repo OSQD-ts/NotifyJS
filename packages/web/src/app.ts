@@ -665,7 +665,11 @@ client.on('ready', (ready) => {
   // The hub's answer, not this tab's memory of one: a snooze is stored on the
   // device record and enforced on delivery, so a tab opened in the middle of one
   // used to show "Snooze 30m" while alerts were being held back.
-  rememberSnooze(ready.snoozedUntil ?? 0);
+  rememberSnooze(
+    ready.snoozedUntil === undefined
+      ? 0
+      : Date.now() + (ready.snoozedUntil - ready.serverTime),
+  );
   renderSnooze();
   $('settings-toggle').hidden = false;
   renderSettings();
@@ -766,7 +770,15 @@ function renderSnooze(): void {
   button.dataset.active = String(active);
   button.textContent = active ? 'Snoozed - tap to resume' : 'Snooze 30m';
   if (snoozeExpiry) clearTimeout(snoozeExpiry);
-  snoozeExpiry = active ? setTimeout(renderSnooze, until - Date.now()) : undefined;
+  // Redraw when it ends, and collect what it held back. A snooze that runs out on
+  // its own changes nothing on either side, so without this a tab left open
+  // recovered those alerts never.
+  snoozeExpiry = active
+    ? setTimeout(() => {
+        renderSnooze();
+        client.sync();
+      }, until - Date.now() + 250)
+    : undefined;
 }
 
 function rememberSnooze(until: number): void {
@@ -783,6 +795,9 @@ $('snooze').addEventListener('click', () => {
   if ($<HTMLButtonElement>('snooze').dataset.active === 'true') {
     client.unsnooze();
     rememberSnooze(0);
+    // The hub held those alerts rather than dropping them, and nothing else would
+    // ask for them: resuming has to collect what was suppressed.
+    client.sync();
     announce('Notifications resumed.');
   } else {
     const duration = 30 * 60_000;

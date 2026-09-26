@@ -366,3 +366,61 @@ test('a decline with no call to match it still reaches the hub that placed it', 
   sources.disconnectAll();
   assert.equal(sources.declineAnywhere(['whatever']), false);
 });
+
+test('what a snooze held back arrives when the snooze ends', async () => {
+  // The promise is written into the desktop client: "Snoozing tells each hub to
+  // hold its alerts rather than dropping them on the floor here, so nothing is
+  // lost - it arrives when the snooze ends." Nothing made it arrive. A snooze
+  // running out changes no state on either side, so the suppressed alerts sat
+  // behind the device's cursor until some unrelated event happened to sync - a
+  // phone being opened, a laptop waking. A dashboard left open recovered them
+  // never.
+  const sources = manager();
+  await sources.load();
+  await sources.add({
+    url: WORK_URL,
+    code: work.createPairingCode({ role: 'oncall' }).code,
+  });
+  await new Promise((r) => setTimeout(r, 400));
+
+  const seen = [];
+  sources.on('notification', (n) => seen.push(n.notification.title));
+
+  sources.snoozeAll(600);
+  await new Promise((r) => setTimeout(r, 200));
+
+  await work.error({ title: 'held by the snooze', channel: 'ci' });
+  await new Promise((r) => setTimeout(r, 200));
+  assert.deepEqual(seen, [], 'nothing arrives while snoozed');
+
+  // No foregrounding, no reconnect, no other event: just the snooze ending.
+  await new Promise((r) => setTimeout(r, 1200));
+  assert.deepEqual(seen, ['held by the snooze'], 'and it arrives once it ends');
+
+  sources.disconnectAll();
+});
+
+test('resuming early collects what was held', async () => {
+  const sources = manager();
+  await sources.load();
+  await sources.add({
+    url: WORK_URL,
+    code: work.createPairingCode({ role: 'oncall' }).code,
+  });
+  await new Promise((r) => setTimeout(r, 400));
+
+  const seen = [];
+  sources.on('notification', (n) => seen.push(n.notification.title));
+
+  sources.snoozeAll(60_000);
+  await new Promise((r) => setTimeout(r, 200));
+  await work.error({ title: 'held until resumed', channel: 'ci' });
+  await new Promise((r) => setTimeout(r, 200));
+  assert.deepEqual(seen, []);
+
+  sources.unsnoozeAll();
+  await new Promise((r) => setTimeout(r, 500));
+  assert.deepEqual(seen, ['held until resumed'], 'tapping resume goes and gets them');
+
+  sources.disconnectAll();
+});

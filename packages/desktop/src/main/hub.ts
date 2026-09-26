@@ -52,7 +52,6 @@ export class Hub {
     return this.manager.snoozedUntil;
   }
 
-  private snoozeEnds: NodeJS.Timeout | undefined;
   private sources = [] as AppState['sources'];
   private listeners: Partial<HubEvents> = {};
 
@@ -158,17 +157,10 @@ export class Hub {
     if (durationMs > 0) this.manager.snoozeAll(durationMs);
     else this.manager.unsnoozeAll();
 
-    // Armed so the tray and the feed stop saying "snoozed" the moment it ends.
-    // `publish()` has always cleared an expired snooze, but it only runs when
-    // something else happens - so on a quiet evening the app went on claiming to
-    // be snoozed long after the hub had resumed delivering.
-    if (this.snoozeEnds) clearTimeout(this.snoozeEnds);
-    this.snoozeEnds = undefined;
-    const until = this.manager.snoozedUntil;
-    if (until > Date.now()) {
-      this.snoozeEnds = setTimeout(() => this.publish(), until - Date.now() + 250);
-      this.snoozeEnds.unref?.();
-    }
+    // No timer here: the manager arms one when a snooze starts or is adopted from
+    // a hub, and publishes when it ends - which this app already turns into a
+    // redraw through its `sources` handler. Two timers for one deadline is one too
+    // many.
     this.publish();
   }
 

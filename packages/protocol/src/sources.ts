@@ -92,6 +92,8 @@ export class SourceManager {
    * cancelling the pairing that was already in flight.
    */
   private loading: Promise<void> | undefined;
+  /** Fires when the running snooze ends, to catch up and redraw. */
+  private snoozeTimer: ReturnType<typeof setTimeout> | undefined;
 
   constructor(private readonly opts: SourceManagerOptions) {}
 
@@ -291,15 +293,54 @@ export class SourceManager {
       client.snooze(durationMs);
       this.setState(id, { snoozedUntil: until });
     }
+    this.armSnoozeCatchUp();
     this.publish();
   }
 
   unsnoozeAll(): void {
-    for (const [id, client] of this.clients) {
-      client.unsnooze();
+    // Cleared for every known source, not only the connected ones: muting a hub
+    // drops its client and keeps its state, and that state was then stuck reading
+    // "snoozed" with nothing able to clear it.
+    for (const id of this.sources.keys()) {
+      this.clients.get(id)?.unsnooze();
       this.setState(id, { snoozedUntil: undefined });
     }
+    this.armSnoozeCatchUp();
     this.publish();
+    // What the hub held back is still sitting behind this device's cursor, and
+    // nothing else would ask for it: the snooze promise is that alerts are held
+    // rather than dropped, so resuming has to go and collect them.
+    this.syncAll();
+  }
+
+  /**
+   * Collects what a snooze held back, the moment it ends.
+   *
+   * Nothing else would. A snooze that runs out on its own changes no state on
+   * either side - the hub simply starts allowing alerts again - so the ones it
+   * suppressed stayed behind the device's cursor until some unrelated event
+   * happened to trigger a sync: the phone being opened, the laptop waking. A
+   * dashboard tab left open recovered them never, though the desktop client's own
+   * comment promises "nothing is lost - it arrives when the snooze ends".
+   *
+   * The same timer is what stops the UI claiming a snooze that has expired.
+   */
+  private armSnoozeCatchUp(): void {
+    if (this.snoozeTimer) clearTimeout(this.snoozeTimer);
+    this.snoozeTimer = undefined;
+
+    const until = this.snoozedUntil;
+    if (until <= Date.now()) return;
+
+    this.snoozeTimer = setTimeout(
+      () => {
+        this.snoozeTimer = undefined;
+        this.publish();
+        this.syncAll();
+      },
+      until - Date.now() + 250,
+    );
+    (this.snoozeTimer as { unref?: () => void }).unref?.();
   }
 
   /** When the running snooze ends, across every source, or 0 if none is. */
@@ -314,6 +355,8 @@ export class SourceManager {
   }
 
   disconnectAll(): void {
+    if (this.snoozeTimer) clearTimeout(this.snoozeTimer);
+    this.snoozeTimer = undefined;
     for (const client of this.clients.values()) client.disconnect();
     this.clients.clear();
   }
@@ -435,9 +478,18 @@ export class SourceManager {
         status: 'ready',
         paired: true,
         role: ready.role,
-        // The hub's answer wins, including when it says there is no snooze.
-        snoozedUntil: ready.snoozedUntil,
+        // The hub's answer wins, including when it says there is no snooze. Its
+        // clock, too: the value is the hub's absolute time, and a device whose
+        // own clock is fast would otherwise decide a live snooze had expired -
+        // reading "not snoozed" while alerts were still being held, which is the
+        // wrong way round. `serverTime` arrives in the same frame for exactly
+        // this.
+        snoozedUntil:
+          ready.snoozedUntil === undefined
+            ? undefined
+            : Date.now() + (ready.snoozedUntil - ready.serverTime),
       });
+      this.armSnoozeCatchUp();
       this.publish();
     });
 
