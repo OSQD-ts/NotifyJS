@@ -420,9 +420,20 @@ function ready(client: NotifyClient, timeoutMs = 15_000): Promise<void> {
       reject(new Error(err.message));
     });
     client.on('status', (status) => {
-      if (status !== 'unpaired') return;
-      clearTimeout(timer);
-      reject(new Error('this machine is not paired yet - run: notifyjs pair <code>'));
+      if (status === 'unpaired') {
+        clearTimeout(timer);
+        reject(new Error('this machine is not paired yet - run: notifyjs pair <code>'));
+        return;
+      }
+      // `idle` means the socket closed and nothing is going to retry: these clients
+      // are built with `autoReconnect: false`, because a command either does its work
+      // now or reports why not. Waiting out the full timeout for an answer that had
+      // already arrived made every command against a hub that is not running take
+      // fifteen seconds to say so.
+      if (status === 'idle') {
+        clearTimeout(timer);
+        reject(new Error('could not reach the hub - is it running, and is --url right?'));
+      }
     });
   });
 }
