@@ -359,12 +359,17 @@ test('a decline with no call to match it still reaches the hub that placed it', 
   const placed = calls[0]?.call.id;
   assert.ok(placed, 'the call rang');
 
-  assert.equal(sources.declineAnywhere([placed]), true, 'there was somewhere to send it');
+  const told = sources.declineOnReady(placed);
+  assert.equal(told.length, 1, 'the connected hub was told');
   assert.equal((await outcome).outcome, 'declined', 'and the hub acted on it at once');
 
-  // With nothing connected there is nothing to tell, and the caller is told so.
+  // Which sources were told is what the caller needs: a phone watching two hubs
+  // must keep the tap until the one that actually rang has heard it, and "somebody
+  // was told" would have thrown it away on the first source to come up.
+  assert.deepEqual(sources.declineOnReady(placed, new Set(told)), [], 'not told twice');
+
   sources.disconnectAll();
-  assert.equal(sources.declineAnywhere(['whatever']), false);
+  assert.deepEqual(sources.declineOnReady('whatever'), [], 'and nobody to tell is empty');
 });
 
 test('what a snooze held back arrives when the snooze ends', async () => {

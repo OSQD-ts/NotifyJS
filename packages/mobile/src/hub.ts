@@ -36,6 +36,14 @@ import { secureStorage } from './storage';
 
 const PREFS_KEY = 'notifyjs_preferences';
 
+/**
+ * How long a decline tapped on a notification is carried while no hub can take it.
+ *
+ * Five minutes: longer than any ring this hub will ask for, and short enough that
+ * a tap nobody could place does not follow the app around.
+ */
+const DECLINE_HOLD_MS = 5 * 60_000;
+
 export interface HubState {
   sources: SourceState[];
   feed: FeedEntry[];
@@ -101,12 +109,15 @@ class HubClient {
   private watchers: Array<() => void> = [];
 
   /**
-   * Declines tapped on a notification before any hub was connected.
+   * Declines tapped on a notification before the hub that rang could be told.
    *
-   * Kept until there is somewhere to send them: the hub needs to know the phone
-   * refused, or it waits out the whole ring before trying the next person.
+   * Kept per call, with the sources already told, because a phone may watch
+   * several hubs and they come up one at a time: forgetting the tap once *any* of
+   * them had heard it sent the decline to a hub that had never rung and lost it.
+   * The hub needs to know the phone refused, or it waits out the whole ring before
+   * trying the next person.
    */
-  private readonly pendingDeclines = new Set<string>();
+  private readonly pendingDeclines = new Map<string, { told: Set<string>; at: number }>();
 
   constructor() {
     this.manager = new SourceManager({
@@ -305,7 +316,9 @@ class HubClient {
           // connected hub - the one that owns the call acts on it, and the others
           // ignore a call id they have never rung. Without this the tap was
           // silently dropped, which is the case the queue exists for.
-          this.pendingDeclines.add(callId);
+          if (!this.pendingDeclines.has(callId)) {
+            this.pendingDeclines.set(callId, { told: new Set(), at: Date.now() });
+          }
           this.flushDeclines();
         };
         // The native side queues every tap and sends the event only as a nudge,
@@ -371,11 +384,26 @@ class HubClient {
    * decides it - preferences, and whether any source is enabled - now lives
    * here, and because the service must not depend on a screen being mounted.
    */
-  /** Offers held declines to every connected hub, once there is one. */
+  /** Offers held declines to hubs that are ready and have not been told yet. */
   private flushDeclines(): void {
     if (this.pendingDeclines.size === 0) return;
-    if (!this.manager.declineAnywhere([...this.pendingDeclines])) return;
-    this.pendingDeclines.clear();
+    const known = this.state.sources.map((source) => source.id);
+
+    for (const [callId, held] of this.pendingDeclines) {
+      // Given up on eventually: by then the call has rung out on its own, and a
+      // decline nobody can place is not worth carrying for the life of the process.
+      if (Date.now() - held.at > DECLINE_HOLD_MS) {
+        this.pendingDeclines.delete(callId);
+        continue;
+      }
+
+      for (const id of this.manager.declineOnReady(callId, held.told)) held.told.add(id);
+      // Dropped only once every hub this phone knows about has heard it, since any
+      // one of them could be the hub that rang.
+      if (known.length > 0 && known.every((id) => held.told.has(id))) {
+        this.pendingDeclines.delete(callId);
+      }
+    }
   }
 
   private applyWatching(): void {
