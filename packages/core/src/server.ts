@@ -1096,9 +1096,23 @@ export class Notifier extends EventEmitter<NotifierEvents> {
       return refuse(socket, 429, 'Too Many Requests', verdict.retryAfter);
     }
 
+    // A handshake `ws` abandons never reaches this callback: no
+    // `Sec-WebSocket-Key`, a version it does not speak, an unparseable
+    // extension header. Node has emitted `upgrade` by then and `admit()` above
+    // has already charged a slot, so without releasing it here the count is
+    // held by a session that never existed - `closeSession` is the only other
+    // caller of `release()`, and the sweeper keeps any address whose count is
+    // not zero. A hundred such requests answer every honest device with 429,
+    // for the life of the process.
+    //
+    // The flag is enough because `ws` completes an upgrade synchronously in
+    // this configuration - `noServer`, and no `verifyClient` to defer on.
+    let opened = false;
     this.wss!.handleUpgrade(req, socket, head, (ws) => {
+      opened = true;
       this.openSession(ws, ip, origin);
     });
+    if (!opened) this.guard.release(ip, false);
   }
 
   /**

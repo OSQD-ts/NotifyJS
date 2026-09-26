@@ -26,6 +26,7 @@ import {
   verify,
 } from 'node:crypto';
 import { createServer } from 'node:http';
+import { connect } from 'node:net';
 
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -2029,6 +2030,53 @@ test('demoting a device takes effect without waiting for it to reconnect', async
   assert.equal(after.error, 'forbidden');
 
   device.ws.close();
+  await hub.stop();
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test('a handshake ws abandons gives its connection slot back', async () => {
+  // The upgrade charges a slot before `ws` is handed the socket, and `ws`
+  // never calls back for a handshake it abandons - no `Sec-WebSocket-Key`, a
+  // version it does not speak. Nothing else released the slot, and since the
+  // sweeper keeps any address whose count is not zero, a burst of malformed
+  // upgrades answered every honest device with 429 for the life of the hub.
+  const dir = tmp('upgrade-slot');
+  const hub = new Notifier({
+    port: 0,
+    storeDir: dir,
+    dashboard: false,
+    logger: false,
+    security: { maxUnauthenticated: 4, maxConnectionsPerIp: 3 },
+  });
+  await hub.start();
+  const port = Number(new URL(hub.url).port);
+
+  const abandoned = () =>
+    new Promise((resolve) => {
+      const socket = connect(port, '127.0.0.1', () => {
+        socket.write(
+          'GET / HTTP/1.1\r\n' +
+            'Host: 127.0.0.1\r\n' +
+            'Connection: Upgrade\r\n' +
+            'Upgrade: websocket\r\n' +
+            'Sec-WebSocket-Version: 13\r\n\r\n',
+        );
+      });
+      socket.on('data', () => socket.destroy());
+      socket.on('close', resolve);
+      socket.on('error', resolve);
+    });
+
+  for (let i = 0; i < 8; i += 1) await abandoned();
+
+  const ws = new WebSocket(hub.url.replace('localhost', '127.0.0.1'));
+  const admitted = await new Promise((resolve) => {
+    ws.on('open', () => resolve(true));
+    ws.on('error', () => resolve(false));
+  });
+  assert.ok(admitted, 'an honest device still gets in after eight abandoned handshakes');
+
+  ws.close();
   await hub.stop();
   rmSync(dir, { recursive: true, force: true });
 });
