@@ -3,6 +3,7 @@ import * as Device from 'expo-device';
 import * as Network from 'expo-network';
 import {
   SourceManager,
+  coerceSeverity,
   defaultPreferences,
   normalizePreferences,
   type ClientPreferences,
@@ -203,6 +204,14 @@ class HubClient {
       }),
 
       this.manager.on('notification', (entry) => {
+        // Coerced here, once, because nothing validates an incoming frame: the
+        // client casts the parsed JSON and hands it on. Every screen reads
+        // `severity` and two of them call `.toUpperCase()` on it, so a hub that
+        // omitted the field crashed the render - the feed, or the call screen at
+        // the moment a page arrived, with the native ringer still going and no
+        // JavaScript left to answer it. The colour lookups already treated it as
+        // untrusted; this makes the rest of the app agree with them.
+        entry = { ...entry, notification: severe(entry.notification, 'info') };
         const feed = addToFeed(this.state.feed, entry);
         // The same array back means the feed already held this alert, and that
         // is the ordinary case rather than an exceptional one: a reconnect
@@ -225,6 +234,9 @@ class HubClient {
       }),
 
       this.manager.on('call', (entry) => {
+        // Same reasoning as the notification above, and it matters more: a call
+        // is rendered full screen the instant it arrives.
+        entry = { ...entry, call: severe(entry.call, 'critical') };
         this.set({ activeCall: entry });
         showIncomingCall({
           id: entry.call.id,
@@ -408,6 +420,11 @@ class HubClient {
     this.starting = undefined;
     this.wired = false;
   }
+}
+
+/** A frame with a severity this app can rely on. */
+function severe<T extends { severity: string }>(frame: T, fallback: 'info' | 'critical'): T {
+  return { ...frame, severity: coerceSeverity(frame.severity, fallback) };
 }
 
 /**
