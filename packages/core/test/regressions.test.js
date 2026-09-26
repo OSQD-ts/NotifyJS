@@ -1827,9 +1827,10 @@ function hostileHub(dir, extra = {}) {
   });
 }
 
-async function pairRaw(hub, role, label) {
+async function pairRaw(hub, role, label, existingCode) {
   const { canonical, SIG_PAIR, normalizePairingCode } = await import('@osqd/notifyjs-protocol');
-  const code = normalizePairingCode(hub.createPairingCode({ role }).code);
+  // A caller that minted its own code - to restrict it, say - passes it in.
+  const code = normalizePairingCode(existingCode ?? hub.createPairingCode({ role }).code);
   const keys = await nodeCrypto.generateKeyPair();
   const c = await rawSocket(hub);
   const hello = await c.next();
@@ -2759,5 +2760,57 @@ test('a hub that recovered from a corrupt store keeps the identity it chose', as
   assert.equal(second.recoveredFrom, undefined, 'and there is nothing left to recover from');
   second.close();
 
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test('an allow list that is present but empty still refuses everybody', async () => {
+  // Absent and empty are different answers. An operator building the list from
+  // configuration gets `[]` when the source is empty, and reading that as "no
+  // rule" turns a hub that refuses everyone - loudly, and visibly - into one
+  // that has an allow list and enforces nothing.
+  const { Guard } = await import('../dist/index.js');
+  const store = { ban: () => undefined, putBan() {}, clearBan() {}, bans: () => [] };
+  const base = {
+    maxConnectionsPerIp: 5,
+    connectionBurst: 5,
+    connectionRefillPerSec: 1,
+    maxUnauthenticated: 10,
+  };
+
+  const empty = new Guard({ ...base, allowIps: [] }, store);
+  assert.equal(empty.refused('1.2.3.4'), true, 'an empty allow list admits nobody');
+  empty.stop();
+
+  const absent = new Guard(base, store);
+  assert.equal(absent.refused('1.2.3.4'), false, 'no allow list at all admits everybody');
+  absent.stop();
+
+  const deny = new Guard({ ...base, denyIps: [] }, store);
+  assert.equal(deny.refused('1.2.3.4'), false, 'an empty deny list refuses nobody');
+  deny.stop();
+});
+
+test('a pairing code restricted to a range can be redeemed from inside it', async () => {
+  // The hub-wide lists learned about CIDR ranges and this check did not: an
+  // exact-string `includes` meant a code restricted to `127.0.0.0/8` matched no
+  // address at all, and since the restriction refuses anything unlisted, the
+  // code was unusable by anybody.
+  const dir = tmp('code-cidr');
+  const hub = hostileHub(dir);
+  await hub.start();
+
+  const inRange = hub.createPairingCode({ role: 'viewer', allowIps: ['127.0.0.0/8'] });
+  const device = await pairRaw(hub, 'viewer', 'in-range', inRange.code);
+  assert.ok(device.deviceId, 'a device inside the range pairs');
+  device.ws.close();
+
+  // And one that cannot be satisfied is refused while the person minting it is
+  // still looking at the answer.
+  assert.throws(
+    () => hub.createPairingCode({ role: 'viewer', allowIps: ['10.0.0.0/'] }),
+    /not an IP address or CIDR range/,
+  );
+
+  await hub.stop();
   rmSync(dir, { recursive: true, force: true });
 });

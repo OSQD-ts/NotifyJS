@@ -289,11 +289,17 @@ export class MessageLimiter {
  * `BlockList` keeps the matching native, so the lists can stay long without an
  * attacker's connection rate deciding how much work the hub does per attempt.
  */
-function compileIpList(
-  option: 'allowIps' | 'denyIps',
+export function compileIpList(
+  option: 'allowIps' | 'denyIps' | 'pairing code allowIps',
   entries: readonly string[] | undefined,
 ): BlockList | undefined {
-  if (!entries || entries.length === 0) return undefined;
+  // Absent and empty are different answers, and only absent means "no rule".
+  // An allow list that is present and empty says nothing may connect, which is
+  // what an operator building one from configuration gets when the source is
+  // empty - `(process.env.ALLOW_IPS ?? '').split(',').filter(Boolean)`. Treating
+  // that as "no rule" would turn a hub that refuses everybody, loudly, into one
+  // that has an allow list and enforces nothing.
+  if (!entries) return undefined;
 
   const list = new BlockList();
   for (const raw of entries) {
@@ -302,7 +308,7 @@ function compileIpList(
     const address = slash === -1 ? entry : entry.slice(0, slash);
     const family = isIPv4(address) ? 'ipv4' : isIPv6(address) ? 'ipv6' : undefined;
     const bad = new Error(
-      `security.${option}: "${raw}" is not an IP address or CIDR range (try "10.0.0.5" or "10.0.0.0/24")`,
+      `${option === 'pairing code allowIps' ? option : `security.${option}`}: "${raw}" is not an IP address or CIDR range (try "10.0.0.5" or "10.0.0.0/24")`,
     );
     if (!family) throw bad;
 
@@ -324,7 +330,7 @@ function compileIpList(
 }
 
 /** Whether an address matches a compiled list. */
-function matchesIp(list: BlockList, ip: string): boolean {
+export function matchesIp(list: BlockList, ip: string): boolean {
   const family = isIPv4(ip) ? 'ipv4' : isIPv6(ip) ? 'ipv6' : undefined;
   return family !== undefined && list.check(ip, family);
 }

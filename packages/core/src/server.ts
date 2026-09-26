@@ -43,7 +43,14 @@ import { nodeCrypto } from '@osqd/notifyjs-protocol/node';
 
 import { resolveOptions, type NotifierOptions, type ResolvedOptions } from './options.js';
 import { Store } from './store.js';
-import { Guard, MessageLimiter, normalizeIp, uniformDelay } from './guard.js';
+import {
+  Guard,
+  MessageLimiter,
+  compileIpList,
+  matchesIp,
+  normalizeIp,
+  uniformDelay,
+} from './guard.js';
 import {
   bearerFrom,
   findIngestToken,
@@ -854,8 +861,15 @@ export class Notifier extends EventEmitter<NotifierEvents> {
       createdAt: Date.now(),
       expiresAt,
       usesLeft: clampNumber(input.uses, 1, MAX_CODE_USES, 1),
+      // Compiled and discarded, purely to refuse a restriction nobody could
+      // satisfy while the person minting the code is still looking at the
+      // answer. A code restricted to an address that is not one cannot be
+      // redeemed by anybody, and at redemption time there is no one to tell.
       allowIps: Array.isArray(input.allowIps)
-        ? input.allowIps.filter((ip) => typeof ip === 'string').slice(0, 50)
+        ? ((list) => {
+            compileIpList('pairing code allowIps', list);
+            return list;
+          })(input.allowIps.filter((ip) => typeof ip === 'string').slice(0, 50))
         : undefined,
       label: typeof input.label === 'string' ? input.label.slice(0, 64) : undefined,
     });
@@ -1666,8 +1680,23 @@ export class Notifier extends EventEmitter<NotifierEvents> {
       return fail(reason);
     };
 
-    if (record.allowIps && !record.allowIps.includes(session.ip)) {
-      return rejectAndRelease('ip_not_allowed');
+    // Through the same matcher as the hub-wide lists, so a range works here
+    // too. This was an exact-string `includes`, which meant a code restricted to
+    // `10.0.0.0/24` could be redeemed by nobody at all - and the restriction
+    // refuses anything unlisted, so the code was simply unusable.
+    if (record.allowIps) {
+      let allowed;
+      try {
+        allowed = compileIpList('pairing code allowIps', record.allowIps);
+      } catch {
+        // A restriction that cannot be read is not one anybody may redeem
+        // against: "only these addresses" has to fail closed, and a code stored
+        // by an older build could hold anything.
+        return rejectAndRelease('ip_not_allowed');
+      }
+      if (allowed && !matchesIp(allowed, session.ip)) {
+        return rejectAndRelease('ip_not_allowed');
+      }
     }
 
     const role = this.store.role(record.role);
