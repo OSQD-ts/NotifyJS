@@ -34,6 +34,7 @@ interface NotifyjsCallNative {
   speak(text: string, language: string, rate: number, pitch: number, repeat: number): Promise<boolean>;
   stopSpeaking(): void;
   showAlert(id: string, title: string, body: string, sound: boolean, vibrate: boolean): void;
+  consumePendingCallActions(): CallAction[];
   canUseFullScreen(): boolean;
   openFullScreenSettings(): void;
   isBatteryOptimized(): boolean;
@@ -114,6 +115,20 @@ export function stopSpeaking(): void {
  */
 export function addCallActionListener(listener: (event: CallAction) => void): Subscription | undefined {
   return emitter?.addListener<CallAction>('onCallAction', listener);
+}
+
+/**
+ * Answer and Decline taps that arrived before the app was listening.
+ *
+ * Reading them clears them. The native side cannot push these: it installs its
+ * listener while the module registry is being built, before the bundle has run,
+ * so anything replayed then went to an emitter with no subscribers. Answer had a
+ * second path through the launch intent and survived; a Decline from a lock
+ * screen was simply lost, and the hub then waited out the whole ring before
+ * escalating to the next person.
+ */
+export function consumePendingCallActions(): CallAction[] {
+  return native?.consumePendingCallActions() ?? [];
 }
 
 /**

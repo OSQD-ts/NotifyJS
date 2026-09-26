@@ -15,6 +15,7 @@ import {
   addCallActionListener,
   addWakeListener,
   consumeAnsweredCall,
+  consumePendingCallActions,
   dismissCall,
   showAlert,
   showIncomingCall,
@@ -275,7 +276,7 @@ class HubClient {
       // Answer and Decline pressed on the notification itself, which is the
       // only way to act on a call without unlocking the phone first.
       (() => {
-        const sub = addCallActionListener(({ action, callId }) => {
+        const act = ({ action, callId }: { action: string; callId: string }) => {
           if (action === 'answer') {
             this.set({ answeredCallId: callId });
             return;
@@ -285,7 +286,13 @@ class HubClient {
             this.manager.declineCall(entry.sourceId, callId);
             this.set({ activeCall: undefined });
           }
-        });
+        };
+        const sub = addCallActionListener(act);
+        // Taps that landed before this listener existed, which is most of them:
+        // the notification's receiver runs whether or not there is a runtime, and
+        // tapping one is often what starts the app. Pulled immediately after
+        // subscribing, so nothing is lost in the gap.
+        for (const pending of consumePendingCallActions()) act(pending);
         return () => sub?.remove();
       })(),
 

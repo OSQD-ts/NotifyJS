@@ -31,7 +31,29 @@ object CallEvents {
   @Synchronized
   fun listen(callback: (Action) -> Unit) {
     listener = callback
-    while (pending.isNotEmpty()) callback(pending.removeFirst())
+  }
+
+  /**
+   * Hands over the taps that arrived before anybody was listening, and forgets
+   * them.
+   *
+   * `listen` used to replay them itself, and that never reached JavaScript: the
+   * module installs its listener from `OnCreate`, which runs while the module
+   * registry is being built - before the bundle has executed, let alone
+   * subscribed - so every replayed tap was sent to an emitter with no
+   * subscribers and dropped. Answer survived only because it has a second path
+   * through the activity intent; Decline had none, so a decline from a lock
+   * screen was lost and the hub waited out the whole ring before escalating to
+   * the next person.
+   *
+   * Pulled rather than pushed, exactly like `consumeAnsweredCall`, because that
+   * is the shape that demonstrably works across this boundary.
+   */
+  @Synchronized
+  fun drainPending(): List<Action> {
+    val held = pending.toList()
+    pending.clear()
+    return held
   }
 
   @Synchronized
