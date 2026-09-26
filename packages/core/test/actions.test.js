@@ -122,7 +122,9 @@ test('a role without notify.act cannot act, only acknowledge', async () => {
   // `oncall` carries notify.ack, and the stock `viewer` does too - which is
   // exactly why acting needs its own capability.
   const c = await connect(hub, 'oncall');
-  const n = await hub.notify(withButton('Not for you'));
+  // At a severity this role actually receives: `oncall` has a `warning` floor, and an
+  // acknowledgement for an alert a device was never shown is now ignored outright.
+  const n = await hub.notify({ ...withButton('Not for you'), severity: 'error' });
 
   const acted = next(hub, 'action');
   const acked = next(hub, 'ack');
@@ -222,4 +224,26 @@ test('granting notify.act is treated as an escalation', () => {
     if (role.name === 'admin') continue;
     assert.ok(!role.capabilities.includes('notify.act'), `${role.name} does not act by default`);
   }
+});
+
+test('an acknowledgement for an alert a device never saw is ignored', async () => {
+  // It used to be taken at face value: it cleared the hub-wide `requireAck` retry, so
+  // a device could stop an alert nagging the people it was actually for, and it raised
+  // an `ack` event the embedding application acts on. The only thing making it hard was
+  // guessing an 80-bit id.
+  const c = await connect(hub, 'oncall');
+  // Below this role's floor, so the hub never delivers it to that device.
+  const unseen = await hub.notify({ title: 'below the floor', channel: 'db', severity: 'info' });
+
+  const acked = next(hub, 'ack');
+  c.ack([unseen.id]);
+  assert.equal(await acked, undefined, 'the hub does not report it as acknowledged');
+
+  const ignored = hub.auditLog(20).filter((e) => e.kind === 'ack.ignored');
+  assert.ok(
+    ignored.some((e) => e.detail?.id === unseen.id),
+    'and says so in the audit log',
+  );
+
+  c.disconnect();
 });

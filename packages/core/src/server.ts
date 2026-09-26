@@ -2037,12 +2037,24 @@ export class Notifier extends EventEmitter<NotifierEvents> {
     // which copies the whole retained array - and then scan it linearly, per
     // id, which is the scan `declaredActions` exists to avoid reintroduced one
     // line below it.
-    const held = claimed
-      ? new Map(this.store.history().map((entry) => [entry.id, entry]))
-      : undefined;
+    // Built for every frame now, not only one carrying an action: an id has to be
+    // checked against what this device could actually have been shown.
+    const held = new Map(this.store.history().map((entry) => [entry.id, entry]));
     let taken = false;
 
     for (const id of ids) {
+      // An acknowledgement for an alert this device was never entitled to see is not
+      // an acknowledgement. It used to be taken at face value: it cleared the
+      // hub-wide retry - so a device could stop a `requireAck` alert nagging the
+      // people it was actually for - and raised an `ack` event that the embedding
+      // application acts on. The ids are 80 bits of randomness, which was the only
+      // thing making it hard.
+      const n = held.get(id);
+      if (!n || !this.allowed(session, n.channel, n.severity, n.to, false)) {
+        this.audit('ack.ignored', { deviceId: session.deviceId, detail: { id } });
+        continue;
+      }
+
       const action = claimed ? this.takeAction(session, id, claimed, offered, held) : undefined;
       if (action) taken = true;
       this.emit('ack', { notificationId: id, deviceId: session.device.id, action });
