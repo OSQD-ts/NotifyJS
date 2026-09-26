@@ -21,7 +21,7 @@ import { chmodSync, readFileSync, writeFileSync } from 'node:fs';
 import { fileStorage, defaultPath } from './storage.js';
 import { generateSelfSigned } from './cert.js';
 import { apply as applyUpdate, check as checkUpdate } from './selfupdate.js';
-import { desktopNotify, printNotification, speakCall } from './desktop.js';
+import { desktopNotify, printNotification, safeText, speakCall } from './desktop.js';
 
 const HELP = `notifyjs - self-hosted notifications for your own devices
 
@@ -465,7 +465,7 @@ async function listen(argv: string[]): Promise<void> {
   // Auto-answering is the right default for an unattended machine: the point
   // of a desktop listener is that somebody hears the message.
   client.on('call', async (call) => {
-    process.stdout.write(`\nincoming call: ${call.message}\n`);
+    process.stdout.write(`\nincoming call: ${safeText(call.message, true)}\n`);
     client.answerCall(call.id);
     await speakCall(call);
     client.endCall(call.id);
@@ -478,8 +478,10 @@ async function listen(argv: string[]): Promise<void> {
    */
   client.on('service:missing', ({ spec, silentForMs }) => {
     const seconds = Math.round(silentForMs / 1000);
-    process.stderr.write(`\n!! ${spec.alert.title} (silent for ${seconds}s)\n`);
-    if (spec.alert.body) process.stderr.write(`   ${spec.alert.body}\n`);
+    // Everything a hub sends is filtered before it reaches this terminal, the
+    // same rule the notification printer already follows.
+    process.stderr.write(`\n!! ${safeText(spec.alert.title)} (silent for ${seconds}s)\n`);
+    if (spec.alert.body) process.stderr.write(`   ${safeText(spec.alert.body)}\n`);
     void desktopNotify({
       id: 'service-down',
       seq: 0,
@@ -496,7 +498,7 @@ async function listen(argv: string[]): Promise<void> {
   });
 
   client.on('service:bye', ({ reason }) => {
-    process.stderr.write(`   hub is going away on purpose: ${reason}\n`);
+    process.stderr.write(`   hub is going away on purpose: ${safeText(reason)}\n`);
   });
 
   client.on('status', (status) => process.stderr.write(`[${status}]\n`));
@@ -579,7 +581,8 @@ async function devices(argv: string[]): Promise<void> {
     const marker = online.has(device.id) ? 'online ' : 'offline';
     const seen = device.lastSeenAt ? new Date(device.lastSeenAt).toLocaleString() : 'never';
     process.stdout.write(
-      `${marker}  ${device.name.padEnd(24)} ${device.role.padEnd(10)} ${device.status.padEnd(8)} ${seen}\n`,
+      `${marker}  ${safeText(device.name).padEnd(24)} ${safeText(device.role).padEnd(10)} ` +
+        `${safeText(device.status).padEnd(8)} ${seen}\n`,
     );
   }
   client.disconnect();
@@ -710,7 +713,8 @@ async function token(argv: string[]): Promise<void> {
       const state = t.revokedAt ? 'revoked' : 'live   ';
       const used = t.lastUsedAt ? new Date(t.lastUsedAt).toLocaleString() : 'never';
       process.stdout.write(
-        `${state}  ${t.id.padEnd(18)} ${t.role.padEnd(10)} ${(t.label ?? '-').padEnd(20)} used: ${used}\n`,
+        `${state}  ${t.id.padEnd(18)} ${t.role.padEnd(10)} ` +
+          `${safeText(t.label ?? '-').padEnd(20)} used: ${used}\n`,
       );
     }
   } finally {

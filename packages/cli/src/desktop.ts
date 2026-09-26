@@ -144,7 +144,7 @@ function pickVoices(message: string): [string, string[]][] {
  * terminals - stuff characters into the input buffer. Newlines are kept in
  * bodies, which are indented rather than printed flat.
  */
-function safeText(value: string, keepNewlines = false): string {
+export function safeText(value: string, keepNewlines = false): string {
   let out = '';
   for (const ch of value) {
     const code = ch.codePointAt(0) ?? 0;
