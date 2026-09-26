@@ -303,7 +303,11 @@ export class Store {
    * append does not drag a full store rewrite along with it.
    */
   private scheduleDrain(): void {
-    if (this.saveTimer) return;
+    // A closed store schedules nothing. The retry inside `drain()` already checked
+    // this, but an ordinary write after `close()` did not, so it armed a timer for
+    // a store nobody is going to service - and on a hub that was stopped and
+    // started again, that timer belongs to the instance that is gone.
+    if (this.closed || this.saveTimer) return;
     this.saveTimer = setTimeout(() => {
       this.saveTimer = undefined;
       this.flush();

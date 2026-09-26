@@ -84,6 +84,14 @@ test('closing does not arm a timer nothing will service', () => {
     // The final write fails; close() must still return, and must not schedule
     // a retry for a store that is going away.
     assert.doesNotThrow(() => store.close());
+    // Asserted, not assumed: the only check here used to be that `close()`
+    // returned, which stayed true with the guard removed - and the re-armed timer
+    // is unref'd, so nothing else could feel it either.
+    assert.equal(store.saveTimer, undefined, 'no timer is left armed');
+    assert.equal(store.closed, true, 'and the store knows it is closed');
+    // A write after closing must not arm one either.
+    store.putDevice(device('after'));
+    assert.equal(store.saveTimer, undefined, 'and a later write does not arm one');
   } finally {
     chmodSync(dir, 0o700);
     rmSync(dir, { recursive: true, force: true });
