@@ -198,10 +198,18 @@ export class Hub {
       );
       if (duplicate) return;
 
+      // A replay carries the resolution with the notification, where a live
+      // `resolve` frame sets it on the entry. Copied across so the row draws as
+      // resolved, and so the tray is not told to announce a condition that ended
+      // hours ago - which happens on every reconnect: a lid, a network blip, a hub
+      // restart.
       const item: FeedEntry = { ...entry };
+      if (item.resolvedAt === undefined && entry.notification.resolvedAt !== undefined) {
+        item.resolvedAt = entry.notification.resolvedAt;
+      }
       this.feed = [item, ...this.feed].slice(0, FEED_LIMIT);
       this.publish();
-      this.listeners.alert?.(item);
+      if (item.resolvedAt === undefined) this.listeners.alert?.(item);
     });
 
     this.manager.on('call', (entry) => {

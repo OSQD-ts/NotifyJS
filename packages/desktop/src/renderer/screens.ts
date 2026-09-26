@@ -111,10 +111,13 @@ export function feedScreen(state: AppState, actions: Actions, filter: Severity |
 
 function feedItem(entry: FeedEntry): HTMLElement {
   const n = entry.notification;
+  // Whichever carries it: a live `resolve` marks the entry, a replayed alert that
+  // was already over carries it on the notification. The phone reads both.
+  const resolvedAt = entry.resolvedAt ?? n.resolvedAt;
   return el(
     'li',
     {
-      class: `item sev-${n.severity}${entry.resolvedAt ? ' resolved' : ''}`,
+      class: `item sev-${n.severity}${resolvedAt ? ' resolved' : ''}`,
       'aria-label': `${n.severity} alert on ${n.channel}: ${n.title}`,
     },
     el(
@@ -126,7 +129,7 @@ function feedItem(entry: FeedEntry): HTMLElement {
     ),
     el('h3', { text: n.title }),
     n.body ? el('p', { class: 'body', text: n.body }) : null,
-    entry.resolvedAt ? el('p', { class: 'resolved-note', text: 'Resolved' }) : null,
+    resolvedAt ? el('p', { class: 'resolved-note', text: 'Resolved' }) : null,
   );
 }
 
