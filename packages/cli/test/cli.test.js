@@ -1,7 +1,7 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { chmodSync, mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -216,4 +216,28 @@ test('bad arguments exit 2, while a failure to do the work exits 1', async () =>
     await codeOf(['devices', '--url', 'ws://127.0.0.1:1', '--store', join(dir, 'absent.json')]),
     1,
   );
+});
+
+test('a damaged credential file is kept, not silently replaced', async () => {
+  // `load()` returned `{}` for a file it could not parse, so the device looked
+  // unpaired against every hub - and the re-pair that naturally follows wrote a
+  // file holding only the new key, destroying the private seeds for all the
+  // others. A zero-byte file is reachable: neither store fsyncs before the
+  // rename, so a power loss can leave one.
+  for (const [name, contents] of [
+    ['damaged.json', '{ this is not json'],
+    ['nulled.json', 'null'],
+  ]) {
+    const store = join(dir, name);
+    writeFileSync(store, contents);
+
+    const { code } = hub.createPairingCode({ role: 'viewer' });
+    const paired = await cli(['pair', code, '--url', HUB_URL, '--store', store, '--name', 'again']);
+    assert.match(paired.stdout, /paired as "again"/, `${name}: pairing still works`);
+
+    const kept = readdirSync(dir).filter((f) => f.startsWith(`${name}.corrupt-`));
+    assert.equal(kept.length, 1, `${name}: the old file was kept`);
+    assert.equal(readFileSync(join(dir, kept[0]), 'utf8'), contents, `${name}: keys preserved`);
+    assert.match(paired.stderr, /has been kept at/, `${name}: and the operator is told`);
+  }
 });

@@ -20,11 +20,40 @@ import type { ClientStorage } from '@osqd/notifyjs-protocol';
 export function fileStorage(path = defaultPath()): ClientStorage {
   const load = (): Record<string, string> => {
     if (!existsSync(path)) return {};
+    let parsed: unknown;
     try {
-      return JSON.parse(readFileSync(path, 'utf8')) as Record<string, string>;
+      parsed = JSON.parse(readFileSync(path, 'utf8'));
     } catch {
-      return {};
+      // The damaged file is kept, not read past. Returning `{}` here made this
+      // device look unpaired against *every* hub, and the next `set()` - the
+      // re-pair that follows naturally - wrote a file containing only the new
+      // key, destroying the private seeds for all the others. The comment on
+      // `save()` promises the opposite: a keypair cannot be regenerated. So the
+      // evidence is moved aside first, exactly as the hub's own store does with a
+      // corrupt `store.json`.
+      return setAside('it could not be read');
     }
+    // `JSON.parse('null')` succeeds and yields null, which then threw on every
+    // read; an array or a number is no more usable.
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      return setAside('it did not contain an object');
+    }
+    return parsed as Record<string, string>;
+  };
+
+  /** Renames a file that cannot be used, and says where it went. */
+  const setAside = (why: string): Record<string, string> => {
+    const kept = `${path}.corrupt-${Date.now()}`;
+    try {
+      renameSync(path, kept);
+      process.stderr.write(
+        `notifyjs: ${path} was ignored because ${why}; it has been kept at ${kept}\n` +
+          'This device will need pairing again. The old file still holds its keys.\n',
+      );
+    } catch {
+      process.stderr.write(`notifyjs: ${path} cannot be read or moved aside (${why})\n`);
+    }
+    return {};
   };
 
   const save = (data: Record<string, string>): void => {
