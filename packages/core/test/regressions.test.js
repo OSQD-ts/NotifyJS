@@ -2124,3 +2124,43 @@ test('one good handshake does not lift a running ban', async () => {
 
   guard.stop();
 });
+
+test('a client whose signing fails reports it instead of killing the process', async () => {
+  // `receive()` was called with `void`, and it awaits the host application's
+  // crypto and storage. A credential truncated by a half-written file threw
+  // inside the handshake, where the rejection had nowhere to go: the CLI
+  // daemon and the desktop main process both die on an unhandled rejection,
+  // and with a handler installed the client just sat in `connecting` for ever.
+  const { NotifyClient, memoryStorage } = await import('@osqd/notifyjs-protocol');
+  const dir = tmp('sign-fails');
+  const hub = hostileHub(dir);
+  await hub.start();
+
+  const errors = [];
+  const statuses = [];
+  const client = new NotifyClient({
+    url: `ws://127.0.0.1:${Number(new URL(hub.url).port)}`,
+    crypto: {
+      ...nodeCrypto,
+      sign: async () => {
+        throw new Error('Ed25519 seed must be 32 bytes');
+      },
+    },
+    storage: memoryStorage(),
+    createSocket: (url) => new WebSocket(url),
+    deviceName: 'broken-keys',
+    platform: 'node-test',
+  });
+  client.on('error', (e) => errors.push(e));
+  client.on('status', (v) => statuses.push(v));
+
+  await client.pair(hub.createPairingCode({ role: 'viewer' }).code);
+  await delay(400);
+
+  assert.ok(errors.length > 0, 'the app is told the client cannot sign');
+  assert.ok(statuses.includes('error'), 'and the client stops claiming to be connecting');
+
+  client.disconnect();
+  await hub.stop();
+  rmSync(dir, { recursive: true, force: true });
+});

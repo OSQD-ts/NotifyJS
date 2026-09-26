@@ -329,7 +329,22 @@ export class NotifyClient {
       // anything until we have its nonce.
     };
     socket.onmessage = (ev) => {
-      void this.receive(String(ev.data));
+      // Not `void`: `receive` awaits the host application's crypto and
+      // storage, and both can fail for real - a credential truncated by a
+      // half-written file, a keystore that is not unlocked yet, a storage
+      // backend that throws rather than returning null. That rejection had
+      // nowhere to go, so it surfaced as an unhandled rejection and took the
+      // process with it: the CLI daemon and the desktop main process both die
+      // on one. A client that cannot finish a handshake is broken rather than
+      // merely disconnected, so it says so instead of sitting in `connecting`
+      // for ever.
+      this.receive(String(ev.data)).catch((err) => {
+        this.setStatus('error');
+        this.emit('error', {
+          code: 'client_error',
+          message: err instanceof Error ? err.message : String(err),
+        });
+      });
     };
     socket.onerror = () => {
       this.setStatus('error');
@@ -565,7 +580,9 @@ export class NotifyClient {
   ack(ids: string[], opts: { seq?: number; action?: string } = {}): void {
     if (opts.seq !== undefined && opts.seq > this.ackedSeq) {
       this.ackedSeq = opts.seq;
-      void this.opts.storage.set(this.key('ackedSeq'), String(opts.seq));
+      // Swallowed deliberately, but never left to escape: a storage that
+      // rejects costs the cursor its persistence, not the process its life.
+      void this.opts.storage.set(this.key('ackedSeq'), String(opts.seq)).catch(() => {});
     }
     this.send({ v: PROTOCOL_VERSION, t: 'ack', ids, seq: opts.seq, action: opts.action });
   }
