@@ -1,5 +1,6 @@
 import {
   appendFileSync,
+  chmodSync,
   existsSync,
   mkdirSync,
   readFileSync,
@@ -62,6 +63,15 @@ function own<T>(map: Record<string, T>, key: string): T | undefined {
 /** Keys that would mutate a plain object's prototype rather than its contents. */
 function unsafeKey(key: string): boolean {
   return key === '__proto__' || key === 'constructor' || key === 'prototype';
+}
+
+/** Restates a mode on something that already exists; a no-op where modes are not. */
+function tighten(path: string, mode: number): void {
+  try {
+    chmodSync(path, mode);
+  } catch {
+    /* a filesystem without POSIX modes, or something we do not own */
+  }
 }
 
 /** Ceiling on retained ban records. See `Store.putBan`. */
@@ -169,6 +179,19 @@ export class Store {
     this.file = join(dir, 'store.json');
     this.historyFile = join(dir, 'history.jsonl');
     this.auditFile = join(dir, 'audit.jsonl');
+
+    // Restated on open, because `mkdirSync`'s `mode` only applies to a directory it
+    // creates and `appendFileSync`'s only to a file it creates. A directory an
+    // operator made themselves, one restored from a tarball or a copy, or a store
+    // written by an older build kept whatever it had - and the two append-only logs
+    // hold every alert title and body and the whole pairing trail, which is more
+    // sensitive than the file that *does* self-heal (`store.json` is written through
+    // a rename, so it gets a fresh 0600 inode every time). The CLI's credential
+    // store has always done this, for this reason.
+    tighten(dir, 0o700);
+    for (const log of [this.historyFile, this.auditFile]) {
+      if (existsSync(log)) tighten(log, 0o600);
+    }
 
     const existed = existsSync(this.file);
     const loaded = this.load(serverIdFactory);
