@@ -1863,7 +1863,9 @@ export class Notifier extends EventEmitter<NotifierEvents> {
     // A device back from a week offline should not be handed hundreds of
     // notifications at once; it gets the recent ones and a count of the rest.
     const limit = this.opts.replayLimit;
-    const shown = eligible.length > limit ? eligible.slice(-limit) : eligible;
+    // `slice(-0)` is `slice(0)`, which is everything - so a hub configured to
+    // replay nothing replayed the lot. Said explicitly instead.
+    const shown = limit <= 0 ? [] : eligible.length > limit ? eligible.slice(-limit) : eligible;
     const skipped = eligible.length - shown.length;
 
     if (skipped > 0) {

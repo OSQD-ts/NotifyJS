@@ -288,6 +288,26 @@ export interface ResolvedOptions
 }
 
 /**
+ * Refuses a number that would quietly switch off the thing it configures.
+ *
+ * `port: 70000` used to validate cleanly, print cleanly, and then fail at bind
+ * time with a `RangeError` from inside Node. The quieter ones never failed at
+ * all: `historyLimit: 0` - a plausible way to write "keep nothing" - made
+ * `readTail` return the entire file on load and then had the next notification
+ * splice the whole cache away, so replay to a device coming back from offline
+ * silently delivered nothing, for ever, with no error anywhere. A
+ * `heartbeatTickMs` of 0 is a `setInterval` with no gap in it.
+ *
+ * Checked here, where an operator who mistyped a value is still reading output.
+ */
+function bounded(option: string, value: number, min: number, max = Number.MAX_SAFE_INTEGER): number {
+  if (!Number.isFinite(value) || value < min || value > max) {
+    throw new Error(`${option} must be between ${min} and ${max}, not ${JSON.stringify(value)}`);
+  }
+  return value;
+}
+
+/**
  * Drops keys whose value is `undefined`, so a spread cannot erase a default.
  *
  * `{ ...defaults, ...caller }` copies an explicit `undefined` over the value
@@ -305,19 +325,19 @@ function defined<T extends object>(o: T | undefined): Partial<T> {
 export function resolveOptions(o: NotifierOptions = {}): ResolvedOptions {
   const log = o.logger === false ? () => {} : o.logger ?? defaultLogger;
   return {
-    port: o.port ?? DEFAULT_PORT,
+    port: bounded('port', o.port ?? DEFAULT_PORT, 0, 65535),
     host: o.host ?? '0.0.0.0',
     name: o.name ?? 'NotifyJS',
     storeDir: o.storeDir ?? '.notifyjs',
     dashboard: o.dashboard ?? true,
     dashboardDir: o.dashboardDir,
     tls: o.tls,
-    historyLimit: o.historyLimit ?? 500,
-    auditLimit: o.auditLimit ?? 1000,
-    ackRetryMs: o.ackRetryMs ?? 30_000,
-    defaultRingSeconds: o.defaultRingSeconds ?? 30,
-    replayLimit: o.replayLimit ?? 50,
-    heartbeatTickMs: o.heartbeatTickMs ?? 5_000,
+    historyLimit: bounded('historyLimit', o.historyLimit ?? 500, 1),
+    auditLimit: bounded('auditLimit', o.auditLimit ?? 1000, 1),
+    ackRetryMs: bounded('ackRetryMs', o.ackRetryMs ?? 30_000, 100),
+    defaultRingSeconds: bounded('defaultRingSeconds', o.defaultRingSeconds ?? 30, 1, 600),
+    replayLimit: bounded('replayLimit', o.replayLimit ?? 50, 0),
+    heartbeatTickMs: bounded('heartbeatTickMs', o.heartbeatTickMs ?? 5_000, 1),
     // Matches the device watchdog's own cadence, so a hub with both on sends
     // one frame and one ping on the same tick rather than two timers' worth.
     livenessIntervalMs: Math.max(

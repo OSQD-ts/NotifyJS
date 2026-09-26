@@ -2552,3 +2552,36 @@ test('the audit log says who rewrote a role, not just that it changed', async ()
   await hub.stop();
   rmSync(dir, { recursive: true, force: true });
 });
+
+test('a number that would switch off what it configures is refused by name', async () => {
+  // `port: 70000` validated cleanly and then failed at bind time with a
+  // `RangeError` from inside Node. The quieter ones never failed at all:
+  // `historyLimit: 0` made `readTail` hand back the whole file on load and then
+  // had the next notification splice the cache empty, so replay to a device
+  // coming back from offline delivered nothing for ever, silently.
+  const dir = tmp('bad-options');
+  const cases = [
+    [{ port: 70_000 }, /port must be between 0 and 65535/],
+    [{ historyLimit: 0 }, /historyLimit must be between 1/],
+    [{ auditLimit: -5 }, /auditLimit must be between 1/],
+    [{ heartbeatTickMs: 0 }, /heartbeatTickMs must be between 1/],
+    [{ replayLimit: -1 }, /replayLimit must be between 0/],
+    [{ defaultRingSeconds: 5_000 }, /defaultRingSeconds must be between 1 and 600/],
+  ];
+
+  for (const [extra, pattern] of cases) {
+    assert.throws(
+      () => new Notifier({ storeDir: dir, dashboard: false, logger: false, ...extra }),
+      pattern,
+      JSON.stringify(extra),
+    );
+  }
+
+  // Zero replay is a real choice and still allowed - it now means none, where
+  // `slice(-0)` used to mean all of it.
+  const none = new Notifier({ port: 0, storeDir: dir, dashboard: false, logger: false, replayLimit: 0 });
+  await none.start();
+  await none.stop();
+
+  rmSync(dir, { recursive: true, force: true });
+});
