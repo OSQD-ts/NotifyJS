@@ -2590,6 +2590,23 @@ test('a number that would switch off what it configures is refused by name', asy
     );
   }
 
+  // A numeric string is what `process.env.PORT` hands you, and it worked before
+  // this validation existed, so it still does.
+  const fromEnv = new Notifier({
+    port: '0',
+    storeDir: dir,
+    dashboard: false,
+    logger: false,
+    historyLimit: '250',
+  });
+  await fromEnv.start();
+  await fromEnv.stop();
+  assert.throws(
+    () => new Notifier({ storeDir: dir, dashboard: false, logger: false, port: '' }),
+    /port must be between/,
+    'but an empty string is not a port',
+  );
+
   // Zero replay is a real choice and still allowed - it now means none, where
   // `slice(-0)` used to mean all of it.
   const none = new Notifier({ port: 0, storeDir: dir, dashboard: false, logger: false, replayLimit: 0 });

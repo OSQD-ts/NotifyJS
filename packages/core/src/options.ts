@@ -300,11 +300,32 @@ export interface ResolvedOptions
  *
  * Checked here, where an operator who mistyped a value is still reading output.
  */
-function bounded(option: string, value: number, min: number, max = Number.MAX_SAFE_INTEGER): number {
-  if (!Number.isFinite(value) || value < min || value > max) {
+function bounded(
+  option: string,
+  value: unknown,
+  min: number,
+  max = Number.MAX_SAFE_INTEGER,
+): number {
+  // A numeric string is accepted and converted. The types say `number`, but this
+  // library is imported from plain JavaScript - the examples in this repository
+  // are - and `new Notifier({ port: process.env.PORT })` worked before this
+  // validation existed, because `listen('8080')` is valid. Refusing it would have
+  // been a new failure introduced by a fix. An empty string is not a number and
+  // is refused: read as one it would mean "any free port", which is a hub nobody
+  // can be told the address of.
+  const n =
+    typeof value === 'number'
+      ? value
+      : typeof value === 'string' && value.trim() !== ''
+        ? Number(value)
+        : NaN;
+
+  if (!Number.isFinite(n) || n < min || n > max) {
     throw new Error(`${option} must be between ${min} and ${max}, not ${JSON.stringify(value)}`);
   }
-  return value;
+  // Whole numbers throughout: these are ports, counts and milliseconds, and a
+  // fractional one only ever arrives from a bad division.
+  return Math.floor(n);
 }
 
 /**
