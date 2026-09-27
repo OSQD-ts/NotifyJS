@@ -167,29 +167,44 @@ export class Store {
    */
   readonly recoveredFrom: string | undefined;
 
-  /** False while a write is failing. Reported, and scraped as a gauge. */
-  private writable = true;
+  /**
+   * The files whose last write failed.
+   *
+   * Per file rather than one flag for the store, because these three are written
+   * separately and fail separately: a history log left unwritable by a permission
+   * change, or a full disk that still has room for a short append but not for the
+   * whole document, made a single flag alternate between failing and recovered on
+   * every drain - so the operator got two log lines a second and a gauge that read
+   * healthy at rest while a log was still being dropped.
+   */
+  private readonly failing = new Set<string>();
 
   /** Every write that has failed, over the life of this store. */
   private writeFailures = 0;
 
-  /** Whether the last write worked, and how many have not. */
+  /** Whether everything can be written, and how many writes have not been. */
   get persistence(): { writable: boolean; failures: number } {
-    return { writable: this.writable, failures: this.writeFailures };
+    return { writable: this.failing.size === 0, failures: this.writeFailures };
   }
 
   /**
-   * Records the outcome of a write, and reports the edges.
+   * Records the outcome of one file's write, and reports the edges.
    *
-   * Only the transitions are reported: a read-only mount fails on every drain,
-   * and an operator needs to be told once rather than every few seconds.
+   * Only the transitions are reported: a read-only mount fails on every drain, and
+   * an operator needs to be told once rather than every few seconds.
    */
-  private wrote(ok: boolean, error?: Error): void {
-    if (!ok) this.writeFailures += 1;
-    if (ok === this.writable) return;
-    this.writable = ok;
+  private wrote(file: string, ok: boolean, error?: Error): void {
+    const wasWritable = this.failing.size === 0;
+    if (ok) {
+      this.failing.delete(file);
+    } else {
+      this.writeFailures += 1;
+      this.failing.add(file);
+    }
+    const writable = this.failing.size === 0;
+    if (writable === wasWritable) return;
     try {
-      this.onPersistence(ok, error);
+      this.onPersistence(writable, error ? { file, error } : undefined);
     } catch {
       /* a reporter that throws must not become the failure it is reporting */
     }
@@ -209,7 +224,10 @@ export class Store {
      * the failure was being saved, and a restart then rolled the hub back to
      * whenever the disk broke.
      */
-    private readonly onPersistence: (writable: boolean, error?: Error) => void = () => {},
+    private readonly onPersistence: (
+      writable: boolean,
+      trouble?: { file: string; error: Error },
+    ) => void = () => {},
   ) {
     // 0700: the store holds device public keys and audit history. Nothing
     // secret enough to be catastrophic, but no reason to let other local
@@ -405,7 +423,7 @@ export class Store {
       // rather than a half-serialised file that would fail to parse on boot.
       writeFileSync(tmp, JSON.stringify(this.data), { mode: 0o600 });
       renameSync(tmp, this.file);
-      this.wrote(true);
+      this.wrote(this.file, true);
       // Cleared only once it is actually on disk. Clearing it first meant a
       // failed write was never retried: the store went on reporting itself
       // clean while memory and disk disagreed, and a device paired in that
@@ -418,7 +436,7 @@ export class Store {
       // uncaught exception from a timer and killed the hub - the one outcome a
       // pager must not have. Left dirty and tried again instead; the moment
       // the disk comes back, the pending state is written.
-      this.wrote(false, err as Error);
+      this.wrote(this.file, false, err as Error);
       if (!this.closed) this.scheduleDrain();
     }
   }
@@ -430,11 +448,11 @@ export class Store {
     try {
       appendFileSync(file, lines.join(''), { mode: 0o600 });
       onWritten(lines.length);
-      this.wrote(true);
+      this.wrote(file, true);
     } catch (err) {
       // Losing a history line must never take down the app that embedded us -
       // but somebody is told that it happened.
-      this.wrote(false, err as Error);
+      this.wrote(file, false, err as Error);
     }
   }
 
@@ -453,12 +471,12 @@ export class Store {
       const tmp = `${file}.tmp`;
       writeFileSync(tmp, entries.map((e) => JSON.stringify(e) + '\n').join(''), { mode: 0o600 });
       renameSync(tmp, file);
-      this.wrote(true);
+      this.wrote(file, true);
       return true;
     } catch (err) {
       // Losing a compaction must never take down the app that embedded us; the
       // caller keeps its old count and tries again on the next write.
-      this.wrote(false, err as Error);
+      this.wrote(file, false, err as Error);
       return false;
     }
   }

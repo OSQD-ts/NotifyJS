@@ -217,13 +217,13 @@ export class Notifier extends EventEmitter<NotifierEvents> {
       // tell. A hub on a full or read-only disk went on pairing devices and
       // delivering alerts while none of it was being saved, and a restart rolled it
       // back to whenever the disk broke.
-      (writable, error) => {
+      (writable, trouble) => {
         if (writable) {
           this.opts.logger('the store is writable again', { dir: this.opts.storeDir });
         } else {
           this.opts.logger(
             'the store cannot be written - devices paired and alerts sent from now on will be lost if this hub restarts',
-            { dir: this.opts.storeDir, error: error?.message },
+            { file: trouble?.file, error: trouble?.error.message },
           );
         }
       },

@@ -30,8 +30,8 @@ test('a store that cannot be written says so, once, and says when it recovers', 
   const dir = mkdtempSync(join(tmpdir(), 'notifyjs-persist-'));
   try {
     const seen = [];
-    const store = new Store(dir, limits, serverId, (writable, error) =>
-      seen.push({ writable, message: error?.message }),
+    const store = new Store(dir, limits, serverId, (writable, trouble) =>
+      seen.push({ writable, file: trouble?.file, message: trouble?.error?.message }),
     );
     store.putDevice(device('first'));
     store.flush();
@@ -44,7 +44,8 @@ test('a store that cannot be written says so, once, and says when it recovers', 
     assert.equal(store.persistence.writable, false, 'the gauge /metrics scrapes');
     assert.equal(seen.length, 1, 'reported once');
     assert.equal(seen[0].writable, false);
-    assert.ok(seen[0].message, 'and with the reason the filesystem gave');
+    assert.ok(seen[0].message, 'with the reason the filesystem gave');
+    assert.ok(seen[0].file, 'and which file could not be written');
 
     // A read-only mount fails on every drain. The operator is told once, not every
     // few seconds, so only the edges are reported.
@@ -69,6 +70,47 @@ test('a store that cannot be written says so, once, and says when it recovers', 
     store.close();
   } finally {
     chmodSync(dir, 0o700);
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('one unwritable file does not make the report alternate', () => {
+  // The document and the two logs are written separately and fail separately, so a
+  // single flag for "the store" was wrong in both directions: a history log left
+  // unwritable by a permission change - while the directory and `store.json` were
+  // fine - had the flag going failing, recovered, failing, recovered on every
+  // drain. Two log lines a second at the moment an operator is reading them, and a
+  // gauge that read healthy at rest while a log was still being dropped.
+  const dir = mkdtempSync(join(tmpdir(), 'notifyjs-onefile-'));
+  const log = join(dir, 'history.jsonl');
+  try {
+    const seen = [];
+    const store = new Store(dir, limits, serverId, (writable) => seen.push(writable));
+    store.pushHistory({ seq: 1, ts: Date.now(), title: 'seed', severity: 'error' });
+    store.putDevice(device('first'));
+    store.flush();
+    assert.deepEqual(seen, [], 'a healthy store reports nothing');
+
+    chmodSync(log, 0o400);
+    for (let i = 2; i < 6; i += 1) {
+      store.pushHistory({ seq: i, ts: Date.now(), title: `t${i}`, severity: 'error' });
+      store.putDevice(device(`later-${i}`));
+      store.flush();
+    }
+    assert.deepEqual(seen, [false], 'one report across four drains');
+    assert.equal(store.persistence.writable, false, 'and it does not read healthy at rest');
+
+    // The document beside it kept being written throughout, which is the whole
+    // reason the flag flapped.
+    assert.ok(readFileSync(join(dir, 'store.json'), 'utf8').includes('later-5'));
+
+    chmodSync(log, 0o600);
+    store.pushHistory({ seq: 6, ts: Date.now(), title: 'after', severity: 'error' });
+    store.flush();
+    assert.deepEqual(seen, [false, true], 'and the recovery is reported once');
+    store.close();
+  } finally {
+    chmodSync(log, 0o600);
     rmSync(dir, { recursive: true, force: true });
   }
 });
