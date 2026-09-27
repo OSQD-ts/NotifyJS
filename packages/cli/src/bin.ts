@@ -7,6 +7,7 @@ import WebSocket from 'ws';
 
 import {
   Notifier,
+  OptionError,
   backupSecrets,
   exportStore,
   formatDuration,
@@ -944,6 +945,13 @@ const PARSE_ARGS_CODES = new Set([
 main().catch((err: unknown) => {
   process.stderr.write(`${err instanceof Error ? err.message : String(err)}\n`);
   const code = (err as { code?: unknown } | undefined)?.code;
-  const misuse = err instanceof UsageError || (typeof code === 'string' && PARSE_ARGS_CODES.has(code));
+  // An option the hub refused is the same class of problem as a flag this file
+  // refused - `--web-push-subject ops@example.com` is a typo, not a hub that
+  // failed - and a script wrapping `serve` reads the code to decide whether
+  // retrying could ever help.
+  const misuse =
+    err instanceof UsageError ||
+    err instanceof OptionError ||
+    (typeof code === 'string' && PARSE_ARGS_CODES.has(code));
   process.exit(misuse ? 2 : 1);
 });

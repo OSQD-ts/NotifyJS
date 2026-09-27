@@ -219,6 +219,19 @@ test('bad arguments exit 2, while a failure to do the work exits 1', async () =>
   assert.equal(await codeOf(['serve', '--port', 'http']), 2, 'a port that is not a number');
   assert.equal(await codeOf(['send', 'x', '--nonsense']), 2, 'a flag nobody defined');
   assert.equal(await codeOf(['import']), 2, 'a required flag left off');
+  // A flag this file passes straight through, refused by the hub rather than here.
+  // These exited 1, so the one class of mistake a wrapper can do nothing about
+  // looked like the outage it should retry.
+  assert.equal(
+    await codeOf(['serve', '--data', join(dir, 'exits'), '--web-push-subject', 'ops@example.com']),
+    2,
+    'a VAPID subject that is not a URI',
+  );
+  assert.equal(
+    await codeOf(['serve', '--data', join(dir, 'exits'), '--port', '70000']),
+    2,
+    'a port past the last one',
+  );
 
   // Unchanged: an unknown command is a failing check, not a malformed one.
   assert.equal(await codeOf(['wat']), 1);

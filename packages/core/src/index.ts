@@ -7,6 +7,7 @@ export type {
   SentNotification,
   NotifierEvents,
 } from './server.js';
+export { OptionError } from './options.js';
 export type {
   NotifierOptions,
   SecurityOptions,

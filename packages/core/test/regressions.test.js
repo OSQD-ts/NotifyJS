@@ -2692,6 +2692,49 @@ test('a number that would switch off what it configures is refused by name', asy
   rmSync(dir, { recursive: true, force: true });
 });
 
+test('a severity with a typo in it is not a severity', async () => {
+  // `flood: { alwaysDeliver: ['criticial'] }` is the whole setting defeated by one
+  // letter: the list is matched with `includes`, so the misspelling matched nothing
+  // and every critical waited for a summary window, while the configuration said -
+  // and the operator believed - that criticals are never held back. The same typo
+  // in `deviceWatchdog.severity` was shipped to every paired device as the severity
+  // of the alert raised when this hub goes quiet.
+  //
+  // `webPush.subject` is the third of these: this file always documented it as a
+  // mailto: or https: URI, per RFC 8292, and nothing checked. A bare address went
+  // into the signed token and Apple rejected every push, for a reason visible only
+  // in a push service's response body.
+  const dir = tmp('bad-values');
+  for (const [extra, pattern] of [
+    [{ flood: { alwaysDeliver: ['criticial'] } }, /flood\.alwaysDeliver\[0\] must be one of debug, info/],
+    [{ flood: { alwaysDeliver: 'critical' } }, /flood\.alwaysDeliver must be an array of severities/],
+    [{ deviceWatchdog: { severity: 'criticial' } }, /deviceWatchdog\.severity must be one of/],
+    [{ webPush: { subject: 'ops@example.com' } }, /webPush\.subject must be a mailto: or https: URI/],
+    [{ webPush: { subject: '' } }, /webPush\.subject must be a mailto: or https: URI/],
+  ]) {
+    assert.throws(
+      () => new Notifier({ port: 0, storeDir: dir, dashboard: false, logger: false, ...extra }),
+      pattern,
+      JSON.stringify(extra),
+    );
+  }
+
+  // Both forms the RFC allows, an emptied list, and a second severity all resolve.
+  for (const ok of [
+    { webPush: { subject: 'mailto:ops@example.com' } },
+    { webPush: { subject: 'https://ops.example.com/oncall' } },
+    { flood: { alwaysDeliver: [] } },
+    { flood: { alwaysDeliver: ['critical', 'error'] } },
+    { deviceWatchdog: { severity: 'warning' } },
+  ]) {
+    const fine = new Notifier({ port: 0, storeDir: dir, dashboard: false, logger: false, ...ok });
+    await fine.start();
+    await fine.stop();
+  }
+
+  rmSync(dir, { recursive: true, force: true });
+});
+
 test('a number one object deep cannot switch off what it configures either', async () => {
   // Validation stopped at the top level, so every number in `security`, `flood`,
   // `ingest`, `webPush` and `deviceWatchdog` was taken as given.

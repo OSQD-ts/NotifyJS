@@ -1,4 +1,4 @@
-import { DEFAULT_PORT, type Severity } from '@osqd/notifyjs-protocol';
+import { DEFAULT_PORT, isSeverity, SEVERITIES, type Severity } from '@osqd/notifyjs-protocol';
 
 /**
  * Brute-force defences. The hub is expected to sit on a port that is open to
@@ -322,7 +322,7 @@ function bounded(
         : NaN;
 
   if (!Number.isFinite(n) || n < min || n > max) {
-    throw new Error(`${option} must be between ${min} and ${max}, not ${describe(value)}`);
+    throw new OptionError(`${option} must be between ${min} and ${max}, not ${describe(value)}`);
   }
   // Whole numbers almost throughout: these are ports, counts and milliseconds, and
   // a fractional one only ever arrives from a bad division. The exception is a
@@ -381,8 +381,17 @@ function flag(option: string, value: unknown): boolean {
     if (s === 'true' || s === '1' || s === 'yes' || s === 'on') return true;
     if (s === 'false' || s === '0' || s === 'no' || s === 'off') return false;
   }
-  throw new Error(`${option} must be true or false, not ${describe(value)}`);
+  throw new OptionError(`${option} must be true or false, not ${describe(value)}`);
 }
+
+/**
+ * A refused option, as opposed to a failure while running.
+ *
+ * Carried as its own class so a caller can tell the two apart - the CLI turns it
+ * into the exit code it reserves for "you typed it wrong", which a script wrapping
+ * `notifyjs serve` uses to decide whether retrying could ever help.
+ */
+export class OptionError extends Error {}
 
 /**
  * How a refused value is quoted back.
@@ -394,6 +403,53 @@ function flag(option: string, value: unknown): boolean {
 function describe(value: unknown): string {
   if (typeof value === 'number' && !Number.isFinite(value)) return String(value);
   return JSON.stringify(value) ?? String(value);
+}
+
+/**
+ * Refuses a severity that is not one of the six.
+ *
+ * `flood: { alwaysDeliver: ['criticial'] }` is the whole setting defeated by one
+ * letter: the list is matched with `includes`, so a misspelt severity matches
+ * nothing and every critical alert waited for a summary window - while the
+ * configuration said, and the operator believed, that criticals are never held
+ * back. A misspelt `deviceWatchdog.severity` shipped to every paired device as the
+ * severity of the alert raised when this hub goes quiet.
+ *
+ * Refused rather than coerced. The nearest guess for a severity is `'info'`, and
+ * silently turning somebody's pager alert into an `info` is worse than not
+ * starting.
+ */
+function severity(option: string, value: unknown): Severity {
+  if (isSeverity(value)) return value;
+  throw new OptionError(`${option} must be one of ${SEVERITIES.join(', ')}, not ${describe(value)}`);
+}
+
+/** The same, for the list form. */
+function severityList(option: string, value: unknown): Severity[] {
+  if (!Array.isArray(value)) {
+    throw new OptionError(`${option} must be an array of severities, not ${describe(value)}`);
+  }
+  return value.map((entry, i) => severity(`${option}[${i}]`, entry));
+}
+
+/**
+ * The VAPID `sub` claim, which RFC 8292 requires to be a `mailto:` or `https:`
+ * URI. This file already said so; nothing checked it, and a bare address went
+ * into the signed token, where Apple rejects it - so every push to an iPhone
+ * failed for a reason visible only in a push service's response body.
+ */
+function vapidSubject(option: string, value: unknown): string {
+  if (typeof value === 'string' && value.trim() !== '') {
+    const text = value.trim();
+    let scheme = '';
+    try {
+      scheme = new URL(text).protocol;
+    } catch {
+      /* not a URI at all, which the throw below reports */
+    }
+    if (scheme === 'mailto:' || scheme === 'https:') return text;
+  }
+  throw new OptionError(`${option} must be a mailto: or https: URI, not ${describe(value)}`);
 }
 
 /**
@@ -460,8 +516,8 @@ export function resolveOptions(o: NotifierOptions = {}): ResolvedOptions {
       enabled: true,
       intervalMs: 30_000,
       graceMs: 30_000,
-      severity: 'critical' as Severity,
       ...defined(o.deviceWatchdog),
+      severity: severity('deviceWatchdog.severity', o.deviceWatchdog?.severity ?? 'critical'),
     },
     { flags: ['enabled'], numbers: { intervalMs: 1, graceMs: 0 } },
   );
@@ -501,8 +557,8 @@ export function resolveOptions(o: NotifierOptions = {}): ResolvedOptions {
         enabled: true,
         windowMs: 60_000,
         burst: 5,
-        alwaysDeliver: ['critical'] as Severity[],
         ...defined(o.flood),
+        alwaysDeliver: severityList('flood.alwaysDeliver', o.flood?.alwaysDeliver ?? ['critical']),
       },
       { flags: ['enabled'], numbers: { windowMs: 1, burst: 0 } },
     ),
@@ -531,11 +587,14 @@ export function resolveOptions(o: NotifierOptions = {}): ResolvedOptions {
         enabled: true,
         includeBody: false,
         evenWhenOnline: false,
-        subject: 'https://github.com/OSQD-ts/NotifyJS',
         // Four hours. Long enough to survive a closed laptop over lunch, short
         // enough that a pager alert never arrives stale enough to mislead.
         ttlSeconds: 4 * 60 * 60,
         ...defined(o.webPush),
+        subject: vapidSubject(
+          'webPush.subject',
+          o.webPush?.subject ?? 'https://github.com/OSQD-ts/NotifyJS',
+        ),
       },
       {
         flags: ['enabled', 'includeBody', 'evenWhenOnline'],
