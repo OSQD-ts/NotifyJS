@@ -140,6 +140,11 @@ const logger = pino(createLogStream(notify)); // error and above
 `fastifyErrorHandler` and `logHandler` are there too. Each is one line,
 deduplicated by default so a crash loop collapses into a single alert.
 
+`captureCrashes` ends the process after alerting, for an unhandled rejection as
+well as an uncaught exception, because that is what Node does on its own and
+subscribing to those events replaces the default. Pass `exit: false` if something
+other than a supervisor is going to decide what happens next.
+
 ## Security
 
 The whole point is a port reachable from wherever you are, which means it is
