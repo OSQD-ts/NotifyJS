@@ -216,6 +216,13 @@ test('bad arguments exit 2, while a failure to do the work exits 1', async () =>
 
   assert.equal(await codeOf(['send']), 2, 'no title at all');
   assert.equal(await codeOf(['send', 'x', '--severity', 'nope']), 2, 'a severity that is not one');
+  // But the same word in a different case is not a mistake, and the hub forgives it
+  // too - refusing it here while the hub accepted it left the two disagreeing.
+  assert.equal(
+    await codeOf(['send', 'shouted', '--severity', 'ERROR', '--url', HUB_URL, '--store', creds]),
+    0,
+    'CASE is the same severity',
+  );
   assert.equal(await codeOf(['serve', '--port', 'http']), 2, 'a port that is not a number');
   assert.equal(await codeOf(['send', 'x', '--nonsense']), 2, 'a flag nobody defined');
   assert.equal(await codeOf(['import']), 2, 'a required flag left off');

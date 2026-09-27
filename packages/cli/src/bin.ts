@@ -321,10 +321,14 @@ class UsageError extends Error {}
  */
 function severity(value: string | undefined, fallback: Severity): Severity {
   if (value === undefined) return fallback;
-  if (!isSeverity(value)) {
+  // Case and surrounding space forgiven, exactly as the hub forgives them: `--severity
+  // CRITICAL` is the same word, and refusing it here while the hub accepts it left the
+  // two disagreeing about the same input.
+  const tidied = value.trim().toLowerCase();
+  if (!isSeverity(tidied)) {
     throw new UsageError(`--severity must be one of ${SEVERITIES.join(', ')}, not "${value}"`);
   }
-  return value;
+  return tidied;
 }
 
 /** A positive whole number, or a clear complaint. Same reasoning as `port`. */
