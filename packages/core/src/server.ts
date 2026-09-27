@@ -2546,10 +2546,12 @@ export class Notifier extends EventEmitter<NotifierEvents> {
             return reply(false, undefined, `unknown escalation policy: ${wanted}`);
           }
           // Checked here as well, because the ring cannot be awaited: `call()`
-          // would refuse the same value, but into a rejection this case discards -
-          // so a malformed `to` answered "call placed" and rang nobody.
+          // would refuse the same values, but into a rejection this case discards -
+          // so a malformed `to`, or a severity with a typo in it, answered "call
+          // placed" and rang nobody.
           try {
             sanitizeTargeting(args.to as Targeting | undefined);
+            requireSeverity(args.severity, 'critical');
           } catch (err) {
             return reply(false, undefined, err instanceof Error ? err.message : String(err));
           }

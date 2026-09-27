@@ -2860,6 +2860,14 @@ test('a severity that is not one is refused rather than quietly becoming info', 
     const refused = await device.ask('notify.send', { title: 'wire', severity: 'criticial' });
     assert.equal(refused.ok, false);
     assert.match(refused.error, /severity must be one of/);
+
+    // `call.place` cannot await the ring, so it checks up front what would otherwise
+    // fail inside a rejection it discards - exactly as it already does for an unknown
+    // policy and a malformed `to`. Without this, refusing a bad severity turned a
+    // lenient call into "call placed" followed by silence.
+    const badCall = await device.ask('call.place', { message: 'db is down', severity: 'criticial' });
+    assert.equal(badCall.ok, false, 'the caller hears about it rather than being told ok');
+    assert.match(badCall.error, /severity must be one of/);
     const fine = await device.ask('notify.send', { title: 'wire', severity: 'error' });
     assert.equal(fine.ok, true, 'and the connection still works');
 
