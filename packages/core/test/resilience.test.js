@@ -162,6 +162,42 @@ test('an unknown check-in name is reported rather than silently ignored', () => 
   assert.equal(hub.checkIn('never-registered'), false);
 });
 
+test('stopping a hub that is still starting settles both', async () => {
+  // `stop()` closed the HTTP server the moment it was asked, and a server whose
+  // `listen()` has not called back yet emits neither `listening` nor `error` - so
+  // `start()`'s promise stayed pending for the life of the process. An application
+  // whose SIGTERM handler calls `stop()`, which is the documented shape, hung on
+  // `await hub.start()` for ever when the signal arrived during startup. Which is
+  // precisely when a container being rescheduled sends it.
+  const dir = mkdtempSync(join(tmpdir(), 'notifyjs-race-'));
+  try {
+    const hub = new Notifier({ port: 0, storeDir: dir, dashboard: false, logger: false });
+    const starting = hub.start();
+    const stopping = hub.stop();
+
+    const settled = await Promise.race([
+      Promise.allSettled([starting, stopping]).then((r) => r.map((x) => x.status)),
+      new Promise((resolve) => {
+        const t = setTimeout(() => resolve('hung'), 5000);
+        t.unref?.();
+      }),
+    ]);
+    assert.deepEqual(settled, ['fulfilled', 'fulfilled'], 'neither promise is left dangling');
+
+    // And it really is stopped: nothing answering, and startable again.
+    await assert.rejects(
+      () => fetch(hub.dashboardUrl.replace('localhost', '127.0.0.1') + '/hub.json'),
+      'the port was released',
+    );
+    await hub.start();
+    const res = await fetch(`http://127.0.0.1:${new URL(hub.url).port}/hub.json`);
+    assert.equal(res.status, 200, 'and it starts cleanly afterwards');
+    await hub.stop();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('heartbeats survive a hub restart', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'notifyjs-hb-'));
   const first = new Notifier({ port: 0, storeDir: dir, dashboard: false, logger: false });

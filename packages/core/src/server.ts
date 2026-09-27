@@ -205,6 +205,18 @@ export class Notifier extends EventEmitter<NotifierEvents> {
   private dashboardRoot: string | undefined;
   private started = false;
 
+  /**
+   * The in-flight `start()`, so `stop()` waits for it rather than cutting it off.
+   *
+   * `stop()` used to close the HTTP server the moment it was asked, and a server
+   * whose `listen()` has not called back yet never emits `listening` and never
+   * emits `error` - so `start()`'s promise stayed pending for the life of the
+   * process. An application whose SIGTERM handler calls `stop()` - which is the
+   * documented shape - hung on `await hub.start()` for ever if the signal arrived
+   * during startup, which is exactly when a container being rescheduled sends it.
+   */
+  private starting: Promise<void> | undefined;
+
   constructor(options: NotifierOptions = {}) {
     super();
     this.opts = resolveOptions(options);
@@ -553,6 +565,19 @@ export class Notifier extends EventEmitter<NotifierEvents> {
     if (this.started) return this;
     this.started = true;
 
+    let brought!: () => void;
+    this.starting = new Promise<void>((settle) => {
+      brought = settle;
+    });
+    try {
+      return await this.bringUp();
+    } finally {
+      this.starting = undefined;
+      brought();
+    }
+  }
+
+  private async bringUp(): Promise<this> {
     if (this.opts.dashboard) this.dashboardRoot = await this.locateDashboard();
 
     const handler = (req: IncomingMessage, res: ServerResponse) => {
@@ -676,6 +701,17 @@ export class Notifier extends EventEmitter<NotifierEvents> {
    */
   async stop(reason = 'shutting down', expectedDowntimeMs = 0): Promise<void> {
     if (!this.started) return;
+
+    // A stop that arrives while the hub is still coming up waits for it. Closing
+    // the server underneath a pending `listen()` left `start()` waiting on an event
+    // that would never arrive; and there is nothing to tear down until the things
+    // `start()` creates exist.
+    if (this.starting) {
+      await this.starting;
+      // `start()` may have failed while we waited, or another `stop()` may have got
+      // here first - either way it is already stopped.
+      if (!this.started) return;
+    }
     this.started = false;
 
     if (this.beatTimer) clearInterval(this.beatTimer);
