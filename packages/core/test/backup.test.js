@@ -1,6 +1,14 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { rmSync, mkdtempSync, existsSync, statSync, readFileSync, writeFileSync } from 'node:fs';
+import {
+  chmodSync,
+  rmSync,
+  mkdtempSync,
+  existsSync,
+  statSync,
+  readFileSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -146,6 +154,37 @@ test('anything that is not a backup is refused, and so is a newer one', async ()
   assert.throws(() => importStore(dir, future), /version 99/);
 
   rmSync(dir, { recursive: true, force: true });
+});
+
+test('a log that cannot be read is not an empty log', async () => {
+  // Only a file that is not there is empty. Every read error was swallowed, so a
+  // history that existed and could not be read - a tarball restored under another
+  // account, a permission change, a failing disk - became a backup with no history
+  // in it, and `notifyjs export --history` reported success. An operator moving a
+  // hub to a new machine had no way of knowing.
+  const { hub, dir } = await populated('notifyjs-unreadable-');
+  // Stopped first, so the document and both logs are actually on disk.
+  await hub.stop();
+  try {
+    const full = exportStore(dir, { history: true });
+    assert.ok(full.history.length > 0, 'the healthy case still carries the log');
+
+    chmodSync(join(dir, 'history.jsonl'), 0o000);
+    assert.throws(
+      () => exportStore(dir, { history: true }),
+      /EACCES|EPERM/,
+      'rather than handing back a backup that is quietly missing it',
+    );
+    chmodSync(join(dir, 'history.jsonl'), 0o600);
+
+    // A hub that has never written a history has nothing to carry, which is not a
+    // failure - that is the case the swallow was there for.
+    rmSync(join(dir, 'history.jsonl'));
+    const fresh = exportStore(dir, { history: true });
+    assert.deepEqual(fresh.history, []);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test('exporting a directory with no store says so', () => {

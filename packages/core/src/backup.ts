@@ -42,8 +42,16 @@ function readLines(path: string): string[] {
   // that asks is the one that throws on the race.
   try {
     return readFileSync(path, 'utf8').split('\n').filter((line) => line.trim() !== '');
-  } catch {
-    return [];
+  } catch (err) {
+    // Only a file that is not there is empty. This used to swallow every error,
+    // so a log that existed and could not be read - a tarball restored under
+    // another account, a permission change, a failing disk - became a backup with
+    // no history in it and an export that reported success. An operator moving a
+    // hub to a new machine had no way of knowing, which is the worst place in this
+    // codebase for a silence. The store document above is read this way for the
+    // same reason.
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return [];
+    throw err;
   }
 }
 
