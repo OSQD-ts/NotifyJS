@@ -23,6 +23,8 @@ import {
   normalizePairingCode,
   pairingCodeHash,
   coerceSeverity,
+  isSeverity,
+  SEVERITIES,
   sanitizeRole,
   timingSafeEqual,
   toBase64Url,
@@ -1492,7 +1494,11 @@ export class Notifier extends EventEmitter<NotifierEvents> {
           message,
           from: typeof body.from === 'string' ? body.from : `token:${token.label ?? token.id}`,
           channel: typeof body.channel === 'string' ? body.channel : undefined,
-          severity: coerceSeverity(body.severity, 'critical'),
+          // Passed through rather than coerced, so a token holder who typed a
+          // severity wrong is answered with a 400 naming the six - exactly as a
+          // local caller is answered with a throw. The `catch` around this whole
+          // block turns the refusal into that 400.
+          severity: body.severity as Severity | undefined,
           policy: typeof body.policy === 'string' ? body.policy : undefined,
         });
         this.audit('ingest.call', {
@@ -1522,7 +1528,10 @@ export class Notifier extends EventEmitter<NotifierEvents> {
         title,
         body: typeof body.body === 'string' ? body.body : undefined,
         channel: typeof body.channel === 'string' ? body.channel : undefined,
-        severity: coerceSeverity(body.severity, 'info'),
+        // See the call path above: refused by name rather than quietly becoming
+        // `info`, which is below the floor every on-call role filters on - so a CI
+        // job publishing `severity: 'criticial'` was told 202 and paged nobody.
+        severity: body.severity as Severity | undefined,
         tags: Array.isArray(body.tags)
           ? body.tags.filter((t): t is string => typeof t === 'string').slice(0, 20)
           : undefined,
@@ -2617,10 +2626,12 @@ export class Notifier extends EventEmitter<NotifierEvents> {
       seq: this.store.nextSeq(),
       ts: Date.now(),
       channel: sanitizeChannel(input.channel),
-      // An unrecognised severity would sort as `debug`, bypass the
-      // `alwaysDeliver` list, and be written verbatim into a Prometheus label
-      // at `/metrics`.
-      severity: coerceSeverity(input.severity, 'info'),
+      // Refused rather than coerced. An unrecognised severity would sort as
+      // `debug`, bypass the `alwaysDeliver` list, and be written verbatim into a
+      // Prometheus label at `/metrics` - and coercing it to `info` instead put the
+      // alert below the floor every on-call role filters on, so it reached nobody
+      // and said nothing about it.
+      severity: requireSeverity(input.severity, 'info'),
       title: String(input.title ?? '').slice(0, 200),
       body: input.body ? String(input.body).slice(0, 4000) : undefined,
       tags: input.tags?.slice(0, 20),
@@ -2639,7 +2650,7 @@ export class Notifier extends EventEmitter<NotifierEvents> {
       seq: this.store.nextSeq(),
       ts: Date.now(),
       channel: sanitizeChannel(input.channel),
-      severity: coerceSeverity(input.severity, 'critical'),
+      severity: requireSeverity(input.severity, 'critical'),
       from: sanitizeName(input.from) || this.opts.name,
       message: sanitizeMessage(input.message, 2000),
       lang: input.lang,
@@ -3384,6 +3395,34 @@ function withSeverity(input: NotifyInput | string, severity: Severity): NotifyIn
  * printable characters would stop a role from matching the channel it was
  * configured for.
  */
+/**
+ * The severity a caller asked for, or a refusal.
+ *
+ * Coercing it silently was the quietest possible failure. `notify({ severity:
+ * 'criticial' })` - one letter - became `info`, which is below the floor every
+ * on-call role filters on, so the alert reached nobody and the caller was handed a
+ * `SentNotification` saying so in a field nothing checks. `'CRITICAL'` did the same.
+ * A paging alert that pages no one has to be an error, not a default.
+ *
+ * Case and surrounding space are forgiven rather than refused, because `'CRITICAL'`
+ * is not a typo, it is the same word. An absent severity still means the fallback,
+ * which is what almost every caller relies on.
+ *
+ * Safe to throw from: the two paths that carry an untrusted severity - HTTP ingest
+ * and an escalation rung off the wire - coerce before they get here, and the
+ * `notify.send` admin op turns a throw into an `ok: false` carrying this message.
+ */
+function requireSeverity(value: unknown, fallback: Severity): Severity {
+  if (value === undefined || value === null) return fallback;
+  if (isSeverity(value)) return value;
+  if (typeof value === 'string' && isSeverity(value.trim().toLowerCase())) {
+    return value.trim().toLowerCase() as Severity;
+  }
+  throw new Error(
+    `severity must be one of ${SEVERITIES.join(', ')}, not ${JSON.stringify(value)}`,
+  );
+}
+
 function sanitizeChannel(value: unknown): string {
   if (typeof value !== 'string') return 'default';
   let out = '';

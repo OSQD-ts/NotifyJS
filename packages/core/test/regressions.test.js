@@ -2791,6 +2791,70 @@ test('a number one object deep cannot switch off what it configures either', asy
   rmSync(dir, { recursive: true, force: true });
 });
 
+test('a severity that is not one is refused rather than quietly becoming info', async () => {
+  // The quietest failure in the library. `notify({ severity: 'criticial' })` - one
+  // letter - was coerced to `info`, which is below the floor every on-call role
+  // filters on: the alert reached nobody, and the caller was handed a
+  // `SentNotification` saying `reached: 0` in a field nothing checks. `'CRITICAL'`
+  // did the same, and that one is not even a typo.
+  const dir = tmp('bad-severity');
+  const hub = hostileHub(dir, {
+    flood: { enabled: false },
+    ingest: { enabled: true, allowInsecure: true },
+  });
+  await hub.start();
+  // Admin, because this device both receives (its floor is `debug`) and publishes.
+  const device = await pairRaw(hub, 'admin', 'phone');
+  try {
+    for (const bad of ['criticial', 'warn', 3, {}, 'sev-1']) {
+      await assert.rejects(
+        () => hub.notify({ title: 'x', severity: bad }),
+        /severity must be one of debug, info, success, warning, error, critical/,
+        JSON.stringify(bad),
+      );
+    }
+    await assert.rejects(
+      () => hub.call({ message: 'x', severity: 'criticial' }),
+      /severity must be one of/,
+    );
+
+    // Case and surrounding space are the same word, not a typo, so they are forgiven.
+    const shouted = await hub.notify({ title: 'shouted', severity: ' CRITICAL ' });
+    assert.equal(shouted.severity, 'critical');
+    assert.equal(shouted.reached, 1, 'and it actually reached the paired phone');
+
+    // An absent severity still means the documented default, which is what nearly
+    // every caller relies on.
+    assert.equal((await hub.notify({ title: 'plain' })).severity, 'info');
+    assert.equal((await hub.notify('just a string')).severity, 'info');
+
+    // Over the wire it is an error reply rather than a throw that would take the hub
+    // with it, and the session carries on afterwards.
+    const refused = await device.ask('notify.send', { title: 'wire', severity: 'criticial' });
+    assert.equal(refused.ok, false);
+    assert.match(refused.error, /severity must be one of/);
+    const fine = await device.ask('notify.send', { title: 'wire', severity: 'error' });
+    assert.equal(fine.ok, true, 'and the connection still works');
+
+    // And a token holder gets a 400 rather than a 202 for an alert nobody was paged
+    // about - the same answer, in the shape that endpoint speaks.
+    const { token } = hub.createIngestToken({ role: 'admin', label: 'ci' });
+    const res = await fetch(`http://127.0.0.1:${new URL(hub.url).port}/api/notify`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ title: 'from ci', severity: 'criticial' }),
+    });
+    assert.equal(res.status, 400);
+    assert.match((await res.json()).message, /severity must be one of/);
+  } finally {
+    // In a `finally`, because a hub left listening does not fail the test that left
+    // it - it hangs the whole file at the per-file timeout, with nothing named.
+    device.ws.close();
+    await hub.stop();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("a flag set to the string 'false' does not mean true", async () => {
   // `security: { trustProxy: process.env.TRUST_PROXY }` is how an application
   // wires this, and with that variable set to 'false' the string is truthy: the

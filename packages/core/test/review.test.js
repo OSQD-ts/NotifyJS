@@ -348,15 +348,27 @@ test('an unrecognised severity cannot be written into the metrics endpoint', asy
   await admin.pair(code);
   await once(admin, 'ready');
 
-  await admin.admin('notify.send', {
-    title: 'probe',
-    severity: 'bogus"} 1\nnotifyjs_injected{x="1',
-  });
+  // Refused outright now, where it used to be coerced to a known severity. Both
+  // keep the crafted string out of `/metrics`; refusing also stops an alert nobody
+  // could be paged about from being accepted silently, which is why it changed.
+  await assert.rejects(
+    admin.admin('notify.send', {
+      title: 'probe',
+      severity: 'bogus"} 1\nnotifyjs_injected{x="1',
+    }),
+    /severity must be one of/,
+  );
   await new Promise((r) => setTimeout(r, 50));
 
   const { text } = await admin.admin('metrics');
   assert.ok(!text.includes('notifyjs_injected'), 'no line was injected');
-  assert.ok(!text.includes('bogus'), 'the severity fell back to a known one');
+  assert.ok(!text.includes('bogus'), 'and the crafted severity is nowhere in it');
+
+  // The hub is still publishing afterwards, and a real severity still counts.
+  await admin.admin('notify.send', { title: 'probe', severity: 'error' });
+  await new Promise((r) => setTimeout(r, 50));
+  const after = await admin.admin('metrics');
+  assert.match(after.text, /notifyjs_notifications_total\{severity="error"\}/);
 
   await disconnectAndWait(admin, 'injector');
 });

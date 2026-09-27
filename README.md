@@ -585,6 +585,12 @@ curl -X POST https://hub.example.com/api/notify \
 `POST /api/call` takes `{ "message": ... }` and holds the request open for the
 whole ring, so the response tells you whether a person actually answered.
 
+`severity` is one of `debug`, `info`, `success`, `warning`, `error`, `critical`,
+and anything else is a 400 rather than a default. A severity that is not one of
+those has nowhere to sort, and quietly reading it as `info` put the alert below
+the floor every on-call role filters on — so a job publishing `criticial` was
+answered `202` and paged nobody. Case does not matter.
+
 The token is treated as the weaker credential it is. Only its hash is stored.
 It carries a role rather than being all-powerful, so it can never do more than
 a device in the same role — and minting one for a role you do not hold is
