@@ -167,10 +167,49 @@ export class Store {
    */
   readonly recoveredFrom: string | undefined;
 
+  /** False while a write is failing. Reported, and scraped as a gauge. */
+  private writable = true;
+
+  /** Every write that has failed, over the life of this store. */
+  private writeFailures = 0;
+
+  /** Whether the last write worked, and how many have not. */
+  get persistence(): { writable: boolean; failures: number } {
+    return { writable: this.writable, failures: this.writeFailures };
+  }
+
+  /**
+   * Records the outcome of a write, and reports the edges.
+   *
+   * Only the transitions are reported: a read-only mount fails on every drain,
+   * and an operator needs to be told once rather than every few seconds.
+   */
+  private wrote(ok: boolean, error?: Error): void {
+    if (!ok) this.writeFailures += 1;
+    if (ok === this.writable) return;
+    this.writable = ok;
+    try {
+      this.onPersistence(ok, error);
+    } catch {
+      /* a reporter that throws must not become the failure it is reporting */
+    }
+  }
+
   constructor(
     private readonly dir: string,
     private readonly limits: { history: number; audit: number },
     serverIdFactory: () => string,
+    /**
+     * Told when persistence stops working, and again when it starts again.
+     *
+     * Every write in here refuses to take the process down over a failed one,
+     * which is right - a pager must not die because a disk filled up - but it left
+     * nobody to tell. A hub on a full or read-only filesystem went on pairing
+     * devices, delivering alerts and reporting itself healthy while nothing since
+     * the failure was being saved, and a restart then rolled the hub back to
+     * whenever the disk broke.
+     */
+    private readonly onPersistence: (writable: boolean, error?: Error) => void = () => {},
   ) {
     // 0700: the store holds device public keys and audit history. Nothing
     // secret enough to be catastrophic, but no reason to let other local
@@ -366,18 +405,20 @@ export class Store {
       // rather than a half-serialised file that would fail to parse on boot.
       writeFileSync(tmp, JSON.stringify(this.data), { mode: 0o600 });
       renameSync(tmp, this.file);
+      this.wrote(true);
       // Cleared only once it is actually on disk. Clearing it first meant a
       // failed write was never retried: the store went on reporting itself
       // clean while memory and disk disagreed, and a device paired in that
       // window was gone after a restart.
       this.dirty = false;
-    } catch {
+    } catch (err) {
       // The two writes above this one already refuse to take the process down
       // over a failed append. This one had no such guard, and it is reached
       // from a `setTimeout`, so a full disk or a read-only mount raised an
       // uncaught exception from a timer and killed the hub - the one outcome a
       // pager must not have. Left dirty and tried again instead; the moment
       // the disk comes back, the pending state is written.
+      this.wrote(false, err as Error);
       if (!this.closed) this.scheduleDrain();
     }
   }
@@ -389,8 +430,11 @@ export class Store {
     try {
       appendFileSync(file, lines.join(''), { mode: 0o600 });
       onWritten(lines.length);
-    } catch {
-      // Losing a history line must never take down the app that embedded us.
+      this.wrote(true);
+    } catch (err) {
+      // Losing a history line must never take down the app that embedded us -
+      // but somebody is told that it happened.
+      this.wrote(false, err as Error);
     }
   }
 
@@ -409,10 +453,12 @@ export class Store {
       const tmp = `${file}.tmp`;
       writeFileSync(tmp, entries.map((e) => JSON.stringify(e) + '\n').join(''), { mode: 0o600 });
       renameSync(tmp, file);
+      this.wrote(true);
       return true;
-    } catch {
+    } catch (err) {
       // Losing a compaction must never take down the app that embedded us; the
       // caller keeps its old count and tries again on the next write.
+      this.wrote(false, err as Error);
       return false;
     }
   }

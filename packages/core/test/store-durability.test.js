@@ -21,6 +21,58 @@ const device = (id) => ({
   createdAt: Date.now(),
 });
 
+test('a store that cannot be written says so, once, and says when it recovers', () => {
+  // Every write in here refuses to take the process down over a failure, which is
+  // right for a pager - and it left nobody to tell. A hub on a full or read-only
+  // filesystem went on pairing devices and delivering alerts while none of it was
+  // being saved, reporting itself perfectly healthy, and a restart then rolled it
+  // back to whenever the disk broke.
+  const dir = mkdtempSync(join(tmpdir(), 'notifyjs-persist-'));
+  try {
+    const seen = [];
+    const store = new Store(dir, limits, serverId, (writable, error) =>
+      seen.push({ writable, message: error?.message }),
+    );
+    store.putDevice(device('first'));
+    store.flush();
+    assert.deepEqual(seen, [], 'nothing to report while it is working');
+    assert.equal(store.persistence.writable, true);
+
+    chmodSync(dir, 0o500);
+    store.putDevice(device('second'));
+    store.flush();
+    assert.equal(store.persistence.writable, false, 'the gauge /metrics scrapes');
+    assert.equal(seen.length, 1, 'reported once');
+    assert.equal(seen[0].writable, false);
+    assert.ok(seen[0].message, 'and with the reason the filesystem gave');
+
+    // A read-only mount fails on every drain. The operator is told once, not every
+    // few seconds, so only the edges are reported.
+    store.putDevice(device('third'));
+    store.flush();
+    store.flush();
+    assert.equal(seen.length, 1, 'still once');
+    assert.ok(store.persistence.failures >= 2, 'while the counter keeps counting');
+
+    // And the recovery is announced, because a hub that has caught up is news too.
+    chmodSync(dir, 0o700);
+    store.flush();
+    assert.equal(store.persistence.writable, true);
+    assert.equal(seen.length, 2);
+    assert.equal(seen[1].writable, true);
+
+    // Everything held back while the disk was gone is on disk now.
+    const written = readFileSync(join(dir, 'store.json'), 'utf8');
+    for (const id of ['first', 'second', 'third']) {
+      assert.ok(written.includes(id), `${id} was written once the disk came back`);
+    }
+    store.close();
+  } finally {
+    chmodSync(dir, 0o700);
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('a write that fails does not take the process down, and is retried', () => {
   const dir = mkdtempSync(join(tmpdir(), 'notifyjs-durable-'));
   try {

@@ -212,6 +212,21 @@ export class Notifier extends EventEmitter<NotifierEvents> {
       this.opts.storeDir,
       { history: this.opts.historyLimit, audit: this.opts.auditLimit },
       () => randomId(8),
+      // Said out loud, because every write in the store refuses to take the process
+      // down over a failure - which is right for a pager - and that left nobody to
+      // tell. A hub on a full or read-only disk went on pairing devices and
+      // delivering alerts while none of it was being saved, and a restart rolled it
+      // back to whenever the disk broke.
+      (writable, error) => {
+        if (writable) {
+          this.opts.logger('the store is writable again', { dir: this.opts.storeDir });
+        } else {
+          this.opts.logger(
+            'the store cannot be written - devices paired and alerts sent from now on will be lost if this hub restarts',
+            { dir: this.opts.storeDir, error: error?.message },
+          );
+        }
+      },
     );
     // Said as loudly as a constructor can: every paired device is about to fail
     // to authenticate, because the serverId their signatures are bound to is
@@ -1175,6 +1190,8 @@ export class Notifier extends EventEmitter<NotifierEvents> {
       heartbeats: beats.length,
       heartbeatsMissing: beats.filter((b) => b.missing).length,
       activeCalls: this.calls.activeCount,
+      storeWritable: this.store.persistence.writable,
+      storeWriteFailures: this.store.persistence.failures,
     });
   }
 

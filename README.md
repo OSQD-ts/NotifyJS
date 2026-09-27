@@ -680,6 +680,14 @@ outcomes, deliveries, coalesced alerts, auth failures, bans, overdue
 heartbeats, uptime. Counts only — no titles or channels — so scraping it cannot
 leak the content of an alert. Set `metricsToken` to require a bearer token.
 
+The one worth an alerting rule of its own is `notifyjs_store_writable`. Every
+write to the store refuses to take the process down over a failure, because a
+pager must not die because a disk filled up — so a hub on a full or read-only
+filesystem goes on pairing devices and delivering alerts while none of it is
+being saved, and a restart rolls it back to whenever the disk broke. The gauge
+drops to 0 while that is happening, the log says so once, and both recover on
+their own when the disk does.
+
 ## Wiring it into an existing app
 
 ```ts
