@@ -26,7 +26,7 @@ import {
   verify,
 } from 'node:crypto';
 import { createServer } from 'node:http';
-import { connect } from 'node:net';
+import { connect, createServer as createTcpServer } from 'node:net';
 
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -2896,6 +2896,57 @@ test('a freshly paired device is not handed the backlog from before it existed',
   client.disconnect();
   await hub.stop();
   rmSync(dir, { recursive: true, force: true });
+});
+
+test('giving up on a socket that never opened does not take the process down', async () => {
+  // The test below this one proves the deadline fires. It could not prove what
+  // happens when it does, because its socket is a stub whose `close()` is a no-op.
+  // A real one is not: closing a socket that has not finished connecting makes `ws`
+  // emit an `error` event, an `error` event with no listener is an uncaught
+  // exception, and the deadline detached every handler before closing - so the one
+  // path that only ever runs mid-connect ended the process every single time it did
+  // its job. Twenty seconds after pointing a phone at a hub that accepts TCP and
+  // says nothing, which is what a captive portal and a switching radio both look
+  // like, the app was gone.
+  //
+  // A real `ws` against a real silent port, in this process: if the throw comes
+  // back, it is an uncaught exception and this run fails on it.
+  const { NotifyClient, memoryStorage } = await import('@osqd/notifyjs-protocol');
+
+  // Accepts the connection and never speaks, so the handshake never completes and
+  // the socket is still CONNECTING when the deadline fires. The accepted sockets are
+  // kept so they can be destroyed - `close()` alone waits for them.
+  const accepted = [];
+  const silent = createTcpServer((c) => accepted.push(c));
+  await new Promise((resolve) => silent.listen(0, '127.0.0.1', resolve));
+  const { port } = silent.address();
+
+  const statuses = [];
+  const client = new NotifyClient({
+    url: `ws://127.0.0.1:${port}`,
+    crypto: nodeCrypto,
+    storage: memoryStorage(),
+    createSocket: (url) => new WebSocket(url),
+    deviceName: 'never-opens',
+    platform: 'node-test',
+    connectTimeoutMs: 200,
+    autoReconnect: false,
+  });
+  client.on('status', (v) => statuses.push(v));
+  client.on('error', () => {});
+
+  await client.pair('AAAA-AAAA-AAAA').catch(() => {});
+  await delay(900);
+
+  assert.ok(statuses.includes('connecting'), `it dialled: ${statuses.join(',')}`);
+  assert.ok(
+    statuses.at(-1) === 'idle' || statuses.at(-1) === 'error',
+    `and gave up cleanly rather than crashing: ${statuses.join(',')}`,
+  );
+
+  client.disconnect();
+  for (const c of accepted) c.destroy();
+  silent.close();
 });
 
 test('a socket that never opens is given up on rather than waited on for ever', async () => {

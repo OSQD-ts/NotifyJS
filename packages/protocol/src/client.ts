@@ -346,14 +346,7 @@ export class NotifyClient {
     // reconnects until the UI intervenes - and spends the address's ban budget.
     const socket = this.socket;
     this.socket = undefined;
-    if (socket) {
-      socket.onopen = socket.onmessage = socket.onclose = socket.onerror = null;
-      try {
-        socket.close(1000, 'client closed');
-      } catch {
-        /* already closing */
-      }
-    }
+    if (socket) abandon(socket, 1000, 'client closed');
     // Failed here rather than left to `onclose`: that handler ignores a socket
     // this method has already dropped, so an outstanding admin call would
     // otherwise sit until its own timeout with no connection left to answer it.
@@ -373,14 +366,7 @@ export class NotifyClient {
     // closing it leaks the connection and leaves the hub counting a device
     // that nothing is reading from.
     const previous = this.socket;
-    if (previous) {
-      previous.onopen = previous.onmessage = previous.onclose = previous.onerror = null;
-      try {
-        previous.close(1000, 'reconnecting');
-      } catch {
-        /* already closing */
-      }
-    }
+    if (previous) abandon(previous, 1000, 'reconnecting');
 
     // Whatever the last socket was proving liveness for is gone.
     this.stopKeepalive();
@@ -466,14 +452,9 @@ export class NotifyClient {
       if (this.socket !== socket || this.closedByUs) return;
       if (this.status === 'ready') return;
 
-      socket.onopen = socket.onmessage = socket.onclose = socket.onerror = null;
       this.socket = undefined;
       this.stopKeepalive();
-      try {
-        socket.close(1000, 'handshake timed out');
-      } catch {
-        /* already closing */
-      }
+      abandon(socket, 1000, 'handshake timed out');
 
       // A pairing attempt is never retried from here. The code may already have
       // been consumed by the attempt that timed out, and replaying it earns a
@@ -1155,6 +1136,35 @@ export function webStorage(): ClientStorage {
  * interval for as long as the device reports no connectivity. Only nonsense is
  * refused: how often a hub speaks is the hub's business.
  */
+/**
+ * Drops a socket's handlers and closes it.
+ *
+ * `onerror` is replaced with a sink rather than removed, which is the whole point
+ * of this function existing. Closing a socket that has not finished connecting
+ * makes `ws` emit an `error` event - "WebSocket was closed before the connection
+ * was established" - and an `error` event with no listener is an uncaught
+ * exception that ends the process. The `try` around `close()` cannot catch it,
+ * because it is emitted a tick later.
+ *
+ * All three closes in this file can land mid-connect, and the connect deadline
+ * *only* ever fires mid-connect: a hub that accepts TCP and then says nothing,
+ * which is what a radio switching network produces, took the app down after
+ * twenty seconds every single time that deadline did its job.
+ *
+ * The handlers are detached before closing, rather than after, because `close()`
+ * only begins the closing handshake - frames already queued on the host's event
+ * loop would otherwise still dispatch into a socket this client has given up on.
+ */
+function abandon(socket: SocketLike, code: number, reason: string): void {
+  socket.onopen = socket.onmessage = socket.onclose = null;
+  socket.onerror = () => {};
+  try {
+    socket.close(code, reason);
+  } catch {
+    /* already closing */
+  }
+}
+
 function usableWatchdog(spec: WatchdogSpec | undefined): WatchdogSpec | undefined {
   if (!spec || typeof spec !== 'object') return undefined;
 
