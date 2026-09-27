@@ -35,6 +35,7 @@ export {
   isBackup,
   type BackupDocument,
 } from './backup.js';
+export { hubHolding } from './store.js';
 export {
   bearerFrom,
   findIngestToken,

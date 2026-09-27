@@ -635,6 +635,11 @@ running one holds the document in memory, would write over an import, and has
 not necessarily flushed what an export would read. Restoring over an existing
 store is refused without `--force`.
 
+They now check for themselves: an export against a directory a live hub is using
+warns that it cannot see everything, and an import into one is refused outright,
+because the hub would write over the restore on its next tick and leave nothing to
+say it had happened.
+
 For the same reason, **one hub per store directory**. Two of them — a scaled
 compose service, a unit restarted before the old process exited, a second
 `notifyjs serve` in another terminal — each write the whole document on a timer,

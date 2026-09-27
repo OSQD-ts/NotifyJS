@@ -9,6 +9,7 @@ import {
   Notifier,
   OptionError,
   backupSecrets,
+  hubHolding,
   exportStore,
   formatDuration,
   importStore,
@@ -637,7 +638,20 @@ async function backup(argv: string[]): Promise<void> {
   // with no arguments finds it.
   const dir = (values.data as string) ?? '.notifyjs';
 
+  // Both of these read and write the store's files behind a hub's back, which is
+  // why both tell you to stop it first - a running hub holds the document in memory
+  // and writes it on a timer, so an export can miss whatever was never flushed and
+  // an import is quietly overwritten by the next flush. Neither could tell whether
+  // one was running; the claim a hub leaves in its directory answers it.
+  const running = hubHolding(dir);
+
   if (sub === 'export') {
+    if (running !== undefined) {
+      process.stderr.write(
+        `warning: a hub is running here (pid ${running}) - it holds state in memory that\n` +
+          `         this export cannot see. Stop it first for a complete backup.\n\n`,
+      );
+    }
     const doc = exportStore(dir, { history: values.history as boolean });
     const json = JSON.stringify(doc, null, 2);
     const out = values.out as string | undefined;
@@ -672,6 +686,17 @@ async function backup(argv: string[]): Promise<void> {
   if (!from) throw new UsageError('which file? pass --from <file>');
   const doc = JSON.parse(readFileSync(from, 'utf8')) as unknown;
   if (!isBackup(doc)) throw new Error(`${from} is not a NotifyJS backup`);
+
+  // Refused rather than warned about, because this one does not merely read an
+  // incomplete picture - the running hub writes its whole in-memory document on the
+  // next tick, straight over everything restored here, and the restore is gone with
+  // no sign that it ever happened.
+  if (running !== undefined && !values.force) {
+    throw new UsageError(
+      `a hub is running here (pid ${running}) and would write over this restore.\n` +
+        `Stop it first, or pass --force if that pid is stale.`,
+    );
+  }
 
   const { restoredHistory, restoredAudit } = importStore(dir, doc, {
     force: values.force as boolean,

@@ -223,6 +223,41 @@ test('a watched job reads the same in both commands that describe it', async () 
   hub.forget('nightly-backup');
 });
 
+test('backing up around a running hub is not done silently', async () => {
+  // Both commands read and write the store's files behind a hub's back, which is why
+  // both say to stop it first: a running hub holds the document in memory and writes
+  // it on a timer, so an export misses whatever was never flushed and an import is
+  // overwritten by the next flush - the restore simply vanishes, with nothing to say
+  // it ever happened. Neither could tell whether a hub was running.
+  const live = join(dir, 'live-hub');
+  const running = new Notifier({ port: 0, storeDir: live, dashboard: false, logger: false });
+  await running.start();
+  const out = join(dir, 'live-backup.json');
+  try {
+    // An export still runs - an incomplete backup beats none - but says so.
+    const exported = await cli(['export', '--data', live, '--out', out]);
+    assert.match(exported.stderr, /a hub is running here \(pid \d+\)/);
+    assert.match(exported.stderr, /Stop it first/);
+
+    // An import is refused, because that one does not merely read an incomplete
+    // picture: the running hub writes over everything restored, on the next tick.
+    let code = 0;
+    try {
+      await cli(['import', '--from', out, '--data', live]);
+    } catch (err) {
+      code = err.code;
+      assert.match(err.stderr, /would write over this restore/);
+    }
+    assert.equal(code, 2, 'and it is misuse, not a failure to do the work');
+  } finally {
+    await running.stop();
+  }
+
+  // With the hub stopped, the claim is gone and both are silent about it.
+  const after = await cli(['export', '--data', live, '--out', join(dir, 'after.json')]);
+  assert.doesNotMatch(after.stderr, /a hub is running/);
+});
+
 test('serve refuses half a TLS configuration', async () => {
   await assert.rejects(
     () => cli(['serve', '--tls-cert', '/tmp/nope.pem']),

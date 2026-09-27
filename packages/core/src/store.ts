@@ -66,6 +66,39 @@ function unsafeKey(key: string): boolean {
   return key === '__proto__' || key === 'constructor' || key === 'prototype';
 }
 
+/** Whether a pid belongs to a process that still exists. */
+function processAlive(pid: number): boolean {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  // Our own pid means another hub inside this process, which is very much alive.
+  if (pid === process.pid) return true;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    // EPERM means it exists and belongs to somebody else.
+    return (err as NodeJS.ErrnoException).code === 'EPERM';
+  }
+}
+
+/**
+ * The pid of a live hub holding this store directory, if one is.
+ *
+ * For the tools that read and write these files behind a hub's back. `export` and
+ * `import` both say to stop the hub first - a running one holds the document in
+ * memory and writes it on a timer, so an export can miss what was never flushed and
+ * an import is overwritten by the next flush - and neither could tell whether one
+ * was running. The claim a `Store` leaves behind answers it.
+ */
+export function hubHolding(dir: string): number | undefined {
+  try {
+    const held = JSON.parse(readFileSync(join(dir, 'owner.json'), 'utf8')) as { pid?: unknown };
+    const pid = typeof held?.pid === 'number' ? held.pid : undefined;
+    return pid !== undefined && processAlive(pid) ? pid : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 /** Restates a mode on something that already exists; a no-op where modes are not. */
 function tighten(path: string, mode: number): void {
   try {
@@ -561,7 +594,7 @@ export class Store {
 
     let shared: number | undefined;
     const pid = typeof held?.pid === 'number' ? held.pid : undefined;
-    if (pid !== undefined && held?.claim !== this.claim && this.alive(pid)) shared = pid;
+    if (pid !== undefined && held?.claim !== this.claim && processAlive(pid)) shared = pid;
 
     try {
       writeFileSync(this.ownerFile, JSON.stringify({ pid: process.pid, claim: this.claim }), {
@@ -584,19 +617,7 @@ export class Store {
     }
   }
 
-  /** Whether a pid belongs to a process that still exists. */
-  private alive(pid: number): boolean {
-    if (!Number.isInteger(pid) || pid <= 0) return false;
-    // Our own pid means another hub inside this process, which is very much alive.
-    if (pid === process.pid) return true;
-    try {
-      process.kill(pid, 0);
-      return true;
-    } catch (err) {
-      // EPERM means it exists and belongs to somebody else.
-      return (err as NodeJS.ErrnoException).code === 'EPERM';
-    }
-  }
+
 
   get serverId(): string {
     return this.data.serverId;
