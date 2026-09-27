@@ -1,8 +1,10 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { rmSync, mkdtempSync } from 'node:fs';
+import { rmSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import WebSocket from 'ws';
 
 import { Notifier, captureCrashes, expressErrorHandler, createLogStream, logHandler } from '../dist/index.js';
@@ -158,6 +160,37 @@ test('an unhandled rejection is reported', async (t) => {
   assert.equal(alert.severity, 'error');
   assert.equal(alert.channel, 'crash');
   assert.ok(alert.dedupeKey, 'a crash loop collapses instead of paging repeatedly');
+});
+
+test('an unhandled rejection still ends the process', async () => {
+  // Since Node 15 an unhandled rejection ends the process, and subscribing to the
+  // event replaces that default - so installing this reporter suppressed the very
+  // crash it reports. The alert went out, the process limped on with a broken
+  // promise behind it, and it exited 0, so no supervisor restarted it.
+  //
+  // Run in a child, because the assertion is about the exit code of a process.
+  const script = join(storeDir, 'rejects.mjs');
+  const adapters = pathToFileURL(join(process.cwd(), 'packages/core/dist/adapters.js')).href;
+  const write = (extra) =>
+    writeFileSync(
+      script,
+      `import { captureCrashes } from ${JSON.stringify(adapters)};\n` +
+        `captureCrashes({ notify: async () => console.log('alerted') }, { drainMs: 50${extra} });\n` +
+        `Promise.reject(new Error('nobody handles me'));\n` +
+        `setTimeout(() => console.log('survived'), 400);\n`,
+    );
+
+  write('');
+  const crashed = spawnSync(process.execPath, [script], { encoding: 'utf8' });
+  assert.equal(crashed.status, 1, `exits as Node would: ${crashed.stdout}${crashed.stderr}`);
+  assert.match(crashed.stdout, /alerted/, 'and the alert went out first');
+  assert.ok(!crashed.stdout.includes('survived'), 'nothing carried on behind it');
+
+  // `exit: false` is how a caller asks to carry on, and it still works.
+  write(', exit: false');
+  const survived = spawnSync(process.execPath, [script], { encoding: 'utf8' });
+  assert.equal(survived.status, 0);
+  assert.match(survived.stdout, /survived/);
 });
 
 test('removing the handler deregisters it', async () => {

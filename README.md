@@ -693,6 +693,11 @@ const logger = pino(createLogStream(notify)); // error and above
 Each is one line, deduplicated by default so a crash loop collapses into a
 single alert instead of a thousand.
 
+`captureCrashes` ends the process after alerting, for an unhandled rejection as
+well as an uncaught exception, because that is what Node does on its own and
+subscribing to those events replaces the default. Pass `exit: false` if something
+other than a supervisor is going to decide what happens next.
+
 ## TLS
 
 `notifyjs cert` writes a self-signed certificate covering localhost, your

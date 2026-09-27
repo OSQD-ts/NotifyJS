@@ -16,7 +16,12 @@ export interface CaptureOptions {
   channel?: string;
   /** Also ring a phone. Worth it for a crash that takes the process with it. */
   call?: boolean;
-  /** Re-throw after alerting, preserving the default crash behaviour. */
+  /**
+   * End the process after alerting, which is what Node does on its own for both
+   * an uncaught exception and an unhandled rejection. Leave it on unless
+   * something else is going to restart the process, because a service that
+   * limps on past a crash is the case a supervisor cannot help with.
+   */
   exit?: boolean;
   /** Milliseconds to let the alert reach the hub before the process ends. */
   drainMs?: number;
@@ -53,6 +58,11 @@ export function captureCrashes(sink: AlertSink, options: CaptureOptions = {}): (
       requireAck: true,
     };
 
+    // Cleared however the race ends, and unreferenced besides: a drain window the
+    // alert beat to the line went on holding the event loop open for the rest of
+    // its 1.5 seconds, which on the rejection path - where nothing exits if the
+    // caller passed `exit: false` - delayed everything behind it.
+    let drain: NodeJS.Timeout | undefined;
     try {
       await Promise.race([
         Promise.all([
@@ -61,10 +71,15 @@ export function captureCrashes(sink: AlertSink, options: CaptureOptions = {}): (
             ? sink.call({ message: `A service has crashed. ${error.message}`, severity: 'critical' })
             : undefined,
         ]),
-        new Promise((resolve) => setTimeout(resolve, drainMs)),
+        new Promise((resolve) => {
+          drain = setTimeout(resolve, drainMs);
+          drain.unref?.();
+        }),
       ]);
     } catch {
       // Nothing useful to do while the process is on its way out.
+    } finally {
+      if (drain) clearTimeout(drain);
     }
   };
 
@@ -77,7 +92,16 @@ export function captureCrashes(sink: AlertSink, options: CaptureOptions = {}): (
   };
 
   const onRejection = (reason: unknown) => {
-    void report('Unhandled rejection', reason);
+    void report('Unhandled rejection', reason).finally(() => {
+      // The same exit as the exception path, and for a sharper reason: since Node
+      // 15 an unhandled rejection ends the process by default, and subscribing to
+      // the event *replaces* that default. So installing this reporter used to
+      // suppress the very crash it reports - the alert went out, the process
+      // limped on with a broken promise behind it, and it exited 0, so no
+      // supervisor ever restarted it. `exit: false` is how a caller asks for that
+      // deliberately.
+      if (shouldExit) process.exit(1);
+    });
   };
 
   process.on('uncaughtException', onException);
