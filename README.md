@@ -624,6 +624,13 @@ running one holds the document in memory, would write over an import, and has
 not necessarily flushed what an export would read. Restoring over an existing
 store is refused without `--force`.
 
+For the same reason, **one hub per store directory**. Two of them — a scaled
+compose service, a unit restarted before the old process exited, a second
+`notifyjs serve` in another terminal — each write the whole document on a timer,
+so the later write wins and whatever the other had done is gone. The hub says so
+at startup when it finds another live one using the directory, but it will not
+refuse to start: an alerting hub that stays down is worse than one that complains.
+
 The file is written `0600` and the command says what is in it, because a
 backup that can restore a hub necessarily contains its secrets — the VAPID
 private key above all. Treat it as you would a private key.

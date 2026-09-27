@@ -656,6 +656,20 @@ export class Notifier extends EventEmitter<NotifierEvents> {
     // refuses to schedule a write - so without this nothing the hub's second life
     // did would ever reach disk.
     this.store.reopen();
+
+    // Two hubs on one store directory overwrite each other's whole document on a
+    // timer, so pairing codes and devices from one simply vanish - and every device
+    // paired against one stops authenticating the moment the other's serverId
+    // lands, because that value is part of every auth signature. Said on each start
+    // rather than at construction, so a hub that has been stopped and started
+    // reports a collision that began while it was down.
+    if (this.store.sharedWith !== undefined) {
+      this.opts.logger(
+        'another hub is already using this store directory - both will overwrite each other and devices paired with either may stop working',
+        { dir: this.opts.storeDir, otherPid: this.store.sharedWith },
+      );
+    }
+
     this.guard.start();
     this.watchdog.start();
 

@@ -5,6 +5,7 @@ import {
   mkdirSync,
   readFileSync,
   renameSync,
+  rmSync,
   writeFileSync,
 } from 'node:fs';
 import { join } from 'node:path';
@@ -136,6 +137,8 @@ export class Store {
   private readonly file: string;
   private readonly historyFile: string;
   private readonly auditFile: string;
+  /** Names the hub that currently has this directory open. See `sharedWith`. */
+  private readonly ownerFile: string;
   private saveTimer: NodeJS.Timeout | undefined;
   private dirty = false;
   /** Stops a failed final write from arming a timer nothing will service. */
@@ -166,6 +169,29 @@ export class Store {
    * that was set aside, so an operator can be pointed at it.
    */
   readonly recoveredFrom: string | undefined;
+
+  /**
+   * Set when another live hub is already using this directory.
+   *
+   * Two hubs on one store is a real misconfiguration - `docker compose up
+   * --scale`, a second process started before the first was noticed, a systemd
+   * unit that restarted without the old one exiting - and it used to be silent and
+   * destructive. Both write the whole document on a timer, so the later write wins
+   * and whatever the other one had done is gone: pairing codes minted on one
+   * vanish, and devices paired against one fail to authenticate the moment the
+   * other's `serverId` lands, because that value is part of every auth signature.
+   *
+   * Reported rather than refused. A hub that will not start is worse than one that
+   * says something is wrong, which is the same trade every write in here makes.
+   */
+  get sharedWith(): number | undefined {
+    return this.shared;
+  }
+
+  private shared: number | undefined;
+
+  /** This instance's claim on the directory, so `close()` only clears its own. */
+  private readonly claim: string;
 
   /**
    * The files whose last write failed.
@@ -236,6 +262,7 @@ export class Store {
     this.file = join(dir, 'store.json');
     this.historyFile = join(dir, 'history.jsonl');
     this.auditFile = join(dir, 'audit.jsonl');
+    this.ownerFile = join(dir, 'owner.json');
 
     // Restated on open, because `mkdirSync`'s `mode` only applies to a directory it
     // creates and `appendFileSync`'s only to a file it creates. A directory an
@@ -249,6 +276,9 @@ export class Store {
     for (const log of [this.historyFile, this.auditFile]) {
       if (existsSync(log)) tighten(log, 0o600);
     }
+
+    this.claim = `${process.pid}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+    this.shared = this.claimDirectory();
 
     const existed = existsSync(this.file);
     const loaded = this.load(serverIdFactory);
@@ -494,6 +524,15 @@ export class Store {
    */
   reopen(): void {
     this.closed = false;
+    // Claimed again, because `close()` gave the directory back. Without this a hub
+    // that had been stopped and started held no claim at all, and the next hub to
+    // open the same directory saw nothing to warn about - which is the collision
+    // this is here to catch.
+    //
+    // `??`, not a plain assignment: by the time a hub reaches its first `start()`
+    // the claim on disk is its own, so re-reading it says nothing, and overwriting
+    // what the constructor found threw away the only detection there was.
+    this.shared = this.claimDirectory() ?? this.shared;
   }
 
   close(): void {
@@ -501,6 +540,62 @@ export class Store {
     this.saveTimer = undefined;
     this.closed = true;
     this.flush();
+    this.releaseDirectory();
+  }
+
+  /**
+   * Records this instance as the directory's owner, and reports a live previous one.
+   *
+   * The pid is checked with signal 0, which asks the kernel whether a process
+   * exists without touching it - so a hub killed outright leaves a file naming a
+   * pid that is gone, and the next one starts without a word. The instance id is
+   * what catches two hubs inside *one* process, where the pid is no help.
+   */
+  private claimDirectory(): number | undefined {
+    let held: { pid?: unknown; claim?: unknown } | undefined;
+    try {
+      held = JSON.parse(readFileSync(this.ownerFile, 'utf8')) as typeof held;
+    } catch {
+      /* nobody here, or nothing readable - either way this instance takes it */
+    }
+
+    let shared: number | undefined;
+    const pid = typeof held?.pid === 'number' ? held.pid : undefined;
+    if (pid !== undefined && held?.claim !== this.claim && this.alive(pid)) shared = pid;
+
+    try {
+      writeFileSync(this.ownerFile, JSON.stringify({ pid: process.pid, claim: this.claim }), {
+        mode: 0o600,
+      });
+    } catch {
+      /* an unwritable directory is reported by the writes that matter */
+    }
+    return shared;
+  }
+
+  private releaseDirectory(): void {
+    try {
+      const held = JSON.parse(readFileSync(this.ownerFile, 'utf8')) as { claim?: unknown };
+      // Only ours. Another hub may have taken the directory over in the meantime,
+      // and removing its claim would hide the next collision.
+      if (held?.claim === this.claim) rmSync(this.ownerFile, { force: true });
+    } catch {
+      /* already gone */
+    }
+  }
+
+  /** Whether a pid belongs to a process that still exists. */
+  private alive(pid: number): boolean {
+    if (!Number.isInteger(pid) || pid <= 0) return false;
+    // Our own pid means another hub inside this process, which is very much alive.
+    if (pid === process.pid) return true;
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch (err) {
+      // EPERM means it exists and belongs to somebody else.
+      return (err as NodeJS.ErrnoException).code === 'EPERM';
+    }
   }
 
   get serverId(): string {

@@ -1,6 +1,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { rmSync, mkdtempSync, chmodSync, readFileSync, existsSync } from 'node:fs';
+import {
+  rmSync,
+  mkdtempSync,
+  chmodSync,
+  readFileSync,
+  writeFileSync,
+  existsSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -19,6 +26,61 @@ const device = (id) => ({
   ackedSeq: 0,
   lastSeenAt: Date.now(),
   createdAt: Date.now(),
+});
+
+test('a second hub on one store directory is noticed', () => {
+  // `docker compose up --scale`, a systemd unit restarted before the old process
+  // exited, a second `notifyjs serve` in another terminal. Both hubs write the whole
+  // document on a timer, so the later write wins and whatever the other had done is
+  // gone - and every device paired against one stops authenticating the moment the
+  // other's `serverId` lands, because that value is part of every auth signature.
+  // Silent and destructive, and only the operator knows which was meant to run.
+  const dir = mkdtempSync(join(tmpdir(), 'notifyjs-shared-'));
+  try {
+    const first = new Store(dir, limits, serverId);
+    assert.equal(first.sharedWith, undefined, 'the first one is alone');
+
+    const second = new Store(dir, limits, serverId);
+    assert.equal(second.sharedWith, process.pid, 'and the second one says whose it was');
+
+    // Handing the directory over cleanly is not a collision: the claim is dropped on
+    // close, so an ordinary restart - which is how every deploy looks - is silent.
+    second.close();
+    first.close();
+    const afterwards = new Store(dir, limits, serverId);
+    assert.equal(afterwards.sharedWith, undefined, 'a restart is not a collision');
+
+    // Nor is a hub that was killed outright, which leaves its claim behind naming a
+    // pid that no longer exists. A warning nobody can act on is worse than none.
+    const claim = join(dir, 'owner.json');
+    writeFileSync(claim, JSON.stringify({ pid: 0x7ffffffe, claim: 'someone-else' }));
+    const next = new Store(dir, limits, serverId);
+    assert.equal(next.sharedWith, undefined, 'a dead claim is not a live hub');
+
+    // `reopen()` claims the directory again, because `close()` gave it back - and it
+    // must not throw away what opening found. By the time a hub reaches its first
+    // `start()` the claim on disk is its own, so re-reading it says nothing either
+    // way, and a plain assignment there erased the only detection there was.
+    const late = new Store(dir, limits, serverId);
+    assert.equal(late.sharedWith, process.pid, 'the collision is seen at open');
+    late.reopen();
+    assert.equal(late.sharedWith, process.pid, 'and is still known after a reopen');
+    late.close();
+    next.close();
+
+    // A collision that begins while a hub is stopped is picked up when it returns.
+    const held = new Store(dir, limits, serverId);
+    held.close();
+    assert.equal(held.sharedWith, undefined, 'nothing was wrong when it opened');
+    const arrived = new Store(dir, limits, serverId);
+    held.reopen();
+    assert.equal(held.sharedWith, process.pid, 'the newcomer is noticed on restart');
+    arrived.close();
+    held.close();
+    afterwards.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test('a store that cannot be written says so, once, and says when it recovers', () => {
