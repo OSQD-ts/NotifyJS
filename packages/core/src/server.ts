@@ -564,6 +564,18 @@ export class Notifier extends EventEmitter<NotifierEvents> {
     return this.url.replace(/^ws/, 'http');
   }
 
+  /**
+   * Whether the dashboard is actually being served at `dashboardUrl`.
+   *
+   * `dashboard: true` is a request, not an outcome - the assets may not be
+   * installed beside a packaged binary, in which case the hub logs that it is
+   * serving the API only. The CLI needs to know, because it was printing "open
+   * this in a browser" underneath that very line.
+   */
+  get servesDashboard(): boolean {
+    return this.dashboardRoot !== undefined;
+  }
+
   async start(): Promise<this> {
     if (this.started) return this;
     this.started = true;

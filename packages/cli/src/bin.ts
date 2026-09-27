@@ -232,11 +232,20 @@ async function serve(argv: string[]): Promise<void> {
     // Scanning beats typing a twelve-character code and a LAN address into a
     // phone, so lead with the QR and keep the code as the fallback.
     if (values.qr) process.stdout.write(`\n${issued.qr.terminal}\n`);
+    // Both of these used to be printed whatever the hub was actually doing, so
+    // `--no-qr` said "scan the code above" with no code above it, and a hub whose
+    // dashboard assets are not installed - which it says on the line before - told
+    // the operator to open that dashboard in a browser. Following either one gets
+    // nothing, which is a poor first five minutes.
     process.stdout.write(
-      `\n  Scan the code above with the NotifyJS app, or pair manually:\n\n` +
+      (values.qr
+        ? `\n  Scan the code above with the NotifyJS app, or pair manually:\n\n`
+        : `\n  Pair a device with:\n\n`) +
         `      code: ${issued.code}    role: ${issued.role}\n` +
         `      hub:  ${hub.publicUrl}\n\n` +
-        `  In a browser, open ${hub.dashboardUrl} and enter the code.\n` +
+        (hub.servesDashboard
+          ? `  In a browser, open ${hub.dashboardUrl} and enter the code.\n`
+          : '') +
         `  Valid for 15 minutes, one use.\n\n`,
     );
   }

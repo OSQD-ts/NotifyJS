@@ -1,6 +1,6 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { chmodSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve, dirname } from 'node:path';
@@ -148,6 +148,55 @@ test('a device without permission cannot send', async () => {
       return true;
     },
   );
+});
+
+/** Starts `serve`, collects its first-run banner, and stops it. */
+async function serveBanner(args) {
+  const child = spawn(process.execPath, [BIN, 'serve', '--port', '0', ...args], {
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  let out = '';
+  try {
+    await new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error(`serve said nothing useful: ${out}`)), 20_000);
+      timer.unref?.();
+      child.stdout.setEncoding('utf8');
+      child.stdout.on('data', (chunk) => {
+        out += chunk;
+        if (out.includes('Valid for 15 minutes')) {
+          clearTimeout(timer);
+          resolve();
+        }
+      });
+      child.on('error', reject);
+      child.on('exit', () => {
+        clearTimeout(timer);
+        reject(new Error(`serve exited: ${out}`));
+      });
+    });
+  } finally {
+    child.kill('SIGKILL');
+  }
+  return out;
+}
+
+test('the first-run banner only offers what the hub is actually doing', async () => {
+  // Both lines used to be printed unconditionally. `--no-qr` said "scan the code
+  // above" with no code above it, and a hub whose dashboard is not being served -
+  // which it says on the line before - told the operator to open that dashboard in
+  // a browser. A new user following either one gets nothing at all.
+  const quiet = await serveBanner(['--no-qr', '--no-dashboard', '--data', join(dir, 'banner-quiet')]);
+  assert.doesNotMatch(quiet, /code above/, 'nothing to scan, so nothing is claimed');
+  assert.doesNotMatch(quiet, /In a browser/, 'and no dashboard to open');
+  assert.match(quiet, /Pair a device with:/);
+  assert.match(quiet, /code: [A-Z0-9-]+/, 'the code itself is still there');
+  assert.match(quiet, /hub: +ws:\/\//, 'and the address to type it into');
+
+  // With the QR printed, the instruction that refers to it comes back.
+  const withQr = await serveBanner(['--no-dashboard', '--data', join(dir, 'banner-qr')]);
+  assert.match(withQr, /Scan the code above/);
+  assert.doesNotMatch(withQr, /In a browser/, 'still no dashboard');
 });
 
 test('serve refuses half a TLS configuration', async () => {

@@ -189,6 +189,11 @@ notify.upsertRole({
 });
 ```
 
+`quietHours` silences *calls*, not notifications — a phone still buzzes for an
+alert during them — and the hours are read from the hub's own clock, not each
+device's. A window that wraps midnight is written the way you would say it:
+`{ start: 22, end: 7 }`.
+
 Three roles ship by default:
 
 | Role | Channels | Floor | Rings? |
