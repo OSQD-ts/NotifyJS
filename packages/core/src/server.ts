@@ -2666,7 +2666,12 @@ export class Notifier extends EventEmitter<NotifierEvents> {
       // alert below the floor every on-call role filters on, so it reached nobody
       // and said nothing about it.
       severity: requireSeverity(input.severity, 'info'),
-      title: String(input.title ?? '').slice(0, 200),
+      // Required by this method's own type, and by the HTTP endpoint, which answers
+      // 400 with this same sentence. Here it was quietly accepted: `notify({})`, or
+      // `notify({ title: undefined })` from a variable that was not set, published a
+      // notification with no title - every device buzzed and showed a blank line,
+      // and the flood key it fell under was shared by every other titleless alert.
+      title: requireTitle(input.title),
       body: input.body ? String(input.body).slice(0, 4000) : undefined,
       tags: input.tags?.slice(0, 20),
       data: input.data,
@@ -3446,6 +3451,13 @@ function withSeverity(input: NotifyInput | string, severity: Severity): NotifyIn
  * and an escalation rung off the wire - coerce before they get here, and the
  * `notify.send` admin op turns a throw into an `ok: false` carrying this message.
  */
+/** The title a caller must supply, trimmed and bounded. */
+function requireTitle(value: unknown): string {
+  const title = typeof value === 'string' ? value.trim() : '';
+  if (!title) throw new Error('notify requires a title');
+  return title.slice(0, 200);
+}
+
 function requireSeverity(value: unknown, fallback: Severity): Severity {
   if (value === undefined || value === null) return fallback;
   if (isSeverity(value)) return value;

@@ -2791,6 +2791,33 @@ test('a number one object deep cannot switch off what it configures either', asy
   rmSync(dir, { recursive: true, force: true });
 });
 
+test('an alert with no title is refused rather than shown blank', async () => {
+  // `title` is required by `notify`'s own type and by the HTTP endpoint, which
+  // answers 400 with this same sentence. The embedded API quietly accepted its
+  // absence: `notify({})`, or `notify({ title: someVariableNobodySet })`, published
+  // a notification with no title at all - every device buzzed and showed a blank
+  // line - and every titleless alert shared one flood key, so they coalesced with
+  // each other.
+  const dir = tmp('no-title');
+  const hub = hostileHub(dir);
+  await hub.start();
+  try {
+    for (const input of [{}, { title: '' }, { title: '   ' }, { title: null }, { body: 'only a body' }]) {
+      await assert.rejects(
+        () => hub.notify(input),
+        /notify requires a title/,
+        JSON.stringify(input),
+      );
+    }
+    // And a title is trimmed, so trailing whitespace is not a different alert.
+    assert.equal((await hub.notify({ title: '  Disk 91%  ' })).title, 'Disk 91%');
+    assert.equal((await hub.notify('just a string')).title, 'just a string');
+  } finally {
+    await hub.stop();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('a severity that is not one is refused rather than quietly becoming info', async () => {
   // The quietest failure in the library. `notify({ severity: 'criticial' })` - one
   // letter - was coerced to `info`, which is below the floor every on-call role
