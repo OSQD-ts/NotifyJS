@@ -26,6 +26,7 @@ import {
   isSeverity,
   SEVERITIES,
   sanitizeRole,
+  CAPABILITIES,
   timingSafeEqual,
   toBase64Url,
   type AuditEvent,
@@ -1106,10 +1107,43 @@ export class Notifier extends EventEmitter<NotifierEvents> {
   }
 
   upsertRole(role: Role): void {
-    this.store.putRole(role);
+    // Through the same validation the wire goes through. This wrote whatever it was
+    // handed straight into the store: `upsertRole(0)` and `upsertRole('viewer')` both
+    // produced a role whose name persisted as the string "undefined", and
+    // `channels: 'not-a-list'` - the exact shape a test already proves cannot reach
+    // the store from a device - reached it from here. A `minSeverity` typo was worse
+    // than useless: it ranks below `debug`, so a role meant to filter saw everything.
+    //
+    // `true` for what may be granted, because a caller holding a reference to the
+    // hub already owns the process; the restriction exists to stop a *device*
+    // widening its own authority.
+    const next = sanitizeRole(this.assertKnownCapabilities(role), true);
+    this.store.putRole(next);
     for (const session of this.sessions.values()) {
-      if (session.device?.role === role.name) session.role = role;
+      if (session.device?.role === next.name) session.role = next;
     }
+  }
+
+  /**
+   * Refuses a capability that is not one, by name.
+   *
+   * `sanitizeRole` drops them, which is right over the wire - a device must not be
+   * able to make the hub throw, and an unknown capability there is a client from
+   * another version. From here it can only be a typo, and a silently dropped
+   * `'notify.recieve'` is a role that receives nothing.
+   */
+  private assertKnownCapabilities(role: Role): Role {
+    const caps = (role as Partial<Role> | undefined)?.capabilities;
+    if (!Array.isArray(caps)) return role;
+    const unknown = caps.filter((c) => !(CAPABILITIES as readonly string[]).includes(c as string));
+    if (unknown.length > 0) {
+      throw new Error(
+        `unknown ${unknown.length === 1 ? 'capability' : 'capabilities'} ${unknown
+          .map((c) => JSON.stringify(c))
+          .join(', ')} - see CAPABILITIES`,
+      );
+    }
+    return role;
   }
 
   deleteRole(name: string): boolean {
