@@ -860,11 +860,13 @@ async function watches(argv: string[]): Promise<void> {
 
   if (out.heartbeats.length === 0) process.stdout.write('nothing is being watched\n');
   for (const beat of out.heartbeats) {
-    const ago = Math.round((Date.now() - beat.lastSeenAt) / 1000);
+    // Through `formatDuration`, like every other duration this CLI prints. `watch`
+    // confirms "a check-in is expected every 1d" and this listed the same value as
+    // "every 86400s" one command later, which reads like a different setting.
     process.stdout.write(
-      `${beat.missing ? 'MISSING' : 'ok     '}  ${beat.name.padEnd(24)} every ${Math.round(
-        beat.every / 1000,
-      )}s  last seen ${ago}s ago\n`,
+      `${beat.missing ? 'MISSING' : 'ok     '}  ${beat.name.padEnd(24)} every ${formatDuration(
+        beat.every,
+      )}  last seen ${formatDuration(Math.max(0, Date.now() - beat.lastSeenAt))} ago\n`,
     );
   }
   client.disconnect();

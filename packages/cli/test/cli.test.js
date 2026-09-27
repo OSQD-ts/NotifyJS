@@ -199,6 +199,30 @@ test('the first-run banner only offers what the hub is actually doing', async ()
   assert.doesNotMatch(withQr, /In a browser/, 'still no dashboard');
 });
 
+test('a watched job reads the same in both commands that describe it', async () => {
+  // `watch` confirmed "a check-in is expected every 1d" and `watches` listed the
+  // same job as "every 86400s" one command later, which reads like a different
+  // setting rather than the same one.
+  // Its own credentials, so this test does not depend on another having paired first.
+  const own = join(dir, 'watcher.json');
+  const { code } = hub.createPairingCode({ role: 'admin' });
+  await cli(['pair', code, '--url', HUB_URL, '--store', own, '--name', 'watcher']);
+
+  const armed = await cli(['watch', 'nightly-backup', '--every', '24h', '--grace', '1h',
+    '--url', HUB_URL, '--store', own]);
+  assert.match(armed.stdout, /every 1d/);
+  assert.match(armed.stdout, /1h grace/);
+
+  await cli(['checkin', 'nightly-backup', '--url', HUB_URL, '--store', own]);
+
+  const listed = await cli(['watches', '--url', HUB_URL, '--store', own]);
+  assert.match(listed.stdout, /nightly-backup/);
+  assert.match(listed.stdout, /every 1d/, 'the same duration, written the same way');
+  assert.doesNotMatch(listed.stdout, /86400/, 'and not as raw seconds');
+
+  hub.forget('nightly-backup');
+});
+
 test('serve refuses half a TLS configuration', async () => {
   await assert.rejects(
     () => cli(['serve', '--tls-cert', '/tmp/nope.pem']),
