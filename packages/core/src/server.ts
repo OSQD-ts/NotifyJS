@@ -3345,7 +3345,6 @@ function sanitizeChannel(value: unknown): string {
   return out.trim().slice(0, 64) || 'default';
 }
 
-/** IPv4 or IPv6 literal, for deciding whether a proxy header is believable. */
 /** A JSON object and nothing else - arrays and null are not payloads. */
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -3392,6 +3391,7 @@ async function readJsonBody(
   return parsed;
 }
 
+/** IPv4 or IPv6 literal, for deciding whether a proxy header is believable. */
 function isIpAddress(value: string): boolean {
   if (/^\d{1,3}(\.\d{1,3}){3}$/.test(value)) {
     return value.split('.').every((part) => Number(part) <= 255);

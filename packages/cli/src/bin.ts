@@ -857,7 +857,6 @@ async function watches(argv: string[]): Promise<void> {
   client.disconnect();
 }
 
-/** Version stamped in at bundle time; falls back for source checkouts. */
 /**
  * The version this build reports, and how it knows.
  *

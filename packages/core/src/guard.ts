@@ -271,8 +271,6 @@ export class MessageLimiter {
   }
 }
 
-/** IPv4-mapped IPv6 (`::ffff:1.2.3.4`) must not read as a distinct IP. */
-
 /**
  * Compiles an operator's allow or deny list, accepting CIDR ranges.
  *
@@ -335,6 +333,7 @@ export function matchesIp(list: BlockList, ip: string): boolean {
   return family !== undefined && list.check(ip, family);
 }
 
+/** IPv4-mapped IPv6 (`::ffff:1.2.3.4`) must not read as a distinct IP. */
 export function normalizeIp(raw: string | undefined): string {
   if (!raw) return 'unknown';
   const ip = raw.trim();

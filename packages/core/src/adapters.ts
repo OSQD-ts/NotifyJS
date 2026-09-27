@@ -179,8 +179,9 @@ export function fastifyErrorHandler(sink: AlertSink, options: HttpErrorOptions =
   };
 }
 
-/** Maps common logger level names and numeric levels onto severities. */
 /**
+ * Maps common logger level names onto severities.
+ *
  * Null-prototyped: the key comes from a log record, and a plain object answers
  * `LEVELS['constructor']` with a function inherited from Object.prototype -
  * truthy, not a severity, and on its way into a comparison that expects one.
