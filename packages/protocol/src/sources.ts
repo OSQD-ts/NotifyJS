@@ -21,6 +21,15 @@ export interface SourceState extends Source {
   paired: boolean;
   /** Set when this source's own watchdog says the hub has gone quiet. */
   serviceDown?: { title: string; body?: string };
+  /**
+   * When a snooze on this hub runs out, if one is running.
+   *
+   * Adopted from the hub on every `ready`, because that is where a snooze
+   * actually lives: it is stored on the device record and enforced on delivery.
+   * A client holding its own copy in memory was guessing, and after a restart it
+   * guessed "not snoozed" while the hub was still holding alerts back.
+   */
+  snoozedUntil?: number;
 }
 
 /** A notification, plus which hub it came from. */
@@ -83,6 +92,8 @@ export class SourceManager {
    * cancelling the pairing that was already in flight.
    */
   private loading: Promise<void> | undefined;
+  /** Fires when the running snooze ends, to catch up and redraw. */
+  private snoozeTimer: ReturnType<typeof setTimeout> | undefined;
 
   constructor(private readonly opts: SourceManagerOptions) {}
 
@@ -116,7 +127,15 @@ export class SourceManager {
   /** Restores the subscription list and connects everything enabled. */
   load(): Promise<void> {
     // Idempotent: callers may race, and only the first should do the work.
-    this.loading ??= this.restore();
+    //
+    // A failure is deliberately not remembered. `add`, `remove` and
+    // `setEnabled` all begin by awaiting this, so a memoized rejection left
+    // the user unable to add a hub - or even to remove the one that had
+    // failed - for the life of the install.
+    this.loading ??= this.restore().catch((err) => {
+      this.loading = undefined;
+      throw err;
+    });
     return this.loading;
   }
 
@@ -135,8 +154,18 @@ export class SourceManager {
       // A source added while this was loading already has a live client -
       // reconnecting it here would drop a pairing that is still in progress.
       if (this.clients.has(source.id)) continue;
-      if (source.enabled) await this.connect(source);
-      else this.setState(source.id, { status: 'idle', paired: true });
+      if (source.enabled) {
+        // One source that cannot even be dialled must not strand the rest.
+        // `createSocket` throws outright for a `ws://` URL on an `https://`
+        // page and for a malformed one on a phone, and this loop used to carry
+        // that out of `restore()`: every later source went unconnected and the
+        // list was never published, so the UI showed nothing at all.
+        try {
+          await this.connect(source);
+        } catch {
+          this.setState(source.id, { status: 'error', paired: true });
+        }
+      } else this.setState(source.id, { status: 'idle', paired: true });
     }
     this.publish();
   }
@@ -257,14 +286,77 @@ export class SourceManager {
   }
 
   snoozeAll(durationMs: number): void {
-    for (const client of this.clients.values()) client.snooze(durationMs);
+    // Recorded here as well as asked for, so the button reflects the tap at once
+    // rather than waiting for the next `ready` to confirm it.
+    const until = Date.now() + durationMs;
+    for (const [id, client] of this.clients) {
+      client.snooze(durationMs);
+      this.setState(id, { snoozedUntil: until });
+    }
+    this.armSnoozeCatchUp();
+    this.publish();
   }
 
   unsnoozeAll(): void {
-    for (const client of this.clients.values()) client.unsnooze();
+    // Cleared for every known source, not only the connected ones: muting a hub
+    // drops its client and keeps its state, and that state was then stuck reading
+    // "snoozed" with nothing able to clear it.
+    for (const id of this.sources.keys()) {
+      this.clients.get(id)?.unsnooze();
+      this.setState(id, { snoozedUntil: undefined });
+    }
+    this.armSnoozeCatchUp();
+    this.publish();
+    // What the hub held back is still sitting behind this device's cursor, and
+    // nothing else would ask for it: the snooze promise is that alerts are held
+    // rather than dropped, so resuming has to go and collect them.
+    this.syncAll();
+  }
+
+  /**
+   * Collects what a snooze held back, the moment it ends.
+   *
+   * Nothing else would. A snooze that runs out on its own changes no state on
+   * either side - the hub simply starts allowing alerts again - so the ones it
+   * suppressed stayed behind the device's cursor until some unrelated event
+   * happened to trigger a sync: the phone being opened, the laptop waking. A
+   * dashboard tab left open recovered them never, though the desktop client's own
+   * comment promises "nothing is lost - it arrives when the snooze ends".
+   *
+   * The same timer is what stops the UI claiming a snooze that has expired.
+   */
+  private armSnoozeCatchUp(): void {
+    if (this.snoozeTimer) clearTimeout(this.snoozeTimer);
+    this.snoozeTimer = undefined;
+
+    const until = this.snoozedUntil;
+    if (until <= Date.now()) return;
+
+    this.snoozeTimer = setTimeout(
+      () => {
+        this.snoozeTimer = undefined;
+        this.publish();
+        this.syncAll();
+      },
+      until - Date.now() + 250,
+    );
+    (this.snoozeTimer as { unref?: () => void }).unref?.();
+  }
+
+  /** When the running snooze ends, across every source, or 0 if none is. */
+  get snoozedUntil(): number {
+    const now = Date.now();
+    let latest = 0;
+    for (const state of this.states.values()) {
+      const until = state.snoozedUntil ?? 0;
+      if (until > now && until > latest) latest = until;
+    }
+    return latest;
   }
 
   disconnectAll(): void {
+    if (this.snoozeTimer) clearTimeout(this.snoozeTimer);
+    this.snoozeTimer = undefined;
     for (const client of this.clients.values()) client.disconnect();
     this.clients.clear();
   }
@@ -281,6 +373,30 @@ export class SourceManager {
 
   declineCall(sourceId: string, callId: string): void {
     this.clients.get(sourceId)?.declineCall(callId);
+  }
+
+  /**
+   * Declines a call on every ready hub that has not already been told.
+   *
+   * For a tap on a notification that arrived while the app was not running:
+   * Android hands back a call id and nothing else, and by then the call is not in
+   * any local state to look up. Every connected hub is told; the one that placed
+   * the call acts on it, and the rest ignore an id they have never rung.
+   *
+   * Returns the sources told, because "somebody was told" is not enough to forget
+   * the tap: sources come up one at a time, so on a phone watching two hubs the
+   * first to reach `ready` swallowed the decline and the hub that had actually
+   * rung never heard it - which is the failure this whole path exists to fix.
+   */
+  declineOnReady(callId: string, alreadyTold: ReadonlySet<string> = new Set()): string[] {
+    const told: string[] = [];
+    for (const [id, client] of this.clients) {
+      if (alreadyTold.has(id)) continue;
+      if (this.states.get(id)?.status !== 'ready') continue;
+      client.declineCall(callId);
+      told.push(id);
+    }
+    return told;
   }
 
   endCall(sourceId: string, callId: string): void {
@@ -361,7 +477,22 @@ export class SourceManager {
         known.label = client.serverName;
         void this.persist();
       }
-      this.setState(source.id, { status: 'ready', paired: true, role: ready.role });
+      this.setState(source.id, {
+        status: 'ready',
+        paired: true,
+        role: ready.role,
+        // The hub's answer wins, including when it says there is no snooze. Its
+        // clock, too: the value is the hub's absolute time, and a device whose
+        // own clock is fast would otherwise decide a live snooze had expired -
+        // reading "not snoozed" while alerts were still being held, which is the
+        // wrong way round. `serverTime` arrives in the same frame for exactly
+        // this.
+        snoozedUntil:
+          ready.snoozedUntil === undefined
+            ? undefined
+            : Date.now() + (ready.snoozedUntil - ready.serverTime),
+      });
+      this.armSnoozeCatchUp();
       this.publish();
     });
 

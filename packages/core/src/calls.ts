@@ -27,6 +27,12 @@ interface ActiveCall {
   repeat: number;
   attempted: string[];
   declined: Set<string>;
+  /**
+   * Devices that stopped ringing because they went away, not because anybody
+   * refused. Kept apart from [declined] because the two outcomes mean different
+   * things to whoever placed the call.
+   */
+  vanished: Set<string>;
   ringing: Set<string>;
   timer: NodeJS.Timeout | undefined;
   /** Drops an answered call whose `call.ended` never arrives. See `answer()`. */
@@ -41,8 +47,21 @@ export type CallEvent =
   | { type: 'ringing'; callId: string; deviceId: string; deviceName: string }
   | { type: 'answered'; callId: string; deviceId: string; deviceName: string }
   | { type: 'declined'; callId: string; deviceId: string }
+  /**
+   * A ringing device went away - its socket closed, or the liveness sweep
+   * dropped it. Separate from `declined` because nobody refused anything, and
+   * emitted so the audit log still records why the ladder moved on.
+   */
+  | { type: 'vanished'; callId: string; deviceId: string }
   | { type: 'ended'; callId: string; deviceId: string }
-  | { type: 'missed'; callId: string };
+  | { type: 'missed'; callId: string }
+  /**
+   * There was nobody to ring at all - no device on any rung. Emitted so the
+   * outcome exists somewhere other than the return value: an operator reading the
+   * audit log could not tell a call that failed from one still ringing, and an
+   * application driving escalation off the `call` event never heard about it.
+   */
+  | { type: 'failed'; callId: string };
 
 /**
  * Drives a call from "somebody should hear about this" to a definite outcome.
@@ -82,6 +101,7 @@ export class CallOrchestrator {
   place(request: CallRequest, steps: CallStep[], repeat = 0): Promise<CallResult> {
     const reachable = steps.some((step) => step.targets.length > 0);
     if (!reachable) {
+      this.emit({ type: 'failed', callId: request.id });
       return Promise.resolve({ callId: request.id, outcome: 'failed', attempted: [] });
     }
 
@@ -94,6 +114,7 @@ export class CallOrchestrator {
         repeat,
         attempted: [],
         declined: new Set(),
+        vanished: new Set(),
         ringing: new Set(),
         timer: undefined,
         reaper: undefined,
@@ -113,6 +134,12 @@ export class CallOrchestrator {
         call.pass += 1;
         call.cursor = 0;
         call.ringing.clear();
+        // Cleared with it: a decline belongs to the pass it happened in. Left
+        // standing, a phone that declined on the first pass and was simply not
+        // answered on the last one made the whole call report `declined`, so a
+        // final pass nobody touched was indistinguishable from a refusal.
+        call.declined.clear();
+        call.vanished.clear();
         this.runStep(call);
         return;
       }
@@ -233,6 +260,33 @@ export class CallOrchestrator {
     this.runStep(call);
   }
 
+  /**
+   * A ringing device has gone: its socket closed, or the liveness sweep dropped
+   * it for not reading.
+   *
+   * Advances the rung exactly as a decline does, since there is nothing to be
+   * gained by ringing a phone that is not there - but it is recorded apart from
+   * the declines, because the difference is the entire reason two outcomes
+   * exist: somebody saw the page and said no, against nobody looking at their
+   * phone at all. Counted as a decline, a phone that lost Wi-Fi mid-ring told
+   * the caller a human had refused, so the `outcome === 'missed'` fallback every
+   * embedder is told to write never ran, and the dashboard said somebody had
+   * turned the page down.
+   */
+  private vanish(call: ActiveCall, deviceId: string): void {
+    call.vanished.add(deviceId);
+    call.ringing.delete(deviceId);
+    // Recorded under its own name. Routing this through `decline()` used to write
+    // a `call.declined` audit row, which was wrong; writing nothing at all left
+    // an operator asking why a call escalated with no answer in the log.
+    this.emit({ type: 'vanished', callId: call.request.id, deviceId });
+    if (call.ringing.size > 0) return;
+
+    this.clearTimer(call);
+    call.cursor += 1;
+    this.runStep(call);
+  }
+
   private findTarget(call: ActiveCall, deviceId: string): CallTarget | undefined {
     return this.allTargets(call).find((t) => t.deviceId === deviceId);
   }
@@ -285,7 +339,7 @@ export class CallOrchestrator {
         continue;
       }
       if (!call.ringing.has(deviceId)) continue;
-      this.decline(call.request.id, deviceId);
+      this.vanish(call, deviceId);
     }
   }
 

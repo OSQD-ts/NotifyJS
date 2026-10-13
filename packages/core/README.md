@@ -122,7 +122,8 @@ notify.checkIn('nightly-backup');   // at the end of the backup
 - **Calls escalate.** Ring devices one at a time, or define a policy with
   `upsertPolicy` to say exactly who rings, in what order, for how long.
 - **Offline devices get what they missed** on reconnect, filtered through their
-  *current* role. `requireAck: true` re-delivers until a human acknowledges.
+  *current* role. `requireAck: true` re-delivers until a device acknowledges - a device, not a
+  person: every client acks on receipt.
 - **Prometheus counters at `/metrics`** — counts only, no titles or channels,
   so scraping it cannot leak the content of an alert.
 
@@ -138,6 +139,11 @@ const logger = pino(createLogStream(notify)); // error and above
 
 `fastifyErrorHandler` and `logHandler` are there too. Each is one line,
 deduplicated by default so a crash loop collapses into a single alert.
+
+`captureCrashes` ends the process after alerting, for an unhandled rejection as
+well as an uncaught exception, because that is what Node does on its own and
+subscribing to those events replaces the default. Pass `exit: false` if something
+other than a supervisor is going to decide what happens next.
 
 ## Security
 

@@ -79,6 +79,8 @@ export class Metrics {
     heartbeats: number;
     heartbeatsMissing: number;
     activeCalls: number;
+    storeWritable: boolean;
+    storeWriteFailures: number;
   }): string {
     const lines: string[] = [];
 
@@ -123,6 +125,21 @@ export class Metrics {
     metric('heartbeats', 'Registered heartbeats.', 'gauge', gauges.heartbeats);
     metric('heartbeats_missing', 'Heartbeats currently overdue.', 'gauge', gauges.heartbeatsMissing);
     metric('active_calls', 'Calls ringing right now.', 'gauge', gauges.activeCalls);
+    // The one gauge worth an alerting rule of its own: a hub that cannot write is
+    // still answering scrapes, still delivering alerts, and losing every device
+    // paired from now on.
+    metric(
+      'store_writable',
+      'Whether the last write to the store succeeded.',
+      'gauge',
+      gauges.storeWritable ? 1 : 0,
+    );
+    metric(
+      'store_write_failures_total',
+      'Writes to the store that failed.',
+      'counter',
+      gauges.storeWriteFailures,
+    );
     metric(
       'uptime_seconds',
       'Seconds since the hub started.',

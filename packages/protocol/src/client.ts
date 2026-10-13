@@ -29,6 +29,14 @@ const DEFAULT_KEEPALIVE_MS = 30_000;
 const KEEPALIVE_MISSES = 2.5;
 
 /**
+ * How long a socket has to open and finish its handshake before it is retried.
+ *
+ * Comfortably above the hub's own handshake timeout, so a slow but working
+ * connection is never given up on first.
+ */
+const DEFAULT_CONNECT_TIMEOUT_MS = 20_000;
+
+/**
  * The three things a client needs from its host platform. Supplying these is
  * the entire porting effort: the dashboard, the phone app and the CLI daemon
  * all run the identical handshake, reconnect and replay logic below.
@@ -54,13 +62,27 @@ export interface NotifyClientOptions {
   crypto: CryptoProvider;
   storage: ClientStorage;
   createSocket(url: string): SocketLike;
-  deviceName: string;
+  /**
+   * How this device asks to be listed on the hub.
+   *
+   * A function is read when a name is actually needed, which is what a host
+   * whose name can change while the client lives has to pass: the dashboard
+   * builds its client when the page loads, long before anybody types a name into
+   * the pairing form, so a captured string meant the hub recorded every browser
+   * as `Browser` however carefully it had been named.
+   */
+  deviceName: string | (() => string);
   platform: string;
   model?: string;
   /** Reconnect with exponential backoff after an unexpected close. */
   autoReconnect?: boolean;
   /** Namespaces stored credentials so one app can hold several identities. */
   storagePrefix?: string;
+  /**
+   * How long to wait for a socket to open and finish its handshake, in
+   * milliseconds, before dropping it and retrying. Defaults to 20 seconds.
+   */
+  connectTimeoutMs?: number;
   /**
    * Whether this device currently has any network at all.
    *
@@ -130,8 +152,18 @@ export class NotifyClient {
   private keys: KeyPair | undefined;
   private deviceId: string | undefined;
   private ackedSeq = 0;
+  /**
+   * Whether this connection is the one that enrolled the device.
+   *
+   * Only that connection may move the replay cursor to the hub's head, so a
+   * device with a real backlog is never skipped past it.
+   */
+  private freshlyPaired = false;
+  /** The hub this device paired with, if it has been stored. */
+  private pairedWith: string | undefined;
   private backoff = 0;
   private reconnectTimer: ReturnType<typeof setTimeout> | undefined;
+  private connectTimer: ReturnType<typeof setTimeout> | undefined;
   private closedByUs = false;
   private pendingCode: string | undefined;
   /**
@@ -215,23 +247,31 @@ export class NotifyClient {
   }
 
   async loadCredentials(): Promise<boolean> {
-    const [deviceId, publicKey, secretSeed, seq] = await Promise.all([
+    const [deviceId, publicKey, secretSeed, seq, pairedWith] = await Promise.all([
       this.opts.storage.get(this.key('deviceId')),
       this.opts.storage.get(this.key('publicKey')),
       this.opts.storage.get(this.key('secretSeed')),
       this.opts.storage.get(this.key('ackedSeq')),
+      this.opts.storage.get(this.key('serverId')),
     ]);
     if (!deviceId || !publicKey || !secretSeed) return false;
     this.deviceId = deviceId;
     this.keys = { publicKey, secretSeed };
     this.ackedSeq = seq ? Number(seq) : 0;
+    this.pairedWith = pairedWith ?? undefined;
 
     // The watchdog spec has to survive an app restart, or closing the app
     // would quietly disable the only thing watching the service.
     const stored = await this.opts.storage.get(this.key('watchdog'));
     if (stored) {
       try {
-        this.watchdogSpec = JSON.parse(stored) as WatchdogSpec;
+        // Through the same check the frame gets. This path had none, so the bug
+        // that check exists for could come straight back through storage: a spec
+        // with no numbers in it makes `intervalMs + graceMs` NaN, `setTimeout`
+        // clamps that to 1ms, and a phone with no connectivity then probes in a
+        // loop. A spec written by an older build, or a half-written file, is
+        // exactly where such a thing comes from.
+        this.watchdogSpec = usableWatchdog(JSON.parse(stored) as WatchdogSpec);
       } catch {
         /* a corrupt spec just means we wait for the hub to resend it */
       }
@@ -239,10 +279,19 @@ export class NotifyClient {
     return true;
   }
 
+  /** Drops the watchdog contract without touching this device's identity. */
+  private async forgetWatchdog(): Promise<void> {
+    this.watchdogSpec = undefined;
+    this.disarmWatchdog();
+    this.serviceMissing = false;
+    await this.opts.storage.remove(this.key('watchdog')).catch(() => {});
+  }
+
   async forgetCredentials(): Promise<void> {
     this.deviceId = undefined;
     this.keys = undefined;
     this.ackedSeq = 0;
+    this.freshlyPaired = false;
     // The watchdog contract goes with them. A revoked device that kept its
     // spec would keep raising "the service is down" about a hub it is no
     // longer entitled to hear from - and would leave the key behind in
@@ -255,6 +304,7 @@ export class NotifyClient {
       this.opts.storage.remove(this.key('publicKey')),
       this.opts.storage.remove(this.key('secretSeed')),
       this.opts.storage.remove(this.key('ackedSeq')),
+      this.opts.storage.remove(this.key('serverId')),
       this.opts.storage.remove(this.key('watchdog')),
     ]);
   }
@@ -286,8 +336,17 @@ export class NotifyClient {
     this.serviceMissing = false;
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
     this.reconnectTimer = undefined;
-    this.socket?.close(1000, 'client closed');
+    this.clearConnectDeadline();
+    // Detached before closing, exactly as `open()` does for the socket it
+    // replaces. `close()` only begins the closing handshake, so frames already
+    // queued on the host's event loop still dispatched into these handlers: a
+    // source the user had just muted could ring once more, and a `hello` whose
+    // signing resumed after a later `connect()` signed the stale nonce and sent
+    // it down the new socket, where `auth_failed` latches `rejected` - no more
+    // reconnects until the UI intervenes - and spends the address's ban budget.
+    const socket = this.socket;
     this.socket = undefined;
+    if (socket) abandon(socket, 1000, 'client closed');
     // Failed here rather than left to `onclose`: that handler ignores a socket
     // this method has already dropped, so an outstanding admin call would
     // otherwise sit until its own timeout with no connection left to answer it.
@@ -307,14 +366,7 @@ export class NotifyClient {
     // closing it leaks the connection and leaves the hub counting a device
     // that nothing is reading from.
     const previous = this.socket;
-    if (previous) {
-      previous.onopen = previous.onmessage = previous.onclose = previous.onerror = null;
-      try {
-        previous.close(1000, 'reconnecting');
-      } catch {
-        /* already closing */
-      }
-    }
+    if (previous) abandon(previous, 1000, 'reconnecting');
 
     // Whatever the last socket was proving liveness for is gone.
     this.stopKeepalive();
@@ -323,13 +375,36 @@ export class NotifyClient {
     this.setStatus(this.backoff > 0 ? 'reconnecting' : 'connecting');
     const socket = this.opts.createSocket(this.opts.url);
     this.socket = socket;
+    this.armConnectDeadline(socket);
 
     socket.onopen = () => {
       // Nothing to do: the hub speaks first with `hello`, and we cannot sign
       // anything until we have its nonce.
     };
     socket.onmessage = (ev) => {
-      void this.receive(String(ev.data));
+      // Not `void`: `receive` awaits the host application's crypto and
+      // storage, and both can fail for real - a credential truncated by a
+      // half-written file, a keystore that is not unlocked yet, a storage
+      // backend that throws rather than returning null. That rejection had
+      // nowhere to go, so it surfaced as an unhandled rejection and took the
+      // process with it: the CLI daemon and the desktop main process both die
+      // on one. A client that cannot finish a handshake is broken rather than
+      // merely disconnected, so it says so instead of sitting in `connecting`
+      // for ever.
+      this.receive(String(ev.data)).catch((err) => {
+        // Reported, and deliberately not latched into the status. The failure
+        // may be incidental to a connection that is otherwise working - the
+        // `watchdog` frame persists its spec, so a storage backend that rejects
+        // on a full disk lands here on an authenticated, keepaliving socket that
+        // is delivering alerts. Marking that `error` had `SourceManager` publish
+        // the source as failed and `resume()` tear the healthy socket down on
+        // every wake. A handshake that cannot be finished is caught instead by
+        // the connect deadline, which drops the socket and retries properly.
+        this.emit('error', {
+          code: 'client_error',
+          message: err instanceof Error ? err.message : String(err),
+        });
+      });
     };
     socket.onerror = () => {
       this.setStatus('error');
@@ -358,6 +433,68 @@ export class NotifyClient {
       }
       this.scheduleReconnect();
     };
+  }
+
+  /**
+   * Gives up on a socket that never finished connecting.
+   *
+   * Nothing else would. The keepalive only starts at `ready`, the watchdog only
+   * arms once a frame has arrived, and `resume()` - the one thing a phone calls
+   * on waking - treats `connecting` as progress and declines to interfere. A
+   * socket that neither opens nor closes nor errors, which is what a radio
+   * switching network mid-connect produces, therefore left the client in
+   * `connecting` for ever, receiving nothing, with not one timer pending.
+   */
+  private armConnectDeadline(socket: SocketLike): void {
+    this.clearConnectDeadline();
+    this.connectTimer = setTimeout(() => {
+      // Only the socket this was armed for, and only while it is still trying.
+      if (this.socket !== socket || this.closedByUs) return;
+      if (this.status === 'ready') return;
+
+      this.socket = undefined;
+      this.stopKeepalive();
+      abandon(socket, 1000, 'handshake timed out');
+
+      // A pairing attempt is never retried from here. The code may already have
+      // been consumed by the attempt that timed out, and replaying it earns a
+      // `pair_failed`, which latches `rejected` and stops the client trying
+      // anything again until the UI intervenes. Better to say so and let
+      // somebody type a fresh code.
+      if (this.status === 'pairing') {
+        this.pendingCode = undefined;
+        this.setStatus('error');
+        this.emit('error', {
+          code: 'pair_timeout',
+          message: 'the hub did not answer the pairing request',
+        });
+        return;
+      }
+
+      // The same rules `onclose` follows, for the same reasons: a client with no
+      // credentials would be told "unpaired" again on every attempt, one the hub
+      // has rejected must wait for the UI, and `autoReconnect: false` means what
+      // it says - which is the CLI's default, so without this a `notifyjs send`
+      // against an address that accepts TCP and never speaks retried for ever.
+      if (this.status === 'unpaired') return;
+      if (this.rejected) return;
+      if (!this.opts.autoReconnect) {
+        this.setStatus('idle');
+        return;
+      }
+
+      // Through the backoff rather than straight back out, so a hub that
+      // accepts connections and says nothing is not dialled every twenty
+      // seconds for the life of the app.
+      this.scheduleReconnect();
+    }, this.opts.connectTimeoutMs ?? DEFAULT_CONNECT_TIMEOUT_MS);
+    // Never let this be the reason a process stays alive.
+    (this.connectTimer as { unref?: () => void }).unref?.();
+  }
+
+  private clearConnectDeadline(): void {
+    if (this.connectTimer) clearTimeout(this.connectTimer);
+    this.connectTimer = undefined;
   }
 
   private scheduleReconnect(): void {
@@ -390,7 +527,24 @@ export class NotifyClient {
     this.noteHeardFrom();
 
     switch (msg.t) {
-      case 'hello':
+      case 'hello': {
+        // A hub that is not the one this device paired with gets nothing: not a
+        // signature, not an ack, and no chance to send a `revoked`. Nothing in the
+        // protocol authenticates a hub to a device, so an on-path party against a
+        // `ws://` hub - the documented LAN default - could otherwise answer at the
+        // address, be believed about this device's own role, forge a critical
+        // all-clear, ring the machine, and have it speak whatever it liked.
+        if (this.pairedWith && msg.serverId !== this.pairedWith) {
+          this.setStatus('error');
+          this.emit('error', {
+            code: 'wrong_hub',
+            message: 'this is not the hub this device paired with',
+          });
+          this.closedByUs = true;
+          this.socket?.close(1008, 'wrong hub');
+          this.socket = undefined;
+          return;
+        }
         this.hello = msg;
         this.clockOffset = msg.serverTime - Date.now();
         // A hub that predates keepalives says nothing here, and the default
@@ -402,8 +556,12 @@ export class NotifyClient {
             : DEFAULT_KEEPALIVE_MS;
         await this.handshake(msg);
         return;
+      }
 
       case 'paired':
+        this.freshlyPaired = true;
+        // Pinned from the connection that enrolled this device.
+        this.pairedWith = this.hello?.serverId ?? this.pairedWith;
         this.deviceId = msg.deviceId;
         this.role = msg.role;
         this.capabilities = msg.capabilities;
@@ -413,9 +571,29 @@ export class NotifyClient {
         return;
 
       case 'ready':
+        this.clearConnectDeadline();
         this.backoff = 0;
         this.role = msg.role;
         this.capabilities = msg.capabilities;
+
+        // A device that has just been enrolled starts where the hub says it is.
+        // The hub deliberately puts a new device at the head - "a new device
+        // gets what happens next, not a replay of every incident from before it
+        // existed" - and this client undid that on its first `sync()`, which
+        // every app sends on `ready`, on returning to the foreground and on
+        // waking: `ackedSeq` was 0, so a freshly paired phone was handed up to
+        // `replayLimit` alerts from before it belonged to the hub, each one
+        // rendered, sounded and popped.
+        //
+        // Only the connection that did the pairing may do this. A device
+        // reconnecting has a cursor that means something, and moving it forward
+        // here would silently discard exactly the backlog replay exists for.
+        if (this.freshlyPaired && typeof msg.seq === 'number' && msg.seq > this.ackedSeq) {
+          this.ackedSeq = msg.seq;
+          void this.opts.storage.set(this.key('ackedSeq'), String(msg.seq)).catch(() => {});
+        }
+        this.freshlyPaired = false;
+
         this.startKeepalive();
         this.setStatus('ready');
         this.emit('ready', msg);
@@ -445,13 +623,29 @@ export class NotifyClient {
 
       case 'watchdog': {
         const spec = msg as unknown as WatchdogSpec & { t: string };
-        this.watchdogSpec = {
-          enabled: spec.enabled,
-          intervalMs: spec.intervalMs,
-          graceMs: spec.graceMs,
-          alert: spec.alert,
-        };
-        await this.opts.storage.set(this.key('watchdog'), JSON.stringify(this.watchdogSpec));
+
+        // These two numbers are handed to `setTimeout`, so they have to be real
+        // durations. A frame arriving without them made `intervalMs + graceMs`
+        // NaN, which `setTimeout` clamps to 1ms: the alarm fired about a
+        // millisecond after connecting and, whenever `isOnline()` reported no
+        // connectivity, re-armed itself at the same 1ms - an unbounded loop of
+        // connectivity probes on a phone in a tunnel. The spec was persisted, so
+        // it outlived a restart.
+        //
+        // A hub produces such a frame from its own configuration without anybody
+        // making a mistake: `{ ...defaults, ...caller }` copies an explicit
+        // `undefined` over the default, so one unset key in an application's
+        // config was enough.
+        //
+        // Only nonsense is refused, never a short interval: how often a hub
+        // speaks is the hub's own business, and a device watching one that dies
+        // inside a second is a real configuration. Ignored rather than repaired
+        // with invented numbers - no watchdog is honest, a wrong one is not.
+        const usable = usableWatchdog(spec);
+        if (!usable) return;
+
+        this.watchdogSpec = usable;
+        await this.opts.storage.set(this.key('watchdog'), JSON.stringify(usable));
         this.armWatchdog();
         return;
       }
@@ -477,8 +671,16 @@ export class NotifyClient {
       }
 
       case 'revoked':
+        // The status changes and the keypair stays. Deleting the seed here made an
+        // unauthenticated frame - see the `hello` case above - permanently de-pair a
+        // device, with no confirmation and nothing to recover from. A revoked device
+        // is refused by its hub anyway, so keeping the seed costs nothing, and
+        // removing the source still clears it.
         this.setStatus('revoked');
-        await this.forgetCredentials();
+        // The watchdog contract does go: a revoked device that kept it would go on
+        // raising "the service is down" about a hub it is no longer entitled to hear
+        // from. The keypair is what stays.
+        await this.forgetWatchdog();
         this.emit('revoked', { reason: msg.reason });
         return;
 
@@ -507,6 +709,12 @@ export class NotifyClient {
     }
   }
 
+  /** The name to send, resolved now rather than when the client was built. */
+  private deviceName(): string {
+    const name = this.opts.deviceName;
+    return typeof name === 'function' ? name() : name;
+  }
+
   private async handshake(hello: HelloMsg): Promise<void> {
     if (this.pendingCode && this.keys) {
       const transcript = canonical([
@@ -515,7 +723,7 @@ export class NotifyClient {
         hello.nonce,
         this.pendingCode,
         this.keys.publicKey,
-        this.opts.deviceName,
+        this.deviceName(),
         this.opts.platform,
       ]);
       this.send({
@@ -523,7 +731,7 @@ export class NotifyClient {
         t: 'pair',
         code: this.pendingCode,
         publicKey: this.keys.publicKey,
-        name: this.opts.deviceName,
+        name: this.deviceName(),
         platform: this.opts.platform,
         model: this.opts.model,
         sig: await this.opts.crypto.sign(this.keys, transcript),
@@ -556,6 +764,12 @@ export class NotifyClient {
       this.opts.storage.set(this.key('deviceId'), this.deviceId),
       this.opts.storage.set(this.key('publicKey'), this.keys.publicKey),
       this.opts.storage.set(this.key('secretSeed'), this.keys.secretSeed),
+      // The hub this device belongs to, so a later connection can tell whether it
+      // is talking to the same one. Nothing in the protocol authenticates the hub
+      // to the device, so this is the one check available: it does not stop somebody
+      // who has read the hub's public `/hub.json`, but it does stop anything that
+      // simply answers at the address and claims to be a hub.
+      ...(this.hello ? [this.opts.storage.set(this.key('serverId'), this.hello.serverId)] : []),
     ]);
   }
 
@@ -565,7 +779,9 @@ export class NotifyClient {
   ack(ids: string[], opts: { seq?: number; action?: string } = {}): void {
     if (opts.seq !== undefined && opts.seq > this.ackedSeq) {
       this.ackedSeq = opts.seq;
-      void this.opts.storage.set(this.key('ackedSeq'), String(opts.seq));
+      // Swallowed deliberately, but never left to escape: a storage that
+      // rejects costs the cursor its persistence, not the process its life.
+      void this.opts.storage.set(this.key('ackedSeq'), String(opts.seq)).catch(() => {});
     }
     this.send({ v: PROTOCOL_VERSION, t: 'ack', ids, seq: opts.seq, action: opts.action });
   }
@@ -908,6 +1124,61 @@ export function webStorage(): ClientStorage {
         /* nothing to remove if we cannot reach it */
       }
     },
+  };
+}
+
+/**
+ * A watchdog spec this client can actually arm, or nothing.
+ *
+ * Both the frame and the copy restored from storage go through here. The numbers
+ * are handed to `setTimeout`, so a spec without them makes the deadline NaN -
+ * which `setTimeout` clamps to 1ms, and the alarm then re-arms itself at that
+ * interval for as long as the device reports no connectivity. Only nonsense is
+ * refused: how often a hub speaks is the hub's business.
+ */
+/**
+ * Drops a socket's handlers and closes it.
+ *
+ * `onerror` is replaced with a sink rather than removed, which is the whole point
+ * of this function existing. Closing a socket that has not finished connecting
+ * makes `ws` emit an `error` event - "WebSocket was closed before the connection
+ * was established" - and an `error` event with no listener is an uncaught
+ * exception that ends the process. The `try` around `close()` cannot catch it,
+ * because it is emitted a tick later.
+ *
+ * All three closes in this file can land mid-connect, and the connect deadline
+ * *only* ever fires mid-connect: a hub that accepts TCP and then says nothing,
+ * which is what a radio switching network produces, took the app down after
+ * twenty seconds every single time that deadline did its job.
+ *
+ * The handlers are detached before closing, rather than after, because `close()`
+ * only begins the closing handshake - frames already queued on the host's event
+ * loop would otherwise still dispatch into a socket this client has given up on.
+ */
+function abandon(socket: SocketLike, code: number, reason: string): void {
+  socket.onopen = socket.onmessage = socket.onclose = null;
+  socket.onerror = () => {};
+  try {
+    socket.close(code, reason);
+  } catch {
+    /* already closing */
+  }
+}
+
+function usableWatchdog(spec: WatchdogSpec | undefined): WatchdogSpec | undefined {
+  if (!spec || typeof spec !== 'object') return undefined;
+
+  const intervalMs = Number(spec.intervalMs);
+  const graceMs = Number(spec.graceMs);
+  const title = spec.alert?.title;
+  if (!Number.isFinite(intervalMs) || intervalMs <= 0) return undefined;
+  if (typeof title !== 'string' || title.length === 0) return undefined;
+
+  return {
+    enabled: spec.enabled === true,
+    intervalMs,
+    graceMs: Number.isFinite(graceMs) && graceMs >= 0 ? graceMs : 0,
+    alert: spec.alert,
   };
 }
 

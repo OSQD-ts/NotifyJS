@@ -41,7 +41,17 @@ export class Hub {
   private activeCall: ActiveCall | undefined;
   /** Set once the active call is answered, so a dropped connection leaves it be. */
   private answeredCallId: string | undefined;
-  private snoozedUntil = 0;
+  /**
+   * Read from the manager, which adopts it from each hub's `ready` frame - the
+   * hub is where a snooze is stored and enforced. Held locally it was a guess,
+   * and a restart during a snooze guessed "not snoozed" while the hub went on
+   * suppressing everything below critical: an operator looking at a normal feed
+   * would have believed they were on the pager.
+   */
+  private get snoozedUntil(): number {
+    return this.manager.snoozedUntil;
+  }
+
   private sources = [] as AppState['sources'];
   private listeners: Partial<HubEvents> = {};
 
@@ -144,13 +154,13 @@ export class Hub {
    * the floor here, so nothing is lost - it arrives when the snooze ends.
    */
   setSnooze(durationMs: number): void {
-    if (durationMs > 0) {
-      this.manager.snoozeAll(durationMs);
-      this.snoozedUntil = Date.now() + durationMs;
-    } else {
-      this.manager.unsnoozeAll();
-      this.snoozedUntil = 0;
-    }
+    if (durationMs > 0) this.manager.snoozeAll(durationMs);
+    else this.manager.unsnoozeAll();
+
+    // No timer here: the manager arms one when a snooze starts or is adopted from
+    // a hub, and publishes when it ends - which this app already turns into a
+    // redraw through its `sources` handler. Two timers for one deadline is one too
+    // many.
     this.publish();
   }
 
@@ -188,10 +198,18 @@ export class Hub {
       );
       if (duplicate) return;
 
+      // A replay carries the resolution with the notification, where a live
+      // `resolve` frame sets it on the entry. Copied across so the row draws as
+      // resolved, and so the tray is not told to announce a condition that ended
+      // hours ago - which happens on every reconnect: a lid, a network blip, a hub
+      // restart.
       const item: FeedEntry = { ...entry };
+      if (item.resolvedAt === undefined && entry.notification.resolvedAt !== undefined) {
+        item.resolvedAt = entry.notification.resolvedAt;
+      }
       this.feed = [item, ...this.feed].slice(0, FEED_LIMIT);
       this.publish();
-      this.listeners.alert?.(item);
+      if (item.resolvedAt === undefined) this.listeners.alert?.(item);
     });
 
     this.manager.on('call', (entry) => {
@@ -245,9 +263,6 @@ export class Hub {
   }
 
   private publish(): void {
-    // A snooze that has run out should stop showing as one without waiting for
-    // the next alert to arrive.
-    if (this.snoozedUntil && this.snoozedUntil <= Date.now()) this.snoozedUntil = 0;
     this.listeners.state?.(this.snapshot());
   }
 }

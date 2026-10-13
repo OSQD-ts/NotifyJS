@@ -43,9 +43,17 @@ object WatchEvents {
    */
   @Synchronized
   fun wake(context: Context, reason: String) {
+    // Nothing to wake for if the runtime is gone: the wake lock was taken first,
+    // so every alarm that found no listener still held the processor for thirty
+    // seconds to tell nobody.
+    val current = listener ?: return
     holdCpu(context)
-    listener?.invoke(reason)
+    current(reason)
   }
+
+  /** Whether a JavaScript runtime is subscribed, i.e. whether waking it can work. */
+  @Synchronized
+  fun hasListener(): Boolean = listener != null
 
   @Synchronized
   fun listen(callback: (String) -> Unit) {

@@ -3,6 +3,7 @@ import * as Device from 'expo-device';
 import * as Network from 'expo-network';
 import {
   SourceManager,
+  coerceSeverity,
   defaultPreferences,
   normalizePreferences,
   type ClientPreferences,
@@ -14,6 +15,7 @@ import {
   addCallActionListener,
   addWakeListener,
   consumeAnsweredCall,
+  consumePendingCallActions,
   dismissCall,
   showAlert,
   showIncomingCall,
@@ -34,6 +36,14 @@ import { secureStorage } from './storage';
 
 const PREFS_KEY = 'notifyjs_preferences';
 
+/**
+ * How long a decline tapped on a notification is carried while no hub can take it.
+ *
+ * Five minutes: longer than any ring this hub will ask for, and short enough that
+ * a tap nobody could place does not follow the app around.
+ */
+const DECLINE_HOLD_MS = 5 * 60_000;
+
 export interface HubState {
   sources: SourceState[];
   feed: FeedEntry[];
@@ -47,6 +57,11 @@ export interface HubState {
    */
   answeredCallId?: string;
   prefs: ClientPreferences;
+  /**
+   * Set when a preference could not be written to storage, so the UI can say
+   * that a setting applies now but will not survive a restart.
+   */
+  prefsUnsaved?: string;
   loaded: boolean;
 }
 
@@ -92,6 +107,17 @@ class HubClient {
 
   /** Headless tasks waiting on `whileWatching()`, released when watching ends. */
   private watchers: Array<() => void> = [];
+
+  /**
+   * Declines tapped on a notification before the hub that rang could be told.
+   *
+   * Kept per call, with the sources already told, because a phone may watch
+   * several hubs and they come up one at a time: forgetting the tap once *any* of
+   * them had heard it sent the decline to a hub that had never rung and lost it.
+   * The hub needs to know the phone refused, or it waits out the whole ring before
+   * trying the next person.
+   */
+  private readonly pendingDeclines = new Map<string, { told: Set<string>; at: number }>();
 
   constructor() {
     this.manager = new SourceManager({
@@ -188,11 +214,14 @@ class HubClient {
 
     await this.manager.load();
     this.set({ loaded: true });
+    this.flushDeclines();
   }
 
   private wire(): void {
     this.teardown = [
       this.manager.on('sources', (sources) => {
+        // A hub becoming ready is the moment a held decline can go out.
+        this.flushDeclines();
         const call = this.state.activeCall;
         if (call && strandedCall(call, this.state.answeredCallId, sources)) {
           dismissCall(call.call.id);
@@ -203,8 +232,25 @@ class HubClient {
       }),
 
       this.manager.on('notification', (entry) => {
+        // Coerced here, once, because nothing validates an incoming frame: the
+        // client casts the parsed JSON and hands it on. Every screen reads
+        // `severity` and two of them call `.toUpperCase()` on it, so a hub that
+        // omitted the field crashed the render - the feed, or the call screen at
+        // the moment a page arrived, with the native ringer still going and no
+        // JavaScript left to answer it. The colour lookups already treated it as
+        // untrusted; this makes the rest of the app agree with them.
+        entry = { ...entry, notification: severe(entry.notification, 'info') };
         const feed = addToFeed(this.state.feed, entry);
-        if (feed !== this.state.feed) this.set({ feed });
+        // The same array back means the feed already held this alert, and that
+        // is the ordinary case rather than an exceptional one: a reconnect
+        // replays from the ack cursor, so everything unacknowledged arrives
+        // again. Posting was outside this guard, and re-posting a notification
+        // id rings and vibrates afresh - so a phone that reconnected in the
+        // night re-announced every alert its owner had already read, once per
+        // reconnect, for as long as they stayed unacknowledged. The desktop
+        // client has always returned here.
+        if (feed === this.state.feed) return;
+        this.set({ feed });
         // Posted natively so it arrives whether the app is in front, behind,
         // or the screen is off - a JS scheduler only runs while JS does.
         showAlert(
@@ -216,6 +262,9 @@ class HubClient {
       }),
 
       this.manager.on('call', (entry) => {
+        // Same reasoning as the notification above, and it matters more: a call
+        // is rendered full screen the instant it arrives.
+        entry = { ...entry, call: severe(entry.call, 'critical') };
         this.set({ activeCall: entry });
         showIncomingCall({
           id: entry.call.id,
@@ -249,7 +298,7 @@ class HubClient {
       // Answer and Decline pressed on the notification itself, which is the
       // only way to act on a call without unlocking the phone first.
       (() => {
-        const sub = addCallActionListener(({ action, callId }) => {
+        const act = ({ action, callId }: { action: string; callId: string }) => {
           if (action === 'answer') {
             this.set({ answeredCallId: callId });
             return;
@@ -258,8 +307,31 @@ class HubClient {
           if (entry?.call.id === callId) {
             this.manager.declineCall(entry.sourceId, callId);
             this.set({ activeCall: undefined });
+            return;
           }
-        });
+
+          // A decline that arrived while the app was not running has nothing to
+          // match against: `wire()` runs before the sources are even loaded, and
+          // the notification carries no hub. Held, then offered to every
+          // connected hub - the one that owns the call acts on it, and the others
+          // ignore a call id they have never rung. Without this the tap was
+          // silently dropped, which is the case the queue exists for.
+          if (!this.pendingDeclines.has(callId)) {
+            this.pendingDeclines.set(callId, { told: new Set(), at: Date.now() });
+          }
+          this.flushDeclines();
+        };
+        // The native side queues every tap and sends the event only as a nudge,
+        // so the queue is the delivery path and this is the only place it is
+        // read: on the nudge, on subscribing, and on returning to the foreground
+        // below. A tap that arrives while nothing is subscribed - most of them,
+        // since tapping a notification is often what starts the app - waits in
+        // the queue rather than being sent to nobody.
+        const drain = () => {
+          for (const pending of consumePendingCallActions()) act(pending);
+        };
+        const sub = addCallActionListener(() => drain());
+        drain();
         return () => sub?.remove();
       })(),
 
@@ -303,6 +375,28 @@ class HubClient {
         return () => sub.remove();
       })(),
     ];
+  }
+
+  /** Offers held declines to hubs that are ready and have not been told yet. */
+  private flushDeclines(): void {
+    if (this.pendingDeclines.size === 0) return;
+    const known = this.state.sources.map((source) => source.id);
+
+    for (const [callId, held] of this.pendingDeclines) {
+      // Given up on eventually: by then the call has rung out on its own, and a
+      // decline nobody can place is not worth carrying for the life of the process.
+      if (Date.now() - held.at > DECLINE_HOLD_MS) {
+        this.pendingDeclines.delete(callId);
+        continue;
+      }
+
+      for (const id of this.manager.declineOnReady(callId, held.told)) held.told.add(id);
+      // Dropped only once every hub this phone knows about has heard it, since any
+      // one of them could be the hub that rang.
+      if (known.length > 0 && known.every((id) => held.told.has(id))) {
+        this.pendingDeclines.delete(callId);
+      }
+    }
   }
 
   /**
@@ -356,7 +450,16 @@ class HubClient {
   async savePrefs(patch: Partial<ClientPreferences>): Promise<void> {
     const next = normalizePreferences({ ...this.state.prefs, ...patch }, this.state.prefs.deviceName);
     this.set({ prefs: next });
-    await this.storage.set(PREFS_KEY, JSON.stringify(next));
+    try {
+      await this.storage.set(PREFS_KEY, JSON.stringify(next));
+    } catch (err) {
+      // The keystore can refuse - locked just after boot, or corrupt - and the
+      // callers are `onChange` handlers that pass this promise nowhere, so the
+      // rejection used to surface as an unhandled one while the switch sat there
+      // looking saved. The setting still applies to this process; what is lost is
+      // its persistence, and that is worth saying rather than swallowing.
+      this.set({ prefsUnsaved: err instanceof Error ? err.message : String(err) });
+    }
   }
 
   clearFeed(): void {
@@ -399,6 +502,11 @@ class HubClient {
     this.starting = undefined;
     this.wired = false;
   }
+}
+
+/** A frame with a severity this app can rely on. */
+function severe<T extends { severity: string }>(frame: T, fallback: 'info' | 'critical'): T {
+  return { ...frame, severity: coerceSeverity(frame.severity, fallback) };
 }
 
 /**

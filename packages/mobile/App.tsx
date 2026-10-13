@@ -41,13 +41,36 @@ function hostOf(url: string): string {
 
 export default function App() {
   const t = useTheme();
-  const { manager, sources, feed, activeCall, callAnswered, prefs, loaded, savePrefs, closeCall, markAnswered } =
+  const {
+    manager,
+    sources,
+    feed,
+    activeCall,
+    callAnswered,
+    prefs,
+    prefsUnsaved,
+    loaded,
+    savePrefs,
+    closeCall,
+    markAnswered,
+  } =
     useSources();
 
   const [view, setView] = useState<View_>('feed');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | undefined>();
-  const [snoozedUntil, setSnoozedUntil] = useState(0);
+  /**
+   * Taken from the hub rather than kept here.
+   *
+   * It was a `useState` that only this screen knew about, and the hub is where a
+   * snooze actually lives - stored on the device record, enforced on delivery. So
+   * after Android reclaimed the process, which is the case this whole app is
+   * built around, the header said "Snooze" while the hub was still holding
+   * everything below critical back; tapping it then started a *second* thirty
+   * minutes instead of cancelling, and there was no way to cancel at all.
+   */
+  const snoozedUntil = sources.reduce((max, s) => Math.max(max, s.snoozedUntil ?? 0), 0);
+  const [, snoozeTick] = useState(0);
   const [pendingUrl, setPendingUrl] = useState<string | undefined>();
 
   /**
@@ -131,6 +154,15 @@ export default function App() {
       ],
     );
   }, [paired, batteryPrompt]);
+
+  // The label is derived from a deadline, so something has to redraw it when that
+  // deadline passes - otherwise it reads "Snoozed" until an unrelated update
+  // happens to arrive.
+  useEffect(() => {
+    if (snoozedUntil <= Date.now()) return;
+    const timer = setTimeout(() => snoozeTick((n) => n + 1), snoozedUntil - Date.now() + 250);
+    return () => clearTimeout(timer);
+  }, [snoozedUntil, snoozeTick]);
 
   /** Adds a source, surfacing failures instead of leaving a dead screen. */
   const addSource = useCallback(
@@ -274,6 +306,7 @@ export default function App() {
         <StatusBar style={t.isDark ? 'light' : 'dark'} />
         <SettingsScreen
           prefs={prefs}
+          prefsUnsaved={prefsUnsaved}
           sources={sources}
           onChange={savePrefs}
           onAddSource={() => {
@@ -297,13 +330,8 @@ export default function App() {
         snoozedUntil={snoozedUntil}
         onRefresh={() => manager.syncAll()}
         onSnooze={() => {
-          if (snoozedUntil > Date.now()) {
-            manager.unsnoozeAll();
-            setSnoozedUntil(0);
-          } else {
-            manager.snoozeAll(30 * 60_000);
-            setSnoozedUntil(Date.now() + 30 * 60_000);
-          }
+          if (snoozedUntil > Date.now()) manager.unsnoozeAll();
+          else manager.snoozeAll(30 * 60_000);
         }}
         onOpenSettings={() => setView('settings')}
       />

@@ -89,8 +89,23 @@ export function canDeliver(c: DeliveryCheck): boolean {
   if (severityRank(c.severity) < severityRank(c.role.minSeverity)) return false;
   if (!channelMatches(c.role.channels, c.channel)) return false;
 
-  if (c.to?.devices?.length && !c.to.devices.includes(c.deviceId)) return false;
-  if (c.to?.roles?.length && !c.to.roles.includes(c.role.name)) return false;
+  // `to` is copied from a frame and can hold anything at all. The same rule
+  // `channelMatches` follows above applies here: a restriction that cannot be
+  // read must not throw inside the delivery loop - and it reads as matching
+  // nothing rather than as no restriction, because somebody asked for this alert
+  // to be narrowed and widening it to every device is the wrong way to fail.
+  //
+  // Reaching this with a malformed `to` at all means something got past the
+  // hub's own boundary check; the guard is here because `replay()` runs it
+  // against whatever the store already holds.
+  if (c.to?.devices !== undefined) {
+    if (!Array.isArray(c.to.devices)) return false;
+    if (c.to.devices.length > 0 && !c.to.devices.includes(c.deviceId)) return false;
+  }
+  if (c.to?.roles !== undefined) {
+    if (!Array.isArray(c.to.roles)) return false;
+    if (c.to.roles.length > 0 && !c.to.roles.includes(c.role.name)) return false;
+  }
 
   // A critical call is exactly the thing quiet hours should not silence.
   if (c.isCall && c.role.quietHours && c.severity !== 'critical') {

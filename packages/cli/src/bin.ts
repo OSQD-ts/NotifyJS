@@ -1,25 +1,29 @@
 #!/usr/bin/env node
 import { parseArgs } from 'node:util';
-import { networkInterfaces } from 'node:os';
+import { createRequire } from 'node:module';
+import { hostname, networkInterfaces } from 'node:os';
 import { createInterface } from 'node:readline/promises';
 import WebSocket from 'ws';
 
 import {
   Notifier,
+  OptionError,
   backupSecrets,
+  hubHolding,
   exportStore,
+  formatDuration,
   importStore,
   isBackup,
   type Severity,
 } from '@osqd/notifyjs';
-import { NotifyClient, isPairingCodeValid } from '@osqd/notifyjs-protocol';
+import { NotifyClient, SEVERITIES, isPairingCodeValid, isSeverity } from '@osqd/notifyjs-protocol';
 import { nodeCrypto } from '@osqd/notifyjs-protocol/node';
 
-import { readFileSync, writeFileSync } from 'node:fs';
+import { chmodSync, readFileSync, writeFileSync } from 'node:fs';
 import { fileStorage, defaultPath } from './storage.js';
 import { generateSelfSigned } from './cert.js';
 import { apply as applyUpdate, check as checkUpdate } from './selfupdate.js';
-import { desktopNotify, printNotification, speakCall } from './desktop.js';
+import { desktopNotify, printNotification, safeText, speakCall } from './desktop.js';
 
 const HELP = `notifyjs - self-hosted notifications for your own devices
 
@@ -41,7 +45,7 @@ Usage
   notifyjs update [options]       Check for and install a newer build
 
 Common options
-  --url <ws://host:7741>   Hub to connect to (default ws://localhost:7741)
+  --url <ws://host:7741>   Hub to connect to (default $NOTIFYJS_URL, else ws://localhost:7741)
   --store <path>           Credential file (default ${defaultPath()})
   --name <name>            Name to register this device under
 
@@ -52,6 +56,7 @@ serve options
   --data <dir>             Hub state directory (default .notifyjs)
   --no-dashboard           Do not serve the web dashboard
   --dashboard-dir <dir>    Serve dashboard assets from this directory
+                           (or $NOTIFYJS_DASHBOARD_DIR)
   --public-url <url>       Address devices should use (default: your LAN IP)
   --tls-cert <file>        Certificate for wss:// (see: notifyjs cert)
   --tls-key <file>         Private key for wss://
@@ -74,22 +79,26 @@ code options
   --ttl <seconds>          Lifetime of the code (default 600)
   --no-qr                  Do not print a QR code
 
-send / call options
+send options
   --severity <level>       debug|info|success|warning|error|critical
   --channel <name>         Channel to publish on (default default)
   --body <text>            Longer body text
 
+call options
+  --severity <level>       debug|info|success|warning|error|critical
+  --channel <name>         Channel to publish on (default default)
+
 token options
   --role <name>            Role a created token publishes with (default viewer)
   --label <text>           What it is for, so two tokens can be told apart
-  --id <id>                Which token to revoke
+  --id <id>                Which token to revoke (or give the id as an argument)
 
 export / import options
   --data <dir>             Hub state directory (default .notifyjs)
   --out <file>             Write the backup here rather than to stdout
   --from <file>            Backup to restore
   --history                Include the alert and audit logs
-  --force                  Replace an existing store when restoring
+  --force                  Replace an existing store, history or audit log
 
 update options
   --check                  Report what is available without installing
@@ -186,7 +195,7 @@ async function serve(argv: string[]): Promise<void> {
   const certFile = values['tls-cert'];
   const keyFile = values['tls-key'];
   if (Boolean(certFile) !== Boolean(keyFile)) {
-    throw new Error('--tls-cert and --tls-key must be given together');
+    throw new UsageError('--tls-cert and --tls-key must be given together');
   }
 
   const hub = new Notifier({
@@ -224,11 +233,20 @@ async function serve(argv: string[]): Promise<void> {
     // Scanning beats typing a twelve-character code and a LAN address into a
     // phone, so lead with the QR and keep the code as the fallback.
     if (values.qr) process.stdout.write(`\n${issued.qr.terminal}\n`);
+    // Both of these used to be printed whatever the hub was actually doing, so
+    // `--no-qr` said "scan the code above" with no code above it, and a hub whose
+    // dashboard assets are not installed - which it says on the line before - told
+    // the operator to open that dashboard in a browser. Following either one gets
+    // nothing, which is a poor first five minutes.
     process.stdout.write(
-      `\n  Scan the code above with the NotifyJS app, or pair manually:\n\n` +
+      (values.qr
+        ? `\n  Scan the code above with the NotifyJS app, or pair manually:\n\n`
+        : `\n  Pair a device with:\n\n`) +
         `      code: ${issued.code}    role: ${issued.role}\n` +
         `      hub:  ${hub.publicUrl}\n\n` +
-        `  In a browser, open ${hub.dashboardUrl} and enter the code.\n` +
+        (hub.servesDashboard
+          ? `  In a browser, open ${hub.dashboardUrl} and enter the code.\n`
+          : '') +
         `  Valid for 15 minutes, one use.\n\n`,
     );
   }
@@ -288,16 +306,46 @@ function onShutdown(close: () => void | Promise<void>): void {
 function port(value: string): number {
   const n = Number(value);
   if (!Number.isInteger(n) || n < 0 || n > 65535) {
-    throw new Error(`--port must be a number between 0 and 65535, not "${value}"`);
+    throw new UsageError(`--port must be a number between 0 and 65535, not "${value}"`);
   }
   return n;
+}
+
+/**
+ * Something wrong with what was typed, as opposed to something that went wrong.
+ *
+ * Kept apart because the exit code is what a script reads: 1 means a check
+ * failed or the work did not succeed, 2 means the invocation itself was no good.
+ * A wrapper retrying on 1 and giving up on 2 cannot tell the difference
+ * otherwise, and everything here used to exit 1.
+ */
+class UsageError extends Error {}
+
+/**
+ * A severity, or a clear complaint. Same reasoning as `port`.
+ *
+ * The hub coerces an unrecognised severity to a default and says nothing, which
+ * is right for a frame from the wire and wrong for a flag somebody typed:
+ * `--severity crittical` sent the alert at `info`, below the floor every
+ * on-call role filters on, and exited 0 as though it had paged somebody.
+ */
+function severity(value: string | undefined, fallback: Severity): Severity {
+  if (value === undefined) return fallback;
+  // Case and surrounding space forgiven, exactly as the hub forgives them: `--severity
+  // CRITICAL` is the same word, and refusing it here while the hub accepts it left the
+  // two disagreeing about the same input.
+  const tidied = value.trim().toLowerCase();
+  if (!isSeverity(tidied)) {
+    throw new UsageError(`--severity must be one of ${SEVERITIES.join(', ')}, not "${value}"`);
+  }
+  return tidied;
 }
 
 /** A positive whole number, or a clear complaint. Same reasoning as `port`. */
 function count(value: string, flag: string): number {
   const n = Number(value);
   if (!Number.isFinite(n) || n <= 0) {
-    throw new Error(`${flag} must be a positive number, not "${value}"`);
+    throw new UsageError(`${flag} must be a positive number, not "${value}"`);
   }
   return Math.floor(n);
 }
@@ -332,7 +380,11 @@ function common(argv: string[], extra: Record<string, { type: 'string' | 'boolea
     options: {
       url: String(v.url ?? process.env.NOTIFYJS_URL ?? 'ws://localhost:7741'),
       store: String(v.store ?? defaultPath()),
-      name: String(v.name ?? `cli@${process.env.HOSTNAME ?? 'localhost'}`),
+      // `hostname()`, not `process.env.HOSTNAME`: that is a shell variable and
+      // is not exported, so every machine paired itself as `cli@localhost` and
+      // `notifyjs devices` listed a column of identical names - with no way to
+      // tell which entry belonged to the server you wanted to revoke.
+      name: String(v.name ?? `cli@${process.env.HOSTNAME || hostname()}`),
     } satisfies CommonOptions,
   };
 }
@@ -384,15 +436,28 @@ function ready(client: NotifyClient, timeoutMs = 15_000): Promise<void> {
       reject(new Error(err.message));
     });
     client.on('status', (status) => {
-      if (status !== 'unpaired') return;
-      clearTimeout(timer);
-      reject(new Error('this machine is not paired yet - run: notifyjs pair <code>'));
+      if (status === 'unpaired') {
+        clearTimeout(timer);
+        reject(new Error('this machine is not paired yet - run: notifyjs pair <code>'));
+        return;
+      }
+      // `idle` means the socket closed and nothing is going to retry: these clients
+      // are built with `autoReconnect: false`, because a command either does its work
+      // now or reports why not. Waiting out the full timeout for an answer that had
+      // already arrived made every command against a hub that is not running take
+      // fifteen seconds to say so.
+      if (status === 'idle') {
+        clearTimeout(timer);
+        reject(new Error('could not reach the hub - is it running, and is --url right?'));
+      }
     });
   });
 }
 
 async function pair(argv: string[]): Promise<void> {
-  const { positionals, options } = common(argv, { role: { type: 'string' } });
+  // No `--role` here: it was accepted and never read - the role belongs to the code,
+  // which is minted by whoever has the authority to choose it.
+  const { positionals, options } = common(argv);
   let code = positionals[0];
 
   if (!code) {
@@ -429,7 +494,7 @@ async function listen(argv: string[]): Promise<void> {
   // Auto-answering is the right default for an unattended machine: the point
   // of a desktop listener is that somebody hears the message.
   client.on('call', async (call) => {
-    process.stdout.write(`\nincoming call: ${call.message}\n`);
+    process.stdout.write(`\nincoming call: ${safeText(call.message, true)}\n`);
     client.answerCall(call.id);
     await speakCall(call);
     client.endCall(call.id);
@@ -442,8 +507,10 @@ async function listen(argv: string[]): Promise<void> {
    */
   client.on('service:missing', ({ spec, silentForMs }) => {
     const seconds = Math.round(silentForMs / 1000);
-    process.stderr.write(`\n!! ${spec.alert.title} (silent for ${seconds}s)\n`);
-    if (spec.alert.body) process.stderr.write(`   ${spec.alert.body}\n`);
+    // Everything a hub sends is filtered before it reaches this terminal, the
+    // same rule the notification printer already follows.
+    process.stderr.write(`\n!! ${safeText(spec.alert.title)} (silent for ${seconds}s)\n`);
+    if (spec.alert.body) process.stderr.write(`   ${safeText(spec.alert.body)}\n`);
     void desktopNotify({
       id: 'service-down',
       seq: 0,
@@ -460,7 +527,7 @@ async function listen(argv: string[]): Promise<void> {
   });
 
   client.on('service:bye', ({ reason }) => {
-    process.stderr.write(`   hub is going away on purpose: ${reason}\n`);
+    process.stderr.write(`   hub is going away on purpose: ${safeText(reason)}\n`);
   });
 
   client.on('status', (status) => process.stderr.write(`[${status}]\n`));
@@ -486,7 +553,10 @@ async function send(argv: string[]): Promise<void> {
     body: { type: 'string' },
   });
   const title = positionals.join(' ');
-  if (!title) throw new Error('usage: notifyjs send <title> [--body text] [--severity level]');
+  if (!title) throw new UsageError('usage: notifyjs send <title> [--body text] [--severity level]');
+  // Before the socket, not after: a flag nobody can act on should fail without
+  // a round trip, and a hub that happens to be down must not mask a typo.
+  const level = severity(values.severity as string | undefined, 'info');
 
   const client = makeClient(options);
   const done = ready(client);
@@ -497,7 +567,7 @@ async function send(argv: string[]): Promise<void> {
     title,
     body: values.body as string | undefined,
     channel: (values.channel as string) ?? 'default',
-    severity: ((values.severity as string) ?? 'info') as Severity,
+    severity: level,
   });
   process.stdout.write('sent\n');
   client.disconnect();
@@ -509,7 +579,8 @@ async function placeCall(argv: string[]): Promise<void> {
     channel: { type: 'string' },
   });
   const message = positionals.join(' ');
-  if (!message) throw new Error('usage: notifyjs call <message to speak>');
+  if (!message) throw new UsageError('usage: notifyjs call <message to speak>');
+  const level = severity(values.severity as string | undefined, 'critical');
 
   const client = makeClient(options);
   const done = ready(client);
@@ -519,7 +590,7 @@ async function placeCall(argv: string[]): Promise<void> {
   await client.admin('call.place', {
     message,
     channel: (values.channel as string) ?? 'default',
-    severity: ((values.severity as string) ?? 'critical') as Severity,
+    severity: level,
   });
   process.stdout.write('call placed\n');
   client.disconnect();
@@ -539,18 +610,13 @@ async function devices(argv: string[]): Promise<void> {
     const marker = online.has(device.id) ? 'online ' : 'offline';
     const seen = device.lastSeenAt ? new Date(device.lastSeenAt).toLocaleString() : 'never';
     process.stdout.write(
-      `${marker}  ${device.name.padEnd(24)} ${device.role.padEnd(10)} ${device.status.padEnd(8)} ${seen}\n`,
+      `${marker}  ${safeText(device.name).padEnd(24)} ${safeText(device.role).padEnd(10)} ` +
+        `${safeText(device.status).padEnd(8)} ${seen}\n`,
     );
   }
   client.disconnect();
 }
 
-/**
- * Mints, lists and revokes the bearer tokens that let something publish over
- * HTTP. Over the protocol rather than by editing the store, because a running
- * hub holds the store in memory and would write straight over a second
- * process's changes.
- */
 /**
  * Copies a hub's identity out of, and back into, a directory.
  *
@@ -572,7 +638,20 @@ async function backup(argv: string[]): Promise<void> {
   // with no arguments finds it.
   const dir = (values.data as string) ?? '.notifyjs';
 
+  // Both of these read and write the store's files behind a hub's back, which is
+  // why both tell you to stop it first - a running hub holds the document in memory
+  // and writes it on a timer, so an export can miss whatever was never flushed and
+  // an import is quietly overwritten by the next flush. Neither could tell whether
+  // one was running; the claim a hub leaves in its directory answers it.
+  const running = hubHolding(dir);
+
   if (sub === 'export') {
+    if (running !== undefined) {
+      process.stderr.write(
+        `warning: a hub is running here (pid ${running}) - it holds state in memory that\n` +
+          `         this export cannot see. Stop it first for a complete backup.\n\n`,
+      );
+    }
     const doc = exportStore(dir, { history: values.history as boolean });
     const json = JSON.stringify(doc, null, 2);
     const out = values.out as string | undefined;
@@ -580,7 +659,18 @@ async function backup(argv: string[]): Promise<void> {
       process.stdout.write(json + '\n');
     } else {
       // 0600, and said out loud: this file is enough to impersonate the hub.
+      //
+      // `mode` is only honoured when the write creates the file, so an export
+      // over a path that already existed - `touch backup.json` first, a file
+      // from a previous run, anything checked out of a repository - kept
+      // whatever permissions it had, usually 0644. The chmod is what actually
+      // holds the guarantee this comment makes.
       writeFileSync(out, json + '\n', { mode: 0o600 });
+      try {
+        chmodSync(out, 0o600);
+      } catch {
+        /* a filesystem without POSIX modes, or a file we do not own */
+      }
       process.stderr.write(
         `wrote ${out}\n\nThis file contains:\n` +
           backupSecrets(doc).map((s) => `  - ${s}\n`).join('') +
@@ -593,9 +683,20 @@ async function backup(argv: string[]): Promise<void> {
   if (sub !== 'import') throw new Error(`unknown backup command: ${sub}`);
 
   const from = values.from as string | undefined;
-  if (!from) throw new Error('which file? pass --from <file>');
+  if (!from) throw new UsageError('which file? pass --from <file>');
   const doc = JSON.parse(readFileSync(from, 'utf8')) as unknown;
   if (!isBackup(doc)) throw new Error(`${from} is not a NotifyJS backup`);
+
+  // Refused rather than warned about, because this one does not merely read an
+  // incomplete picture - the running hub writes its whole in-memory document on the
+  // next tick, straight over everything restored here, and the restore is gone with
+  // no sign that it ever happened.
+  if (running !== undefined && !values.force) {
+    throw new UsageError(
+      `a hub is running here (pid ${running}) and would write over this restore.\n` +
+        `Stop it first, or pass --force if that pid is stale.`,
+    );
+  }
 
   const { restoredHistory, restoredAudit } = importStore(dir, doc, {
     force: values.force as boolean,
@@ -610,6 +711,12 @@ async function backup(argv: string[]): Promise<void> {
   );
 }
 
+/**
+ * Mints, lists and revokes the bearer tokens that let something publish over
+ * HTTP. Over the protocol rather than by editing the store, because a running
+ * hub holds the store in memory and would write straight over a second
+ * process's changes.
+ */
 async function token(argv: string[]): Promise<void> {
   const sub = argv[0] && !argv[0].startsWith('-') ? argv.shift() : 'list';
   const { values, positionals, options } = common(argv, {
@@ -659,7 +766,8 @@ async function token(argv: string[]): Promise<void> {
       const state = t.revokedAt ? 'revoked' : 'live   ';
       const used = t.lastUsedAt ? new Date(t.lastUsedAt).toLocaleString() : 'never';
       process.stdout.write(
-        `${state}  ${t.id.padEnd(18)} ${t.role.padEnd(10)} ${(t.label ?? '-').padEnd(20)} used: ${used}\n`,
+        `${state}  ${t.id.padEnd(18)} ${t.role.padEnd(10)} ` +
+          `${safeText(t.label ?? '-').padEnd(20)} used: ${used}\n`,
       );
     }
   } finally {
@@ -716,8 +824,10 @@ async function watch(argv: string[]): Promise<void> {
     description: { type: 'string' },
   });
   const name = positionals[0];
-  if (!name) throw new Error('usage: notifyjs watch <name> --every 24h [--grace 1h]');
-  if (!values.every) throw new Error('--every is required, e.g. --every 24h');
+  if (!name) throw new UsageError('usage: notifyjs watch <name> --every 24h [--grace 1h]');
+  if (!values.every) throw new UsageError('--every is required, e.g. --every 24h');
+  const level =
+    values.severity === undefined ? undefined : severity(values.severity as string, 'critical');
 
   const client = makeClient(options);
   const done = ready(client);
@@ -728,22 +838,28 @@ async function watch(argv: string[]): Promise<void> {
     name,
     every: values.every as string,
     grace: values.grace as string | undefined,
-    severity: values.severity as string | undefined,
+    severity: level,
     description: values.description as string | undefined,
   });
+  // What the hub armed, not what was asked for. The two can differ - a hub whose
+  // sweep is slower than the interval asked for widens it - and printing the
+  // request while the hub held something else is how somebody ends up waiting
+  // for a page that was never going to come when they expected it.
+  const armed = (result as { heartbeat?: { every: number; grace: number } }).heartbeat;
+  const every = armed ? formatDuration(armed.every) : String(values.every);
+  const grace = armed?.grace ? formatDuration(armed.grace) : values.grace;
   process.stdout.write(
-    `watching "${name}": a check-in is expected every ${values.every}` +
-      (values.grace ? ` (plus ${values.grace} grace)` : '') +
+    `watching "${name}": a check-in is expected every ${every}` +
+      (grace ? ` (plus ${grace} grace)` : '') +
       `\n\nRecord one with:\n\n    notifyjs checkin ${name}\n`,
   );
-  void result;
   client.disconnect();
 }
 
 async function checkin(argv: string[]): Promise<void> {
   const { positionals, options } = common(argv);
   const name = positionals[0];
-  if (!name) throw new Error('usage: notifyjs checkin <name>');
+  if (!name) throw new UsageError('usage: notifyjs checkin <name>');
 
   const client = makeClient(options);
   const done = ready(client);
@@ -769,18 +885,46 @@ async function watches(argv: string[]): Promise<void> {
 
   if (out.heartbeats.length === 0) process.stdout.write('nothing is being watched\n');
   for (const beat of out.heartbeats) {
-    const ago = Math.round((Date.now() - beat.lastSeenAt) / 1000);
+    // Through `formatDuration`, like every other duration this CLI prints. `watch`
+    // confirms "a check-in is expected every 1d" and this listed the same value as
+    // "every 86400s" one command later, which reads like a different setting.
     process.stdout.write(
-      `${beat.missing ? 'MISSING' : 'ok     '}  ${beat.name.padEnd(24)} every ${Math.round(
-        beat.every / 1000,
-      )}s  last seen ${ago}s ago\n`,
+      `${beat.missing ? 'MISSING' : 'ok     '}  ${beat.name.padEnd(24)} every ${formatDuration(
+        beat.every,
+      )}  last seen ${formatDuration(Math.max(0, Date.now() - beat.lastSeenAt))} ago\n`,
     );
   }
   client.disconnect();
 }
 
-/** Version stamped in at bundle time; falls back for source checkouts. */
-const VERSION = process.env.NOTIFYJS_VERSION ?? '0.1.0';
+/**
+ * The version this build reports, and how it knows.
+ *
+ * `process.env.NOTIFYJS_VERSION` is stamped in at bundle time, which covers the
+ * released binaries and the container. Everything installed from npm has no such
+ * stamp, and the literal that used to stand in its place meant an
+ * `npm i -g @osqd/notifyjs-cli` hub reported `0.1.0` for ever: `serve` asked the
+ * release feed whether anything newer existed, was told yes on every start for
+ * the rest of the project's life, and the dashboard's own upgrade nudge compared
+ * a constant and could never fire. Read from the manifest beside the code
+ * instead, which is the version that was actually published.
+ */
+function ownVersion(fallback: string): string {
+  const stamped = process.env.NOTIFYJS_VERSION;
+  if (stamped) return stamped;
+  try {
+    // `dist/` sits one level under the package root. `createRequire` rather than
+    // a JSON import, which needs an attribute older runtimes reject outright.
+    const version = createRequire(import.meta.url)('../package.json').version as unknown;
+    return typeof version === 'string' && version ? version : fallback;
+  } catch {
+    // A checkout run straight from source, or a layout nobody expected: saying
+    // the wrong version is better than refusing to start over it.
+    return fallback;
+  }
+}
+
+const VERSION = ownVersion('0.1.0');
 const BUILT_AT = Number(process.env.NOTIFYJS_BUILT_AT ?? 0) || undefined;
 const DEFAULT_REPO = 'OSQD-ts/NotifyJS';
 
@@ -826,7 +970,27 @@ async function update(argv: string[]): Promise<void> {
   );
 }
 
+/**
+ * `parseArgs` raises these for a flag nobody defined or a value it cannot use,
+ * which is the same class of problem as the checks above and deserves the same
+ * exit code rather than the one that means "the work failed".
+ */
+const PARSE_ARGS_CODES = new Set([
+  'ERR_PARSE_ARGS_UNKNOWN_OPTION',
+  'ERR_PARSE_ARGS_INVALID_OPTION_VALUE',
+  'ERR_PARSE_ARGS_UNEXPECTED_POSITIONAL',
+]);
+
 main().catch((err: unknown) => {
   process.stderr.write(`${err instanceof Error ? err.message : String(err)}\n`);
-  process.exit(1);
+  const code = (err as { code?: unknown } | undefined)?.code;
+  // An option the hub refused is the same class of problem as a flag this file
+  // refused - `--web-push-subject ops@example.com` is a typo, not a hub that
+  // failed - and a script wrapping `serve` reads the code to decide whether
+  // retrying could ever help.
+  const misuse =
+    err instanceof UsageError ||
+    err instanceof OptionError ||
+    (typeof code === 'string' && PARSE_ARGS_CODES.has(code));
+  process.exit(misuse ? 2 : 1);
 });

@@ -1,6 +1,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { rmSync, mkdtempSync, chmodSync, readFileSync, existsSync } from 'node:fs';
+import {
+  rmSync,
+  mkdtempSync,
+  chmodSync,
+  readFileSync,
+  writeFileSync,
+  existsSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -19,6 +26,155 @@ const device = (id) => ({
   ackedSeq: 0,
   lastSeenAt: Date.now(),
   createdAt: Date.now(),
+});
+
+test('a second hub on one store directory is noticed', () => {
+  // `docker compose up --scale`, a systemd unit restarted before the old process
+  // exited, a second `notifyjs serve` in another terminal. Both hubs write the whole
+  // document on a timer, so the later write wins and whatever the other had done is
+  // gone - and every device paired against one stops authenticating the moment the
+  // other's `serverId` lands, because that value is part of every auth signature.
+  // Silent and destructive, and only the operator knows which was meant to run.
+  const dir = mkdtempSync(join(tmpdir(), 'notifyjs-shared-'));
+  try {
+    const first = new Store(dir, limits, serverId);
+    assert.equal(first.sharedWith, undefined, 'the first one is alone');
+
+    const second = new Store(dir, limits, serverId);
+    assert.equal(second.sharedWith, process.pid, 'and the second one says whose it was');
+
+    // Handing the directory over cleanly is not a collision: the claim is dropped on
+    // close, so an ordinary restart - which is how every deploy looks - is silent.
+    second.close();
+    first.close();
+    const afterwards = new Store(dir, limits, serverId);
+    assert.equal(afterwards.sharedWith, undefined, 'a restart is not a collision');
+
+    // Nor is a hub that was killed outright, which leaves its claim behind naming a
+    // pid that no longer exists. A warning nobody can act on is worse than none.
+    const claim = join(dir, 'owner.json');
+    writeFileSync(claim, JSON.stringify({ pid: 0x7ffffffe, claim: 'someone-else' }));
+    const next = new Store(dir, limits, serverId);
+    assert.equal(next.sharedWith, undefined, 'a dead claim is not a live hub');
+
+    // `reopen()` claims the directory again, because `close()` gave it back - and it
+    // must not throw away what opening found. By the time a hub reaches its first
+    // `start()` the claim on disk is its own, so re-reading it says nothing either
+    // way, and a plain assignment there erased the only detection there was.
+    const late = new Store(dir, limits, serverId);
+    assert.equal(late.sharedWith, process.pid, 'the collision is seen at open');
+    late.reopen();
+    assert.equal(late.sharedWith, process.pid, 'and is still known after a reopen');
+    late.close();
+    next.close();
+
+    // A collision that begins while a hub is stopped is picked up when it returns.
+    const held = new Store(dir, limits, serverId);
+    held.close();
+    assert.equal(held.sharedWith, undefined, 'nothing was wrong when it opened');
+    const arrived = new Store(dir, limits, serverId);
+    held.reopen();
+    assert.equal(held.sharedWith, process.pid, 'the newcomer is noticed on restart');
+    arrived.close();
+    held.close();
+    afterwards.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a store that cannot be written says so, once, and says when it recovers', () => {
+  // Every write in here refuses to take the process down over a failure, which is
+  // right for a pager - and it left nobody to tell. A hub on a full or read-only
+  // filesystem went on pairing devices and delivering alerts while none of it was
+  // being saved, reporting itself perfectly healthy, and a restart then rolled it
+  // back to whenever the disk broke.
+  const dir = mkdtempSync(join(tmpdir(), 'notifyjs-persist-'));
+  try {
+    const seen = [];
+    const store = new Store(dir, limits, serverId, (writable, trouble) =>
+      seen.push({ writable, file: trouble?.file, message: trouble?.error?.message }),
+    );
+    store.putDevice(device('first'));
+    store.flush();
+    assert.deepEqual(seen, [], 'nothing to report while it is working');
+    assert.equal(store.persistence.writable, true);
+
+    chmodSync(dir, 0o500);
+    store.putDevice(device('second'));
+    store.flush();
+    assert.equal(store.persistence.writable, false, 'the gauge /metrics scrapes');
+    assert.equal(seen.length, 1, 'reported once');
+    assert.equal(seen[0].writable, false);
+    assert.ok(seen[0].message, 'with the reason the filesystem gave');
+    assert.ok(seen[0].file, 'and which file could not be written');
+
+    // A read-only mount fails on every drain. The operator is told once, not every
+    // few seconds, so only the edges are reported.
+    store.putDevice(device('third'));
+    store.flush();
+    store.flush();
+    assert.equal(seen.length, 1, 'still once');
+    assert.ok(store.persistence.failures >= 2, 'while the counter keeps counting');
+
+    // And the recovery is announced, because a hub that has caught up is news too.
+    chmodSync(dir, 0o700);
+    store.flush();
+    assert.equal(store.persistence.writable, true);
+    assert.equal(seen.length, 2);
+    assert.equal(seen[1].writable, true);
+
+    // Everything held back while the disk was gone is on disk now.
+    const written = readFileSync(join(dir, 'store.json'), 'utf8');
+    for (const id of ['first', 'second', 'third']) {
+      assert.ok(written.includes(id), `${id} was written once the disk came back`);
+    }
+    store.close();
+  } finally {
+    chmodSync(dir, 0o700);
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('one unwritable file does not make the report alternate', () => {
+  // The document and the two logs are written separately and fail separately, so a
+  // single flag for "the store" was wrong in both directions: a history log left
+  // unwritable by a permission change - while the directory and `store.json` were
+  // fine - had the flag going failing, recovered, failing, recovered on every
+  // drain. Two log lines a second at the moment an operator is reading them, and a
+  // gauge that read healthy at rest while a log was still being dropped.
+  const dir = mkdtempSync(join(tmpdir(), 'notifyjs-onefile-'));
+  const log = join(dir, 'history.jsonl');
+  try {
+    const seen = [];
+    const store = new Store(dir, limits, serverId, (writable) => seen.push(writable));
+    store.pushHistory({ seq: 1, ts: Date.now(), title: 'seed', severity: 'error' });
+    store.putDevice(device('first'));
+    store.flush();
+    assert.deepEqual(seen, [], 'a healthy store reports nothing');
+
+    chmodSync(log, 0o400);
+    for (let i = 2; i < 6; i += 1) {
+      store.pushHistory({ seq: i, ts: Date.now(), title: `t${i}`, severity: 'error' });
+      store.putDevice(device(`later-${i}`));
+      store.flush();
+    }
+    assert.deepEqual(seen, [false], 'one report across four drains');
+    assert.equal(store.persistence.writable, false, 'and it does not read healthy at rest');
+
+    // The document beside it kept being written throughout, which is the whole
+    // reason the flag flapped.
+    assert.ok(readFileSync(join(dir, 'store.json'), 'utf8').includes('later-5'));
+
+    chmodSync(log, 0o600);
+    store.pushHistory({ seq: 6, ts: Date.now(), title: 'after', severity: 'error' });
+    store.flush();
+    assert.deepEqual(seen, [false, true], 'and the recovery is reported once');
+    store.close();
+  } finally {
+    chmodSync(log, 0o600);
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test('a write that fails does not take the process down, and is retried', () => {
@@ -84,6 +240,14 @@ test('closing does not arm a timer nothing will service', () => {
     // The final write fails; close() must still return, and must not schedule
     // a retry for a store that is going away.
     assert.doesNotThrow(() => store.close());
+    // Asserted, not assumed: the only check here used to be that `close()`
+    // returned, which stayed true with the guard removed - and the re-armed timer
+    // is unref'd, so nothing else could feel it either.
+    assert.equal(store.saveTimer, undefined, 'no timer is left armed');
+    assert.equal(store.closed, true, 'and the store knows it is closed');
+    // A write after closing must not arm one either.
+    store.putDevice(device('after'));
+    assert.equal(store.saveTimer, undefined, 'and a later write does not arm one');
   } finally {
     chmodSync(dir, 0o700);
     rmSync(dir, { recursive: true, force: true });

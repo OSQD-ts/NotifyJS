@@ -1,6 +1,14 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { rmSync, mkdtempSync, existsSync, statSync, readFileSync, writeFileSync } from 'node:fs';
+import {
+  chmodSync,
+  rmSync,
+  mkdtempSync,
+  existsSync,
+  statSync,
+  readFileSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -18,7 +26,34 @@ async function populated(prefix) {
   });
   await hub.start();
   hub.createIngestToken({ role: 'admin', label: 'ci' });
-  hub.createPairingCode({ role: 'oncall' });
+
+  // A device that actually paired, not just a code that was minted. Without one
+  // the device counts compared either side of a restore were 0 on both sides, so
+  // "devices do not need re-pairing" - the whole point of carrying them - was never
+  // exercised.
+  const { NotifyClient, memoryStorage } = await import('@osqd/notifyjs-protocol');
+  const { nodeCrypto } = await import('@osqd/notifyjs-protocol/node');
+  const WebSocket = (await import('ws')).default;
+  const client = new NotifyClient({
+    url: hub.url.replace('localhost', '127.0.0.1'),
+    crypto: nodeCrypto,
+    storage: memoryStorage(),
+    createSocket: (url) => new WebSocket(url),
+    deviceName: 'backed-up-phone',
+    platform: 'node-test',
+  });
+  const paired = new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('never paired')), 5000);
+    timer.unref?.();
+    client.on('ready', () => {
+      clearTimeout(timer);
+      resolve();
+    });
+  });
+  await client.pair(hub.createPairingCode({ role: 'oncall' }).code);
+  await paired;
+  client.disconnect();
+
   await hub.notify({ title: 'something happened', channel: 'db' });
   return { hub, dir };
 }
@@ -96,6 +131,14 @@ test('the restored files are not world-readable', async () => {
   const mode = statSync(join(fresh, 'store.json')).mode & 0o777;
   assert.equal(mode, 0o600, 'the store is owner-only');
 
+  // The logs hold the incidents and the pairing trail, and the directory holds all
+  // three: only `store.json` was ever checked.
+  for (const name of ['history.jsonl', 'audit.jsonl']) {
+    if (!existsSync(join(fresh, name))) continue;
+    assert.equal(statSync(join(fresh, name)).mode & 0o777, 0o600, `${name} is owner-only`);
+  }
+  assert.equal(statSync(fresh).mode & 0o777, 0o700, 'and the directory is too');
+
   rmSync(dir, { recursive: true, force: true });
   rmSync(fresh, { recursive: true, force: true });
 });
@@ -111,6 +154,37 @@ test('anything that is not a backup is refused, and so is a newer one', async ()
   assert.throws(() => importStore(dir, future), /version 99/);
 
   rmSync(dir, { recursive: true, force: true });
+});
+
+test('a log that cannot be read is not an empty log', async () => {
+  // Only a file that is not there is empty. Every read error was swallowed, so a
+  // history that existed and could not be read - a tarball restored under another
+  // account, a permission change, a failing disk - became a backup with no history
+  // in it, and `notifyjs export --history` reported success. An operator moving a
+  // hub to a new machine had no way of knowing.
+  const { hub, dir } = await populated('notifyjs-unreadable-');
+  // Stopped first, so the document and both logs are actually on disk.
+  await hub.stop();
+  try {
+    const full = exportStore(dir, { history: true });
+    assert.ok(full.history.length > 0, 'the healthy case still carries the log');
+
+    chmodSync(join(dir, 'history.jsonl'), 0o000);
+    assert.throws(
+      () => exportStore(dir, { history: true }),
+      /EACCES|EPERM/,
+      'rather than handing back a backup that is quietly missing it',
+    );
+    chmodSync(join(dir, 'history.jsonl'), 0o600);
+
+    // A hub that has never written a history has nothing to carry, which is not a
+    // failure - that is the case the swallow was there for.
+    rmSync(join(dir, 'history.jsonl'));
+    const fresh = exportStore(dir, { history: true });
+    assert.deepEqual(fresh.history, []);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test('exporting a directory with no store says so', () => {

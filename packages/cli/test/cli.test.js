@@ -1,7 +1,7 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { execFile } from 'node:child_process';
-import { rmSync, mkdtempSync } from 'node:fs';
+import { execFile, spawn } from 'node:child_process';
+import { chmodSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -26,7 +26,11 @@ let creds;
 
 /** Runs the CLI the way a user would, as a separate process. */
 function cli(args) {
-  return run(process.execPath, [BIN, ...args], { timeout: 20_000 });
+  // 30s, not 20: a command that cannot reach a hub gives up on its own after the
+  // client's 15-second handshake timeout, and the exit-code assertions depend on
+  // that happening rather than on this kill - which left about four seconds of
+  // margin on a loaded machine.
+  return run(process.execPath, [BIN, ...args], { timeout: 30_000 });
 }
 
 before(async () => {
@@ -51,8 +55,15 @@ after(async () => {
 
 test('help lists the commands', async () => {
   const { stdout } = await cli(['help']);
-  for (const command of ['serve', 'listen', 'pair', 'send', 'call', 'devices', 'code', 'cert']) {
-    assert.match(stdout, new RegExp(`notifyjs ${command}`), `${command} is documented`);
+  // Every command `main()` dispatches, so a command added or renamed without a
+  // line in the help text fails here. Eight of the seventeen were checked before,
+  // which let five be deleted from the help with the suite still green.
+  const commands = [
+    'serve', 'listen', 'pair', 'send', 'call', 'devices', 'code', 'cert',
+    'export', 'import', 'token', 'watch', 'checkin', 'watches', 'update',
+  ];
+  for (const command of commands) {
+    assert.match(stdout, new RegExp(`notifyjs ${command}\\b`), `${command} is documented`);
   }
 });
 
@@ -139,6 +150,114 @@ test('a device without permission cannot send', async () => {
   );
 });
 
+/** Starts `serve`, collects its first-run banner, and stops it. */
+async function serveBanner(args) {
+  const child = spawn(process.execPath, [BIN, 'serve', '--port', '0', ...args], {
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  let out = '';
+  try {
+    await new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error(`serve said nothing useful: ${out}`)), 20_000);
+      timer.unref?.();
+      child.stdout.setEncoding('utf8');
+      child.stdout.on('data', (chunk) => {
+        out += chunk;
+        if (out.includes('Valid for 15 minutes')) {
+          clearTimeout(timer);
+          resolve();
+        }
+      });
+      child.on('error', reject);
+      child.on('exit', () => {
+        clearTimeout(timer);
+        reject(new Error(`serve exited: ${out}`));
+      });
+    });
+  } finally {
+    child.kill('SIGKILL');
+  }
+  return out;
+}
+
+test('the first-run banner only offers what the hub is actually doing', async () => {
+  // Both lines used to be printed unconditionally. `--no-qr` said "scan the code
+  // above" with no code above it, and a hub whose dashboard is not being served -
+  // which it says on the line before - told the operator to open that dashboard in
+  // a browser. A new user following either one gets nothing at all.
+  const quiet = await serveBanner(['--no-qr', '--no-dashboard', '--data', join(dir, 'banner-quiet')]);
+  assert.doesNotMatch(quiet, /code above/, 'nothing to scan, so nothing is claimed');
+  assert.doesNotMatch(quiet, /In a browser/, 'and no dashboard to open');
+  assert.match(quiet, /Pair a device with:/);
+  assert.match(quiet, /code: [A-Z0-9-]+/, 'the code itself is still there');
+  assert.match(quiet, /hub: +ws:\/\//, 'and the address to type it into');
+
+  // With the QR printed, the instruction that refers to it comes back.
+  const withQr = await serveBanner(['--no-dashboard', '--data', join(dir, 'banner-qr')]);
+  assert.match(withQr, /Scan the code above/);
+  assert.doesNotMatch(withQr, /In a browser/, 'still no dashboard');
+});
+
+test('a watched job reads the same in both commands that describe it', async () => {
+  // `watch` confirmed "a check-in is expected every 1d" and `watches` listed the
+  // same job as "every 86400s" one command later, which reads like a different
+  // setting rather than the same one.
+  // Its own credentials, so this test does not depend on another having paired first.
+  const own = join(dir, 'watcher.json');
+  const { code } = hub.createPairingCode({ role: 'admin' });
+  await cli(['pair', code, '--url', HUB_URL, '--store', own, '--name', 'watcher']);
+
+  const armed = await cli(['watch', 'nightly-backup', '--every', '24h', '--grace', '1h',
+    '--url', HUB_URL, '--store', own]);
+  assert.match(armed.stdout, /every 1d/);
+  assert.match(armed.stdout, /1h grace/);
+
+  await cli(['checkin', 'nightly-backup', '--url', HUB_URL, '--store', own]);
+
+  const listed = await cli(['watches', '--url', HUB_URL, '--store', own]);
+  assert.match(listed.stdout, /nightly-backup/);
+  assert.match(listed.stdout, /every 1d/, 'the same duration, written the same way');
+  assert.doesNotMatch(listed.stdout, /86400/, 'and not as raw seconds');
+
+  hub.forget('nightly-backup');
+});
+
+test('backing up around a running hub is not done silently', async () => {
+  // Both commands read and write the store's files behind a hub's back, which is why
+  // both say to stop it first: a running hub holds the document in memory and writes
+  // it on a timer, so an export misses whatever was never flushed and an import is
+  // overwritten by the next flush - the restore simply vanishes, with nothing to say
+  // it ever happened. Neither could tell whether a hub was running.
+  const live = join(dir, 'live-hub');
+  const running = new Notifier({ port: 0, storeDir: live, dashboard: false, logger: false });
+  await running.start();
+  const out = join(dir, 'live-backup.json');
+  try {
+    // An export still runs - an incomplete backup beats none - but says so.
+    const exported = await cli(['export', '--data', live, '--out', out]);
+    assert.match(exported.stderr, /a hub is running here \(pid \d+\)/);
+    assert.match(exported.stderr, /Stop it first/);
+
+    // An import is refused, because that one does not merely read an incomplete
+    // picture: the running hub writes over everything restored, on the next tick.
+    let code = 0;
+    try {
+      await cli(['import', '--from', out, '--data', live]);
+    } catch (err) {
+      code = err.code;
+      assert.match(err.stderr, /would write over this restore/);
+    }
+    assert.equal(code, 2, 'and it is misuse, not a failure to do the work');
+  } finally {
+    await running.stop();
+  }
+
+  // With the hub stopped, the claim is gone and both are silent about it.
+  const after = await cli(['export', '--data', live, '--out', join(dir, 'after.json')]);
+  assert.doesNotMatch(after.stderr, /a hub is running/);
+});
+
 test('serve refuses half a TLS configuration', async () => {
   await assert.rejects(
     () => cli(['serve', '--tls-cert', '/tmp/nope.pem']),
@@ -147,4 +266,117 @@ test('serve refuses half a TLS configuration', async () => {
       return true;
     },
   );
+});
+
+test('an export over a file that already exists is still kept to 0600', async (t) => {
+  // `writeFileSync`'s `mode` is only honoured when the write creates the file.
+  // Exporting over a path that already existed - touched beforehand, left by an
+  // earlier run, checked out of a repository - kept whatever permissions it had,
+  // usually 0644, with the hub's signing key and every device secret in it.
+  if (process.platform === 'win32') {
+    t.skip('POSIX modes only');
+    return;
+  }
+
+  const out = join(dir, 'backup.json');
+  writeFileSync(out, 'from an earlier run\n');
+  chmodSync(out, 0o644);
+
+  await cli(['export', '--data', join(dir, 'hub'), '--out', out]);
+
+  assert.equal((statSync(out).mode & 0o777).toString(8), '600', 'nobody else can read it');
+});
+
+test('a misspelled severity is refused rather than quietly downgraded', async () => {
+  // The hub coerces an unrecognised severity to a default and says nothing,
+  // which is right for a frame off the wire and wrong for a flag somebody
+  // typed: `--severity crittical` went out at `info`, under the floor every
+  // on-call role filters on, and exited 0 as though somebody had been paged.
+  await assert.rejects(
+    () =>
+      cli([
+        'send', 'the database is down', '--severity', 'crittical',
+        '--url', HUB_URL, '--store', creds,
+      ]),
+    (err) => {
+      assert.match(err.stderr, /--severity must be one of/);
+      return true;
+    },
+  );
+
+  assert.ok(
+    !hub.history().some((n) => n.title === 'the database is down'),
+    'and nothing was sent at the wrong severity',
+  );
+});
+
+test('bad arguments exit 2, while a failure to do the work exits 1', async () => {
+  // The exit code is what a script reads: a wrapper that retries on 1 and gives
+  // up on 2 could not tell a typo from an outage, because everything exited 1.
+  const codeOf = async (args) => {
+    try {
+      await cli(args);
+      return 0;
+    } catch (err) {
+      return err.code;
+    }
+  };
+
+  assert.equal(await codeOf(['send']), 2, 'no title at all');
+  assert.equal(await codeOf(['send', 'x', '--severity', 'nope']), 2, 'a severity that is not one');
+  // But the same word in a different case is not a mistake, and the hub forgives it
+  // too - refusing it here while the hub accepted it left the two disagreeing.
+  assert.equal(
+    await codeOf(['send', 'shouted', '--severity', 'ERROR', '--url', HUB_URL, '--store', creds]),
+    0,
+    'CASE is the same severity',
+  );
+  assert.equal(await codeOf(['serve', '--port', 'http']), 2, 'a port that is not a number');
+  assert.equal(await codeOf(['send', 'x', '--nonsense']), 2, 'a flag nobody defined');
+  assert.equal(await codeOf(['import']), 2, 'a required flag left off');
+  // A flag this file passes straight through, refused by the hub rather than here.
+  // These exited 1, so the one class of mistake a wrapper can do nothing about
+  // looked like the outage it should retry.
+  assert.equal(
+    await codeOf(['serve', '--data', join(dir, 'exits'), '--web-push-subject', 'ops@example.com']),
+    2,
+    'a VAPID subject that is not a URI',
+  );
+  assert.equal(
+    await codeOf(['serve', '--data', join(dir, 'exits'), '--port', '70000']),
+    2,
+    'a port past the last one',
+  );
+
+  // Unchanged: an unknown command is a failing check, not a malformed one.
+  assert.equal(await codeOf(['wat']), 1);
+  // And so is work that could not be done - here, a hub that is not there.
+  assert.equal(
+    await codeOf(['devices', '--url', 'ws://127.0.0.1:1', '--store', join(dir, 'absent.json')]),
+    1,
+  );
+});
+
+test('a damaged credential file is kept, not silently replaced', async () => {
+  // `load()` returned `{}` for a file it could not parse, so the device looked
+  // unpaired against every hub - and the re-pair that naturally follows wrote a
+  // file holding only the new key, destroying the private seeds for all the
+  // others. A zero-byte file is reachable: neither store fsyncs before the
+  // rename, so a power loss can leave one.
+  for (const [name, contents] of [
+    ['damaged.json', '{ this is not json'],
+    ['nulled.json', 'null'],
+  ]) {
+    const store = join(dir, name);
+    writeFileSync(store, contents);
+
+    const { code } = hub.createPairingCode({ role: 'viewer' });
+    const paired = await cli(['pair', code, '--url', HUB_URL, '--store', store, '--name', 'again']);
+    assert.match(paired.stdout, /paired as "again"/, `${name}: pairing still works`);
+
+    const kept = readdirSync(dir).filter((f) => f.startsWith(`${name}.corrupt-`));
+    assert.equal(kept.length, 1, `${name}: the old file was kept`);
+    assert.equal(readFileSync(join(dir, kept[0]), 'utf8'), contents, `${name}: keys preserved`);
+    assert.match(paired.stderr, /has been kept at/, `${name}: and the operator is told`);
+  }
 });

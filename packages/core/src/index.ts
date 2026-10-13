@@ -7,6 +7,7 @@ export type {
   SentNotification,
   NotifierEvents,
 } from './server.js';
+export { OptionError } from './options.js';
 export type {
   NotifierOptions,
   SecurityOptions,
@@ -34,6 +35,7 @@ export {
   isBackup,
   type BackupDocument,
 } from './backup.js';
+export { hubHolding } from './store.js';
 export {
   bearerFrom,
   findIngestToken,

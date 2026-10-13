@@ -87,9 +87,44 @@ object WatchAlarm {
  */
 class WatchAlarmReceiver : BroadcastReceiver() {
   override fun onReceive(context: Context, intent: Intent?) {
-    WatchEvents.wake(context, "alarm")
-    // Re-armed even if nothing was listening. The alarm is what makes the app
-    // recoverable at all, so the one thing it must never do is stop.
+    val wanted = WatchState.isWanted(context)
+
+    // Nothing wanted, nothing to do - and in particular nothing re-armed. `stop()`
+    // cancels the alarm, but one already in flight arrives afterwards, and re-arming
+    // it here kept the nine-minute cycle alive for an install that had switched
+    // watching off.
+    if (!wanted) return
+
+    // Nobody home: the service was meant to be running and is not, because Android
+    // reclaimed it or an OEM battery manager stopped it. This receiver used to do
+    // nothing about that - it woke the CPU, told a listener that no longer existed,
+    // and re-armed itself, every nine minutes, indefinitely, while alerting stayed
+    // off until somebody happened to open the app. So try to bring it back, and fall
+    // back to the notice the boot path already uses when that is refused.
+    if (!WatchEvents.hasListener()) {
+      val started = runCatching {
+        NotifyjsWatchService.start(context, WatchState.hubName(context))
+      }.isSuccess
+
+      if (started) {
+        WatchState.setResumeNoticeShown(context, false)
+      } else if (!WatchState.resumeNoticeShown(context)) {
+        // Once, not every nine minutes. `start()` cancels the standing notice
+        // before it tries, so posting it again on each refusal took the notice down
+        // and put it back for as long as the refusal lasted - which on Android 12
+        // and later is the expected case, since an inexact alarm is not one of the
+        // exemptions that permits starting a foreground service from the
+        // background.
+        CallNotification.ensureChannels(context)
+        CallNotification.showResume(context)
+        WatchState.setResumeNoticeShown(context, true)
+      }
+    } else {
+      WatchEvents.wake(context, "alarm")
+    }
+
+    // The alarm is what makes the app recoverable at all, so while watching is
+    // wanted the one thing it must never do is stop.
     WatchAlarm.schedule(context)
   }
 }

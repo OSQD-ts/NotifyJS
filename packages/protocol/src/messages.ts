@@ -65,6 +65,16 @@ export interface ReadyMsg extends Envelope {
   capabilities: Capability[];
   /** Highest sequence the hub holds, so the client knows how far to sync. */
   seq: number;
+  /**
+   * When a snooze this device asked for runs out, if one is running.
+   *
+   * The hub is where a snooze lives: it is recorded on the device and enforced
+   * on delivery, so a client that kept its own copy in memory was guessing.
+   * After a restart it guessed "not snoozed" while the hub went on holding
+   * everything below critical back - which is the worst way round, because
+   * somebody looking at a normal-looking feed believes they are on the pager.
+   */
+  snoozedUntil?: number;
   serverTime: number;
   /**
    * VAPID application server key, base64url, for `pushManager.subscribe`.

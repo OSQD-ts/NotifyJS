@@ -104,7 +104,10 @@
         <div class="drawer-body">
           <section class="setting">
             <label for="pref-name">Device name</label>
-            <p class="muted small">How this browser appears in the hub's device list.</p>
+            <p class="muted small">
+              How this browser asks to be listed when it pairs with a hub. Renaming
+              a browser that is already paired has to be done from the hub.
+            </p>
             <input id="pref-name" maxlength="64" />
           </section>
 
@@ -156,13 +159,16 @@
           <button id="devices-close" class="ghost" aria-label="Close">&times;</button>
         </div>
         <div class="drawer-body">
+          <!-- Above the button, not inside the output: the role has to be
+               chosen before the code is minted, and this block is hidden until
+               one exists. -->
+          <label class="muted small" for="code-role">Role</label>
+          <select id="code-role"></select>
           <button id="new-code" class="primary">Create pairing code</button>
           <div id="new-code-out" hidden>
             <p class="muted small">Scan with the phone app, or type the code:</p>
             <img id="code-qr" class="code-qr" alt="Pairing QR code" />
             <code id="code-value" class="code-value"></code>
-            <label class="muted small" for="code-role">Role</label>
-            <select id="code-role"></select>
           </div>
           <ul id="device-list" class="device-list"></ul>
         </div>

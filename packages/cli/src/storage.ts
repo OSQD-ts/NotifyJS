@@ -18,13 +18,85 @@ import type { ClientStorage } from '@osqd/notifyjs-protocol';
  * someone impersonate this device until it is revoked.
  */
 export function fileStorage(path = defaultPath()): ClientStorage {
+  /** Set when the file is there and could not be read. */
+  let unreadable = false;
+
   const load = (): Record<string, string> => {
     if (!existsSync(path)) return {};
+    // Read and parse are kept apart, because only one of them means the file is
+    // broken. A read can fail for reasons that may well pass - permissions, a
+    // file owned by another account, too many open files, a transient I/O error -
+    // and moving the file aside for one of those would cause exactly the loss this
+    // guard exists to prevent.
+    let raw: string;
     try {
-      return JSON.parse(readFileSync(path, 'utf8')) as Record<string, string>;
-    } catch {
+      raw = readFileSync(path, 'utf8');
+      unreadable = false;
+    } catch (err) {
+      // Remembered, because `save()` writes the whole document: saving over a file
+      // that could not be read would destroy the seeds inside it, and a keypair
+      // cannot be regenerated. Narrowing this guard to parse failures alone had put
+      // that back for a permissions error or a lock held by another process.
+      unreadable = true;
+      say(`notifyjs: ${path} could not be read (${(err as Error).message})`);
       return {};
     }
+
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      // The damaged file is kept, not read past. Returning `{}` here made this
+      // device look unpaired against *every* hub, and the next `set()` - the
+      // re-pair that follows naturally - wrote a file containing only the new
+      // key, destroying the private seeds for all the others. The comment on
+      // `save()` promises the opposite: a keypair cannot be regenerated. So the
+      // evidence is moved aside first, exactly as the hub's own store does with a
+      // corrupt `store.json`.
+      return setAside('it could not be parsed');
+    }
+    // `JSON.parse('null')` succeeds and yields null, which then threw on every
+    // read; an array or a number is no more usable.
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      return setAside('it did not contain an object');
+    }
+    return parsed as Record<string, string>;
+  };
+
+  /**
+   * Says something where somebody might see it.
+   *
+   * Wrapped, because a packaged GUI app may have no stderr at all and writing to
+   * one that fails would throw out of `load()` - turning every credential read
+   * into a rejected promise. `console.error` as well, since that is what reaches
+   * an Electron main process's log.
+   */
+  const say = (line: string): void => {
+    try {
+      process.stderr.write(`${line}\n`);
+    } catch {
+      /* no stderr: a packaged windowed application */
+    }
+    try {
+      console.error(line);
+    } catch {
+      /* nothing to write to at all */
+    }
+  };
+
+  /** Renames a file that cannot be used, and says where it went. */
+  const setAside = (why: string): Record<string, string> => {
+    const kept = `${path}.corrupt-${Date.now()}`;
+    try {
+      renameSync(path, kept);
+      say(
+        `notifyjs: ${path} was ignored because ${why}; it has been kept at ${kept}. ` +
+          'This device will need pairing again, and the old file still holds its keys.',
+      );
+    } catch {
+      say(`notifyjs: ${path} cannot be used (${why}) and could not be moved aside`);
+    }
+    return {};
   };
 
   const save = (data: Record<string, string>): void => {
@@ -44,19 +116,29 @@ export function fileStorage(path = defaultPath()): ClientStorage {
     tighten(path);
   };
 
+  /** Refuses to write over a file whose contents could not be read. */
+  const mutate = (change: (data: Record<string, string>) => void): void => {
+    const data = load();
+    if (unreadable) {
+      throw new Error(`${path} could not be read; refusing to write over it`);
+    }
+    change(data);
+    save(data);
+  };
+
   return {
     async get(key) {
       return load()[key] ?? null;
     },
     async set(key, value) {
-      const data = load();
-      data[key] = value;
-      save(data);
+      mutate((data) => {
+        data[key] = value;
+      });
     },
     async remove(key) {
-      const data = load();
-      delete data[key];
-      save(data);
+      mutate((data) => {
+        delete data[key];
+      });
     },
   };
 }

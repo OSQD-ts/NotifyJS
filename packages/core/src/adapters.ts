@@ -16,7 +16,12 @@ export interface CaptureOptions {
   channel?: string;
   /** Also ring a phone. Worth it for a crash that takes the process with it. */
   call?: boolean;
-  /** Re-throw after alerting, preserving the default crash behaviour. */
+  /**
+   * End the process after alerting, which is what Node does on its own for both
+   * an uncaught exception and an unhandled rejection. Leave it on unless
+   * something else is going to restart the process, because a service that
+   * limps on past a crash is the case a supervisor cannot help with.
+   */
   exit?: boolean;
   /** Milliseconds to let the alert reach the hub before the process ends. */
   drainMs?: number;
@@ -41,12 +46,23 @@ export function captureCrashes(sink: AlertSink, options: CaptureOptions = {}): (
       title: `${kind}: ${error.message}`.slice(0, 200),
       body: error.stack ?? String(error),
       channel,
-      severity: 'critical' as const,
+      // `error`, not `critical`: the promise one line above this is that a crash
+      // loop does not become a thousand pages, and `flood.alwaysDeliver` holds
+      // `critical` by default - so at `critical` every repeat went out and the
+      // dedupe key below did nothing. A crash is an error the operator's own flood
+      // settings can collapse; the call it places for a real outage is still
+      // `critical`, and `severity` remains theirs to set.
+      severity: 'error' as const,
       // One crash loop should not become a thousand pages.
       dedupeKey: `${kind}:${error.message}`,
       requireAck: true,
     };
 
+    // Cleared however the race ends, and unreferenced besides: a drain window the
+    // alert beat to the line went on holding the event loop open for the rest of
+    // its 1.5 seconds, which on the rejection path - where nothing exits if the
+    // caller passed `exit: false` - delayed everything behind it.
+    let drain: NodeJS.Timeout | undefined;
     try {
       await Promise.race([
         Promise.all([
@@ -55,10 +71,15 @@ export function captureCrashes(sink: AlertSink, options: CaptureOptions = {}): (
             ? sink.call({ message: `A service has crashed. ${error.message}`, severity: 'critical' })
             : undefined,
         ]),
-        new Promise((resolve) => setTimeout(resolve, drainMs)),
+        new Promise((resolve) => {
+          drain = setTimeout(resolve, drainMs);
+          drain.unref?.();
+        }),
       ]);
     } catch {
       // Nothing useful to do while the process is on its way out.
+    } finally {
+      if (drain) clearTimeout(drain);
     }
   };
 
@@ -71,7 +92,16 @@ export function captureCrashes(sink: AlertSink, options: CaptureOptions = {}): (
   };
 
   const onRejection = (reason: unknown) => {
-    void report('Unhandled rejection', reason);
+    void report('Unhandled rejection', reason).finally(() => {
+      // The same exit as the exception path, and for a sharper reason: since Node
+      // 15 an unhandled rejection ends the process by default, and subscribing to
+      // the event *replaces* that default. So installing this reporter used to
+      // suppress the very crash it reports - the alert went out, the process
+      // limped on with a broken promise behind it, and it exited 0, so no
+      // supervisor ever restarted it. `exit: false` is how a caller asks for that
+      // deliberately.
+      if (shouldExit) process.exit(1);
+    });
   };
 
   process.on('uncaughtException', onException);
@@ -106,7 +136,17 @@ export function expressErrorHandler(sink: AlertSink, options: HttpErrorOptions =
   ): void {
     const status = err.status ?? err.statusCode ?? 500;
     if (status >= minStatus) {
-      const route = `${req.method ?? 'GET'} ${req.originalUrl ?? req.url ?? '/'}`;
+      const full = req.originalUrl ?? req.url ?? '/';
+      // The query string is dropped for grouping, and only for grouping.
+      // `originalUrl` carries it, so the key was unique per *request* rather than
+      // per route: a broken `/api/items` hit by a paginating client produced a
+      // fresh dedupe key for every `?page=n`, flood control opened a window for
+      // each one and coalesced nothing, and a thousand requests were a thousand
+      // notifications and a thousand live timers. That is the outcome flood
+      // control exists to prevent - "the alert becomes noise to be silenced,
+      // which is how real incidents get missed".
+      const path = full.split('?')[0] ?? full;
+      const route = `${req.method ?? 'GET'} ${path}`;
       void sink
         .notify({
           title: `${status} on ${route}`,
@@ -115,7 +155,9 @@ export function expressErrorHandler(sink: AlertSink, options: HttpErrorOptions =
           severity: options.severity ?? 'error',
           // Group by route and message, not by request.
           dedupeKey: `http:${route}:${err.message}`,
-          data: { status, route },
+          // The whole URL is still reported, since it is what somebody debugging
+          // the failure actually needs.
+          data: { status, route, url: full },
         })
         .catch(() => {});
     }
@@ -137,8 +179,9 @@ export function fastifyErrorHandler(sink: AlertSink, options: HttpErrorOptions =
   };
 }
 
-/** Maps common logger level names and numeric levels onto severities. */
 /**
+ * Maps common logger level names onto severities.
+ *
  * Null-prototyped: the key comes from a log record, and a plain object answers
  * `LEVELS['constructor']` with a function inherited from Object.prototype -
  * truthy, not a severity, and on its way into a comparison that expects one.

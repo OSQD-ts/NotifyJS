@@ -48,10 +48,11 @@ export function renderNotificationItem(n: Notification, callbacks: ItemCallbacks
   channel.className = 'channel';
   channel.textContent = n.channel;
 
+  const at = stamp(n.ts);
   const time = document.createElement('time');
   time.className = 'time';
-  time.dateTime = new Date(n.ts).toISOString();
-  time.textContent = new Date(n.ts).toLocaleTimeString();
+  time.dateTime = at.iso;
+  time.textContent = at.shown;
 
   top.append(sev, channel, time);
 
@@ -97,4 +98,59 @@ export function renderNotificationItem(n: Notification, callbacks: ItemCallbacks
  */
 export function announcementFor(n: Notification): string {
   return `${n.severity} alert on ${n.channel}: ${n.title}`;
+}
+
+/**
+ * A timestamp pair, or a dash, rather than an exception.
+ *
+ * `toISOString()` throws `RangeError` for a `ts` that is not a finite number in
+ * range. That throw lands in the middle of rendering the feed - before the `ack`
+ * that follows - so the notification carrying it is never acknowledged, is
+ * replayed on every sync, and throws again each time: one malformed frame
+ * freezes the feed for good. The client swallows the exception, so nothing says
+ * why.
+ */
+function stamp(ts: unknown): { iso: string; shown: string } {
+  const at = new Date(typeof ts === 'number' ? ts : NaN);
+  if (Number.isNaN(at.getTime())) return { iso: '', shown: '\u2014' };
+  return { iso: at.toISOString(), shown: at.toLocaleTimeString() };
+}
+
+/**
+ * Which role a refreshed pairing-code selector should be left on.
+ *
+ * Lives here, and takes the previous value as an argument, because the version
+ * that read it off the element got this dangerously wrong: replacing a
+ * single-select's options resets `selectedIndex` to 0, so reading `value`
+ * afterwards returned the *first* role rather than the operator's choice - and
+ * the first default role is `admin`. Opening Devices and clicking "Create
+ * pairing code" then minted an admin code for a click that used to mint a viewer
+ * one.
+ */
+export function nextRoleChoice(previous: string, roles: string[]): string {
+  if (previous && roles.includes(previous)) return previous;
+  if (roles.includes('viewer')) return 'viewer';
+  return roles[0] ?? 'viewer';
+}
+
+/**
+ * Repopulates the pairing-code role selector, keeping the operator's choice.
+ *
+ * The whole operation lives here rather than half of it, because the half that
+ * broke was the *ordering*: reading `value` after `replaceChildren` reads the
+ * first option, and the first default role is `admin`. With only the decision
+ * extracted, a test could not see that - and the ordering is not something a
+ * reviewer notices twice.
+ */
+export function populateRoleSelect(select: HTMLSelectElement, roles: string[]): void {
+  const previous = select.value;
+  select.replaceChildren(
+    ...roles.map((role) => {
+      const option = document.createElement('option');
+      option.value = role;
+      option.textContent = role;
+      return option;
+    }),
+  );
+  select.value = nextRoleChoice(previous, roles);
 }

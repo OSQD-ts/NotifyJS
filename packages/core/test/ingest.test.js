@@ -1,7 +1,7 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { rmSync, mkdtempSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { networkInterfaces, tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import { Notifier, INGEST_TOKEN_PREFIX, isLoopback } from '../dist/index.js';
@@ -81,9 +81,14 @@ test('the token is only ever returned once, and never stored in the clear', asyn
   assert.equal(listed.token, undefined, 'the plaintext is not handed back');
   assert.equal(listed.hash, undefined, 'not even the hash leaves the hub');
 
-  // The value on disk must not be the token itself.
-  const raw = JSON.stringify(hub.devices());
-  assert.ok(!raw.includes(minted.token));
+  // The value on disk must not be the token itself - read from the file, because
+  // `hub.devices()` is an empty array on this hub and an assertion over nothing
+  // cannot fail however the token is stored.
+  // The store writes on a short debounce, so give it that long.
+  await new Promise((r) => setTimeout(r, 200));
+  const onDisk = readFileSync(join(storeDir, 'store.json'), 'utf8');
+  assert.ok(onDisk.includes(minted.id), 'the token record is in the file');
+  assert.ok(!onDisk.includes(minted.token), 'but not the token itself');
 });
 
 test('no token, a wrong token and a revoked token are all refused', async () => {
@@ -222,12 +227,38 @@ test('a forwarded header cannot talk the hub out of requiring TLS', async () => 
     assert.equal(spoofed.status, 202, 'the header does not make a local request remote');
 
     // And the inverse, which is the one that matters: a caller claiming to be
-    // loopback must not be able to skip the cleartext refusal. Verified
-    // through the helper the handler now uses, since a genuinely off-box
-    // request cannot be made from inside this test.
+    // loopback must not be able to skip the cleartext refusal.
     assert.equal(isLoopback('127.0.0.1'), true);
     assert.equal(isLoopback('::1'), true);
     assert.equal(isLoopback('203.0.113.9'), false, 'a forwarded claim is not loopback');
+
+    // The helper alone proved nothing about the handler using it: patching the
+    // exemption so the header could grant it left every test here passing. An
+    // off-box request *can* be made from inside this test - by dialling one of this
+    // machine's own non-loopback addresses, which the hub is already listening on -
+    // so the dangerous direction is now exercised for real.
+    const lan = Object.values(networkInterfaces())
+      .flat()
+      .find((i) => i && i.family === 'IPv4' && !i.internal)?.address;
+
+    if (lan) {
+      const port = new URL(proxied.dashboardUrl).port;
+      const offBox = await fetch(`http://${lan}:${port}/api/notify`, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          authorization: `Bearer ${issued.token}`,
+          // The claim that used to be worth making.
+          'x-forwarded-for': '127.0.0.1',
+        },
+        body: JSON.stringify({ title: 'off box, claiming to be local' }),
+      });
+      assert.equal(
+        offBox.status,
+        421,
+        'a bearer token over cleartext is refused however the header claims otherwise',
+      );
+    }
   } finally {
     await proxied.stop();
     rmSync(dir, { recursive: true, force: true });

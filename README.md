@@ -189,6 +189,11 @@ notify.upsertRole({
 });
 ```
 
+`quietHours` silences *calls*, not notifications — a phone still buzzes for an
+alert during them — and the hours are read from the hub's own clock, not each
+device's. A window that wraps midnight is written the way you would say it:
+`{ start: 22, end: 7 }`.
+
 Three roles ship by default:
 
 | Role | Channels | Floor | Rings? |
@@ -201,9 +206,9 @@ Channel patterns take `*` as a wildcard and a leading `!` to exclude;
 exclusions always win, so `['*', '!debug.*']` reads the way you would say it.
 
 Capabilities are checked on every delivery and every privileged operation:
-`notify.receive`, `notify.ack`, `notify.send`, `call.receive`, `call.place`,
-`devices.manage`, `roles.manage`, `audit.read`, and `admin` (which implies the
-rest).
+`notify.receive`, `notify.ack`, `notify.act`, `notify.send`, `call.receive`,
+`call.place`, `devices.manage`, `roles.manage`, `audit.read`, and `admin` (which
+implies the rest).
 
 ## The blind spot, and how to close it
 
@@ -307,7 +312,12 @@ if (sent.reached === 0) await fallBackToSomethingElse();
 A service in a crash loop would otherwise buzz every device a thousand times.
 After a few repeats of the same alert within a window, further copies are
 counted rather than delivered, and released as one summary — `Deploy failed
-(x47 in 1 min)`. Nothing is dropped, and `critical` never waits:
+(x47 in 1 min)`. Nothing is dropped, and `critical` never waits — unless you
+supply a `dedupeKey` yourself, which says "these are the same thing" and is
+honoured whatever the severity: a crash loop is a thousand identical criticals,
+and collapsing those is the point. Past 5,000 distinct keys in one window the
+hub stops coalescing rather than start forgetting, so an alert too many beats an
+alert lost:
 
 ```ts
 new Notifier({ flood: { windowMs: 60_000, burst: 5, alwaysDeliver: ['critical'] } });
@@ -410,7 +420,24 @@ new Notifier({ tls: { cert: readFileSync('cert.pem'), key: readFileSync('key.pem
 or put it behind a reverse proxy and set `security.trustProxy = true` so
 rate limiting sees real client IPs rather than the proxy's.
 
+**If you have more than ten devices, raise `security.maxConnectionsPerIp`.** It
+defaults to 10 per address, and behind a reverse proxy with `trustProxy` off every
+device shares the proxy's address - so the limit applies to all of them together.
+Devices past it are refused and retry, which looks like alerts arriving late rather
+than like an error; the hub says so at startup when more devices are paired than the
+limit allows.
+
 ## Configuration
+
+Every value below is a default, so an empty `new Notifier()` is a working hub.
+This is what people reach for rather than the whole surface: `allowIps` and
+`denyIps` take addresses or CIDR ranges, `auditLimit` bounds the audit log the
+way `historyLimit` bounds history, `livenessIntervalMs` sets how often a device
+is asked to prove it is still running, and the remaining hostile-traffic knobs
+are in [SECURITY.md](SECURITY.md#rate-limiting-and-bans). `NotifierOptions` in
+`packages/core/src/options.ts` carries one comment per field, and a number that
+would quietly switch off the thing it configures is refused when the hub is
+constructed rather than months later.
 
 ```ts
 new Notifier({
@@ -449,8 +476,10 @@ new Notifier({
 Notifications carry a monotonic sequence number. Each device records how far it
 has acknowledged, so a device that was offline gets what it missed on
 reconnect — filtered through its *current* role, so demoting a device narrows
-its backlog retroactively. `requireAck: true` keeps re-delivering until a human
-acknowledges it or the TTL expires.
+its backlog retroactively. `requireAck: true` keeps re-delivering until a
+device acknowledges it or the TTL expires — a device, not a person: every client
+here acks as soon as it has the frame, so this confirms the alert reached
+something that could show it rather than that somebody read it.
 
 A device returning from a long absence gets the most recent `replayLimit`
 notifications plus a note saying how many older ones were skipped, rather than
@@ -465,7 +494,8 @@ whose time has drifted still authenticates instead of failing forever.
 notify.on('device:paired', (device) => audit(device));
 notify.on('device:online', (device) => {});
 notify.on('ack', ({ notificationId, deviceId, action }) => {});
-notify.on('call', (event) => {});          // ringing | answered | declined | missed
+// ringing | answered | declined | vanished | ended | missed | failed
+notify.on('call', (event) => {});
 notify.on('heartbeat:missed', ({ heartbeat, overdueBy }) => {});
 notify.on('heartbeat:recovered', (heartbeat) => {});
 notify.on('auth:failed', ({ ip, reason }) => {});
@@ -525,6 +555,9 @@ must be `https`. Turn it off with `--no-web-push`.
 
 Set `webPush.subject` (or `--web-push-subject`) to a `mailto:` or `https:` URI
 identifying you; RFC 8292 requires one, and Apple rejects a push without it.
+Leave it unset and the hub signs with this project's URL, which works but tells
+a push service that OSQD sent your alerts — and gives its operator somebody
+else to contact about your traffic.
 
 The keypair is generated on first use and kept in `store.json`. Do not delete
 it: a browser stores the key inside the subscription it created, so a new one
@@ -557,6 +590,12 @@ curl -X POST https://hub.example.com/api/notify \
 `POST /api/call` takes `{ "message": ... }` and holds the request open for the
 whole ring, so the response tells you whether a person actually answered.
 
+`severity` is one of `debug`, `info`, `success`, `warning`, `error`, `critical`,
+and anything else is a 400 rather than a default. A severity that is not one of
+those has nowhere to sort, and quietly reading it as `info` put the alert below
+the floor every on-call role filters on — so a job publishing `criticial` was
+answered `202` and paged nobody. Case does not matter.
+
 The token is treated as the weaker credential it is. Only its hash is stored.
 It carries a role rather than being all-powerful, so it can never do more than
 a device in the same role — and minting one for a role you do not hold is
@@ -587,7 +626,7 @@ notifyjs import --from hub-backup.json --data /new/path
 ```
 
 A device paired against the original authenticates against the restored hub
-with nothing re-paired. Add `--history` to carry the alert log across as well;
+with nothing re-paired. Add `--history` to carry the alert and audit logs across as well;
 without it you get the identity and the devices, which is what moving a hub
 actually needs.
 
@@ -595,6 +634,18 @@ Both commands read and write files directly, so **stop the hub first**: a
 running one holds the document in memory, would write over an import, and has
 not necessarily flushed what an export would read. Restoring over an existing
 store is refused without `--force`.
+
+They now check for themselves: an export against a directory a live hub is using
+warns that it cannot see everything, and an import into one is refused outright,
+because the hub would write over the restore on its next tick and leave nothing to
+say it had happened.
+
+For the same reason, **one hub per store directory**. Two of them — a scaled
+compose service, a unit restarted before the old process exited, a second
+`notifyjs serve` in another terminal — each write the whole document on a timer,
+so the later write wins and whatever the other had done is gone. The hub says so
+at startup when it finds another live one using the directory, but it will not
+refuse to start: an alerting hub that stays down is worse than one that complains.
 
 The file is written `0600` and the command says what is in it, because a
 backup that can restore a hub necessarily contains its secrets — the VAPID
@@ -652,6 +703,14 @@ outcomes, deliveries, coalesced alerts, auth failures, bans, overdue
 heartbeats, uptime. Counts only — no titles or channels — so scraping it cannot
 leak the content of an alert. Set `metricsToken` to require a bearer token.
 
+The one worth an alerting rule of its own is `notifyjs_store_writable`. Every
+write to the store refuses to take the process down over a failure, because a
+pager must not die because a disk filled up — so a hub on a full or read-only
+filesystem goes on pairing devices and delivering alerts while none of it is
+being saved, and a restart rolls it back to whenever the disk broke. The gauge
+drops to 0 while that is happening, the log says so once, and both recover on
+their own when the disk does.
+
 ## Wiring it into an existing app
 
 ```ts
@@ -664,6 +723,11 @@ const logger = pino(createLogStream(notify)); // error and above
 
 Each is one line, deduplicated by default so a crash loop collapses into a
 single alert instead of a thousand.
+
+`captureCrashes` ends the process after alerting, for an unhandled rejection as
+well as an uncaught exception, because that is what Node does on its own and
+subscribing to those events replaces the default. Pass `exit: false` if something
+other than a supervisor is going to decide what happens next.
 
 ## TLS
 
@@ -933,7 +997,7 @@ machine that stays up (`notifyjs listen`) as a backup target.
 npm test
 ```
 
-74 tests over real sockets and a real DOM:
+Three hundred tests over real sockets and a real DOM:
 
 - **Protocol** — pairing, RBAC filtering, offline replay and its cap, call
   escalation and named policies, flood coalescing, resolve, snooze, push
@@ -1044,11 +1108,11 @@ Nobody types a version number. After every merge,
 
 | Commit subject | Bump |
 | --- | --- |
-| `Feat: …` | minor |
-| `Fix: …`, `Refactor: …`, `Perf: …`, `Revert: …` | patch |
+| `Feat: …`, `Feature: …` | minor |
+| `Fix: …`, `Bugfix: …`, `Refactor: …`, `Perf: …`, `Revert: …`, `Security: …` | patch |
 | `CI: …`, `Docs: …`, `Chore: …`, `Test: …`, `Build: …`, `Style: …` | nothing |
 | anything unrecognised — `Init`, `License Rename` | nothing |
-| `Feat!: …`, or `BREAKING CHANGE:` in the body | see below |
+| any `!` before the colon — `Feat!: …`, `Fix!: …` — or `BREAKING CHANGE:` in the body | see below |
 
 The largest bump among the commits wins. If nothing asks for a release, no tag
 is cut and `main` just refreshes its rolling `latest` build. Otherwise the

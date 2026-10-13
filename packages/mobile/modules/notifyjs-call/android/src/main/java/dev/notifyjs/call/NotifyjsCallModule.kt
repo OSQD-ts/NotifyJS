@@ -45,9 +45,20 @@ class NotifyjsCallModule : Module() {
 
     Events("onCallAction", "onSpeechDone", "onWake")
 
+    Function("consumePendingCallActions") {
+      CallEvents.drainPending().map { event ->
+        mapOf(
+          "action" to if (event.action == CallNotification.ACTION_ANSWER) "answer" else "decline",
+          "callId" to event.callId,
+        )
+      }
+    }
+
     OnCreate {
       // Answer and Decline arrive on a broadcast receiver, which may well have
-      // run before this module existed; CallEvents replays anything missed.
+      // run before this module existed. Anything it missed is collected by
+      // `consumePendingCallActions`, which the client calls once it is
+      // subscribed - this runs too early for an event to reach anybody.
       CallEvents.listen { event ->
         sendEvent(
           "onCallAction",

@@ -10,6 +10,7 @@ import {
   shell,
 } from 'electron';
 import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { Hub } from './hub.js';
 import { speakSystem, stopSystemSpeech } from './speech.js';
 import type { ActiveCall, AddSourceInput, AppState, ClientPreferences, DesktopPreferences } from '../shared.js';
@@ -79,8 +80,15 @@ function createWindow(show: boolean): BrowserWindow {
 
   // The window only ever shows its own bundled page. Anything that tries to
   // navigate it somewhere else is a bug or an attack, never a feature.
+  //
+  // Compared against that one page rather than against the `file://` scheme: any
+  // local file would have been allowed, and a navigated page inherits this
+  // window's preload and the `window.notifyjs` bridge with it. Nothing reachable
+  // gets a hub-supplied string into an `href` today, so this is depth rather than
+  // a hole being closed.
+  const page = pathToFileURL(join(__dirname, 'index.html')).href;
   win.webContents.on('will-navigate', (event, url) => {
-    if (!url.startsWith('file://')) event.preventDefault();
+    if (url !== page) event.preventDefault();
   });
 
   return win;

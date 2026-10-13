@@ -1,8 +1,10 @@
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { rmSync, mkdtempSync } from 'node:fs';
+import { rmSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import WebSocket from 'ws';
 
 import { Notifier, captureCrashes, expressErrorHandler, createLogStream, logHandler } from '../dist/index.js';
@@ -134,10 +136,14 @@ test('a real device that never reads is disconnected by the hub', async () => {
 /* Crash capture                                                       */
 /* ------------------------------------------------------------------ */
 
-test('an unhandled rejection is reported', async () => {
+test('an unhandled rejection is reported', async (t) => {
   const s = sink();
   const before = process.listeners('unhandledRejection').length;
   const stop = captureCrashes(s, { exit: false, drainMs: 50 });
+  // Removed however this test ends. Left registered by a failure, it swallows
+  // Node's own crash for every later test in the file - so one failure here hid
+  // the next one.
+  t.after(() => stop());
   const handlers = process.listeners('unhandledRejection');
   assert.equal(handlers.length, before + 1, 'the handler was registered');
 
@@ -147,9 +153,44 @@ test('an unhandled rejection is reported', async () => {
   stop();
   const alert = s.sent.find((a) => a.title?.includes('promise went bad'));
   assert.ok(alert, 'the rejection was published');
-  assert.equal(alert.severity, 'critical');
+  // `error`, deliberately: `flood.alwaysDeliver` holds `critical` by default, so a
+  // crash published at `critical` was never coalesced and the dedupe key beside it did
+  // nothing - which is the opposite of what this handler promises. The call it places
+  // for a real outage is still critical.
+  assert.equal(alert.severity, 'error');
   assert.equal(alert.channel, 'crash');
   assert.ok(alert.dedupeKey, 'a crash loop collapses instead of paging repeatedly');
+});
+
+test('an unhandled rejection still ends the process', async () => {
+  // Since Node 15 an unhandled rejection ends the process, and subscribing to the
+  // event replaces that default - so installing this reporter suppressed the very
+  // crash it reports. The alert went out, the process limped on with a broken
+  // promise behind it, and it exited 0, so no supervisor restarted it.
+  //
+  // Run in a child, because the assertion is about the exit code of a process.
+  const script = join(storeDir, 'rejects.mjs');
+  const adapters = pathToFileURL(join(process.cwd(), 'packages/core/dist/adapters.js')).href;
+  const write = (extra) =>
+    writeFileSync(
+      script,
+      `import { captureCrashes } from ${JSON.stringify(adapters)};\n` +
+        `captureCrashes({ notify: async () => console.log('alerted') }, { drainMs: 50${extra} });\n` +
+        `Promise.reject(new Error('nobody handles me'));\n` +
+        `setTimeout(() => console.log('survived'), 400);\n`,
+    );
+
+  write('');
+  const crashed = spawnSync(process.execPath, [script], { encoding: 'utf8' });
+  assert.equal(crashed.status, 1, `exits as Node would: ${crashed.stdout}${crashed.stderr}`);
+  assert.match(crashed.stdout, /alerted/, 'and the alert went out first');
+  assert.ok(!crashed.stdout.includes('survived'), 'nothing carried on behind it');
+
+  // `exit: false` is how a caller asks to carry on, and it still works.
+  write(', exit: false');
+  const survived = spawnSync(process.execPath, [script], { encoding: 'utf8' });
+  assert.equal(survived.status, 0);
+  assert.match(survived.stdout, /survived/);
 });
 
 test('removing the handler deregisters it', async () => {
@@ -226,8 +267,12 @@ test('a pino stream forwards errors and drops chatter', async () => {
 test('a malformed log line never breaks the logger', async () => {
   const s = sink();
   const stream = createLogStream(s);
-  stream.write('this is not json\n');
-  stream.write(JSON.stringify({ level: 50, msg: 'still working' }) + '\n');
+  // One chunk, which is the case that broke: a bad line used to abort the whole
+  // chunk, so the good record beside it was lost. Written separately - as this
+  // test used to - the precondition never occurs and the bug cannot show.
+  stream.write(
+    'this is not json\n' + JSON.stringify({ level: 50, msg: 'still working' }) + '\n',
+  );
   await new Promise((r) => setTimeout(r, 60));
   assert.equal(s.sent.length, 1);
   assert.equal(s.sent[0].title, 'still working');
@@ -266,4 +311,29 @@ test('adapters work against a real hub', async () => {
     hub.history().some((n) => n.title.includes('503 on GET /health') && n.channel === 'web'),
     'the hub recorded what the middleware published',
   );
+});
+
+test('HTTP errors group by route, not by query string', async () => {
+  // `originalUrl` carries the query string, so the dedupe key was unique per
+  // request: a broken route hit by a paginating client opened a flood-control
+  // window per `?page=n` and coalesced nothing, turning a thousand requests into
+  // a thousand notifications - the noise flood control exists to prevent.
+  const keys = [];
+  const sink = {
+    notify: async (input) => {
+      keys.push(input.dedupeKey);
+      return { id: 'x', reached: 0, deliveredTo: [], coalesced: false };
+    },
+  };
+
+  const handler = expressErrorHandler(sink);
+  const err = Object.assign(new Error('items blew up'), { status: 500 });
+  for (const page of [1, 2, 3]) {
+    handler(err, { method: 'GET', originalUrl: `/api/items?page=${page}` }, {}, () => {});
+  }
+  await new Promise((r) => setTimeout(r, 20));
+
+  assert.equal(new Set(keys).size, 1, `one key for one route, got ${[...new Set(keys)].join(' | ')}`);
+  assert.match(keys[0], /GET \/api\/items/);
+  assert.ok(!keys[0].includes('page='), 'and it does not carry the query string');
 });

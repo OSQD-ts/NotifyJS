@@ -299,3 +299,173 @@ test('a failed pairing leaves no client retrying in the background', async () =>
 
   assert.equal(after, before + 1, `expected one attempt, saw ${after - before}`);
 });
+
+test('a snooze survives a reconnect, because the hub is asked', async () => {
+  // The snooze lives on the hub - recorded on the device, enforced on delivery -
+  // and no frame ever carried it back, so a client that restarted mid-snooze
+  // showed no snooze at all while alerts were still being held. On the phone that
+  // also made the button useless: tapping it started a second thirty minutes
+  // instead of cancelling the first.
+  const sources = manager();
+  await sources.load();
+  const added = await sources.add({
+    url: WORK_URL,
+    code: work.createPairingCode({ role: 'oncall' }).code,
+  });
+
+  sources.snoozeAll(30 * 60_000);
+  await new Promise((r) => setTimeout(r, 300));
+  assert.ok(sources.list()[0].snoozedUntil > Date.now(), 'the tap shows at once');
+  assert.ok(sources.snoozedUntil > Date.now());
+
+  // A reconnect is where a client used to lose it.
+  await sources.setEnabled(added.id, false);
+  await new Promise((r) => setTimeout(r, 300));
+  await sources.setEnabled(added.id, true);
+  await new Promise((r) => setTimeout(r, 800));
+
+  const after = sources.list()[0];
+  assert.equal(after.status, 'ready');
+  assert.ok(after.snoozedUntil > Date.now(), `the hub reports it: ${after.snoozedUntil}`);
+
+  sources.unsnoozeAll();
+  await new Promise((r) => setTimeout(r, 300));
+  assert.equal(sources.snoozedUntil, 0, 'and resuming clears it');
+
+  sources.disconnectAll();
+});
+
+test('a decline with no call to match it still reaches the hub that placed it', async () => {
+  // A tap on a lock-screen notification arrives with a call id and nothing else,
+  // and when the app was not running there is no local call to look it up
+  // against - `wire()` runs before the sources are even loaded. The tap used to
+  // be dropped, so the hub never learned the phone had refused and waited out the
+  // whole ring before trying the next person.
+  const sources = manager();
+  await sources.load();
+  await sources.add({
+    url: WORK_URL,
+    code: work.createPairingCode({ role: 'oncall' }).code,
+  });
+  await new Promise((r) => setTimeout(r, 400));
+
+  const calls = [];
+  sources.on('call', (c) => calls.push(c));
+
+  const outcome = work.call({ message: 'the database is down', ringSeconds: 20 });
+  await new Promise((r) => setTimeout(r, 400));
+
+  // What the phone knows after a cold start: an id, and no source.
+  const placed = calls[0]?.call.id;
+  assert.ok(placed, 'the call rang');
+
+  const told = sources.declineOnReady(placed);
+  assert.equal(told.length, 1, 'the connected hub was told');
+  assert.equal((await outcome).outcome, 'declined', 'and the hub acted on it at once');
+
+  // Which sources were told is what the caller needs: a phone watching two hubs
+  // must keep the tap until the one that actually rang has heard it, and "somebody
+  // was told" would have thrown it away on the first source to come up.
+  assert.deepEqual(sources.declineOnReady(placed, new Set(told)), [], 'not told twice');
+
+  sources.disconnectAll();
+  assert.deepEqual(sources.declineOnReady('whatever'), [], 'and nobody to tell is empty');
+});
+
+test('what a snooze held back arrives when the snooze ends', async () => {
+  // The promise is written into the desktop client: "Snoozing tells each hub to
+  // hold its alerts rather than dropping them on the floor here, so nothing is
+  // lost - it arrives when the snooze ends." Nothing made it arrive. A snooze
+  // running out changes no state on either side, so the suppressed alerts sat
+  // behind the device's cursor until some unrelated event happened to sync - a
+  // phone being opened, a laptop waking. A dashboard left open recovered them
+  // never.
+  const sources = manager();
+  await sources.load();
+  await sources.add({
+    url: WORK_URL,
+    code: work.createPairingCode({ role: 'oncall' }).code,
+  });
+  await new Promise((r) => setTimeout(r, 400));
+
+  const seen = [];
+  sources.on('notification', (n) => seen.push(n.notification.title));
+
+  sources.snoozeAll(600);
+  await new Promise((r) => setTimeout(r, 200));
+
+  await work.error({ title: 'held by the snooze', channel: 'ci' });
+  await new Promise((r) => setTimeout(r, 200));
+  assert.deepEqual(seen, [], 'nothing arrives while snoozed');
+
+  // No foregrounding, no reconnect, no other event: just the snooze ending.
+  await new Promise((r) => setTimeout(r, 1200));
+  assert.deepEqual(seen, ['held by the snooze'], 'and it arrives once it ends');
+
+  sources.disconnectAll();
+});
+
+test('resuming early collects what was held', async () => {
+  const sources = manager();
+  await sources.load();
+  await sources.add({
+    url: WORK_URL,
+    code: work.createPairingCode({ role: 'oncall' }).code,
+  });
+  await new Promise((r) => setTimeout(r, 400));
+
+  const seen = [];
+  sources.on('notification', (n) => seen.push(n.notification.title));
+
+  sources.snoozeAll(60_000);
+  await new Promise((r) => setTimeout(r, 200));
+  await work.error({ title: 'held until resumed', channel: 'ci' });
+  await new Promise((r) => setTimeout(r, 200));
+  assert.deepEqual(seen, []);
+
+  sources.unsnoozeAll();
+  await new Promise((r) => setTimeout(r, 500));
+  assert.deepEqual(seen, ['held until resumed'], 'tapping resume goes and gets them');
+
+  sources.disconnectAll();
+});
+
+test('a critical during a snooze does not take the held alerts with it', async () => {
+  // The catch-up recovers by syncing from the device's cursor, and a critical is
+  // deliberately delivered *through* a snooze - so acknowledging it, as every client
+  // does on receipt, moved the cursor past everything the snooze had suppressed. The
+  // feature worked only in the case where nothing paged you, which is the opposite of
+  // the case that matters.
+  const sources = manager();
+  await sources.load();
+  await sources.add({
+    url: WORK_URL,
+    code: work.createPairingCode({ role: 'oncall' }).code,
+  });
+  await new Promise((r) => setTimeout(r, 400));
+
+  const seen = [];
+  sources.on('notification', (n) => seen.push(n.notification.title));
+
+  sources.snoozeAll(60_000);
+  await new Promise((r) => setTimeout(r, 200));
+
+  await work.error({ title: 'held-1', channel: 'ci' });
+  await work.error({ title: 'held-2', channel: 'ci' });
+  await new Promise((r) => setTimeout(r, 200));
+  await work.notify({ title: 'paged through', severity: 'critical', channel: 'ci' });
+  await new Promise((r) => setTimeout(r, 300));
+
+  assert.deepEqual(seen, ['paged through'], 'only the critical arrives while snoozed');
+
+  sources.unsnoozeAll();
+  await new Promise((r) => setTimeout(r, 600));
+
+  // Both held alerts arrive. The critical comes again with them, because the replay
+  // starts from the first alert the snooze held and everything after it follows -
+  // every client dedupes by id, which is what that is for.
+  assert.ok(seen.includes('held-1'), `held-1 arrived: ${seen.join(',')}`);
+  assert.ok(seen.includes('held-2'), `held-2 arrived: ${seen.join(',')}`);
+
+  sources.disconnectAll();
+});

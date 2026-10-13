@@ -71,22 +71,59 @@ export interface CheckOptions {
  * exactly when a project reaches its tenth minor release.
  */
 export function compareVersions(a: string, b: string): number {
-  const parse = (v: string) =>
-    v
-      .replace(/^v/, '')
-      // A prerelease suffix is dropped for ordering; `available` is decided by
-      // the numeric part, and equal numbers mean "not newer".
-      .split('-')[0]!
-      .split('.')
-      .map((part) => Number.parseInt(part, 10) || 0);
+  const split = (v: string) => {
+    const clean = v.trim().replace(/^v/, '');
+    const dash = clean.indexOf('-');
+    return {
+      numbers: (dash === -1 ? clean : clean.slice(0, dash))
+        .split('.')
+        .map((part) => Number.parseInt(part, 10) || 0),
+      pre: dash === -1 ? '' : clean.slice(dash + 1),
+    };
+  };
 
-  const left = parse(a);
-  const right = parse(b);
-  const length = Math.max(left.length, right.length);
+  const left = split(a);
+  const right = split(b);
+  const length = Math.max(left.numbers.length, right.numbers.length);
 
   for (let i = 0; i < length; i++) {
-    const diff = (left[i] ?? 0) - (right[i] ?? 0);
+    const diff = (left.numbers[i] ?? 0) - (right.numbers[i] ?? 0);
     if (diff !== 0) return diff > 0 ? 1 : -1;
+  }
+
+  // Equal numbers, and the suffix decides - the semver rule, and the one that
+  // matters here. The suffix used to be dropped, which made a prerelease rank
+  // *equal* to the release it previews. The rolling build is published as
+  // `x.y.(z+1)-main.N`, so somebody who installed `@osqd/notifyjs@next` sat at
+  // `0.4.1-main.7`, was told 0.4.1 was not newer, and stayed on an untested
+  // preview until 0.4.2 happened to ship.
+  if (left.pre === right.pre) return 0;
+  if (!left.pre) return 1;
+  if (!right.pre) return -1;
+
+  // Two previews of the same release: ordered by their suffix, numerically, so
+  // `main.10` comes after `main.9` rather than before it.
+  //
+  // Compared by hand rather than with `localeCompare`'s `numeric` option, which
+  // needs `Intl`: a React Native build of Hermes without it ignores the option
+  // silently and sorts `main.10` before `main.9`, offering an older preview as an
+  // update.
+  const chunks = (pre: string) => pre.split(/(\d+)/).filter((part) => part !== '');
+  const leftParts = chunks(left.pre);
+  const rightParts = chunks(right.pre);
+
+  for (let i = 0; i < Math.max(leftParts.length, rightParts.length); i++) {
+    const a = leftParts[i];
+    const b = rightParts[i];
+    if (a === undefined) return -1;
+    if (b === undefined) return 1;
+    const both = /^\d+$/.test(a) && /^\d+$/.test(b);
+    if (both) {
+      const diff = Number(a) - Number(b);
+      if (diff !== 0) return diff > 0 ? 1 : -1;
+      continue;
+    }
+    if (a !== b) return a > b ? 1 : -1;
   }
   return 0;
 }

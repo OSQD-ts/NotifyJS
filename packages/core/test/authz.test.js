@@ -83,6 +83,65 @@ after(async () => {
 /* reading the log                                                     */
 /* ------------------------------------------------------------------ */
 
+test('a role the embedding app builds is validated like one off the wire', async () => {
+  // `upsertRole` wrote whatever it was handed straight into the store, while the
+  // wire path sanitized first. `upsertRole(0)` and `upsertRole('viewer')` both
+  // produced a role whose name persisted as the string "undefined", and
+  // `channels: 'not-a-list'` - the shape another test proves cannot reach the store
+  // from a device - reached it from here. A `minSeverity` typo was worse than
+  // useless: it ranks below `debug`, so a role meant to filter saw everything.
+  const dir = mkdtempSync(join(tmpdir(), 'notifyjs-localrole-'));
+  const hub = new Notifier({ port: 0, storeDir: dir, dashboard: false, logger: false });
+  await hub.start();
+  try {
+    const before = hub.roles().length;
+    for (const bad of [0, true, '', [], {}, 'viewer', { name: '' }, { name: '__proto__', channels: ['*'] }]) {
+      assert.throws(() => hub.upsertRole(bad), /needs a name|cannot be used as a role name/, JSON.stringify(bad));
+    }
+    for (const bad of [
+      { name: 'nochan' },
+      { name: 'badchan', channels: 'not-a-list' },
+      { name: 'emptychan', channels: [] },
+    ]) {
+      assert.throws(() => hub.upsertRole(bad), /at least one channel pattern/, JSON.stringify(bad));
+    }
+    // A capability that is not one can only be a typo from here, and a dropped
+    // `notify.recieve` is a role that receives nothing.
+    assert.throws(
+      () => hub.upsertRole({ name: 'typo', channels: ['*'], capabilities: ['notify.recieve'] }),
+      /unknown capability "notify.recieve"/,
+    );
+    assert.equal(hub.roles().length, before, 'none of it reached the store');
+    assert.ok(
+      !hub.roles().some((r) => typeof r.name !== 'string' || r.name === '' || r.name === 'undefined'),
+      'and nothing nameless is listed',
+    );
+
+    // The shape the README documents still works, unchanged, including the parts
+    // `sanitizeRole` carries across rather than dropping.
+    hub.upsertRole({
+      name: 'night-oncall',
+      channels: ['db.*', 'payments', '!db.debug'],
+      minSeverity: 'error',
+      capabilities: ['notify.receive', 'notify.ack', 'call.receive'],
+      quietHours: { start: 1, end: 7 },
+    });
+    const made = hub.roles().find((r) => r.name === 'night-oncall');
+    assert.deepEqual(made.channels, ['db.*', 'payments', '!db.debug']);
+    assert.equal(made.minSeverity, 'error');
+    assert.deepEqual(made.capabilities, ['notify.receive', 'notify.ack', 'call.receive']);
+    assert.deepEqual(made.quietHours, { start: 1, end: 7 });
+
+    // And a `minSeverity` that is not one settles on `info` rather than below
+    // `debug`, which is the narrower of the two and what the wire has always done.
+    hub.upsertRole({ name: 'typo-sev', channels: ['*'], minSeverity: 'criticial' });
+    assert.equal(hub.roles().find((r) => r.name === 'typo-sev').minSeverity, 'info');
+  } finally {
+    await hub.stop();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('reading history does not hand a device the channels its role excludes', async () => {
   // `history` was gated on `notify.receive` and then returned the store
   // verbatim, so every receiving device could read every alert the hub had
@@ -289,4 +348,51 @@ test('a role that never rings cannot answer or decline a live call', async () =>
 
   assert.equal(outcome.outcome, 'answered');
   assert.equal(outcome.deviceName, 'real-phone', 'the viewer never became part of the call');
+});
+
+test('a receiving-only role cannot enumerate the hub', async () => {
+  // `notify.receive` is the capability the RBAC module singles out as freely
+  // grantable, because it "only decides whether a device is on the receiving end of
+  // something". Three list operations were gated on it, so a stock viewer could read
+  // every role with its channels and capabilities, every escalation policy - which
+  // carries device ids - and the complete inventory of monitored jobs with their
+  // descriptions.
+  const { client } = await joinAs('viewer', 'nosy-viewer');
+
+  for (const op of ['roles.list', 'policies.list', 'heartbeats.list']) {
+    await assert.rejects(() => client.admin(op), /forbidden/, `${op} is refused`);
+  }
+
+  // And it can still do what a viewer is for.
+  const history = await client.admin('history');
+  assert.ok(Array.isArray(history.notifications), 'reading its own feed still works');
+
+  client.disconnect();
+});
+
+test('whoever edits roles can still read them', async () => {
+  // `roles.list` is the one operation two capabilities legitimately need: a role
+  // editor has to see what it is editing, and whoever mints a pairing code has to
+  // pick the role it points at.
+  hub.upsertRole({
+    name: 'code-minter',
+    channels: ['*'],
+    minSeverity: 'info',
+    capabilities: ['notify.receive', 'devices.manage'],
+  });
+
+  for (const role of ['role-editor', 'code-minter']) {
+    if (role === 'role-editor') {
+      hub.upsertRole({
+        name: 'role-editor',
+        channels: ['*'],
+        minSeverity: 'info',
+        capabilities: ['notify.receive', 'roles.manage'],
+      });
+    }
+    const { client } = await joinAs(role, `${role}-reader`);
+    const { roles } = await client.admin('roles.list');
+    assert.ok(roles.length > 0, `${role} can read the roles`);
+    client.disconnect();
+  }
 });

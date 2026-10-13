@@ -26,11 +26,12 @@ import {
   verify,
 } from 'node:crypto';
 import { createServer } from 'node:http';
+import { connect, createServer as createTcpServer } from 'node:net';
 
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import WebSocket from 'ws';
+import WebSocket, { WebSocketServer } from 'ws';
 
 import { Notifier, Store, CallOrchestrator, createLogStream, encodePayload } from '../dist/index.js';
 import {
@@ -370,7 +371,11 @@ test('an admin op naming an Object.prototype member is refused', async () => {
   // An admin device holds every capability, so a leaked prototype member would
   // pass the check that currently saves this by accident.
   for (const op of ['constructor', '__proto__', 'toString', 'hasOwnProperty']) {
-    await assert.rejects(() => client.admin(op), /forbidden|unknown op/, `op "${op}" is refused`);
+    // `forbidden` only. With the table on a plain object, `ADMIN_CAPABILITY.constructor`
+    // returns a truthy function, the capability check passes for an admin, and the
+    // switch answers "unknown op" - so accepting that message made this guard pass
+    // with its own bug reintroduced.
+    await assert.rejects(() => client.admin(op), /forbidden/, `op "${op}" is refused`);
   }
 
   // A real op on the same connection still works, so the test is not passing
@@ -405,6 +410,7 @@ test('every workspace package declares a project reference for what it imports',
   }
 
   const missing = [];
+  let checked = 0;
   for (const [, dir] of byPackageName) {
     const base = join(REPO, 'packages', dir);
     const tsconfig = JSON.parse(stripComments(readFileSync(join(base, 'tsconfig.json'), 'utf8')));
@@ -430,11 +436,15 @@ test('every workspace package declares a project reference for what it imports',
     }
 
     for (const target of imported) {
+      checked += 1;
       if (!declared.has(target)) missing.push(`${dir} imports ${target} without a reference`);
     }
   }
 
   assert.deepEqual(missing, [], 'a tsc -b build cannot see an undeclared dependency');
+  // And it actually looked: a regex that stopped matching would otherwise leave
+  // this passing over nothing, which is the exact failure it exists to catch.
+  assert.ok(checked >= 3, `cross-package imports found: ${checked}`);
 });
 
 function escapeRe(value) {
@@ -493,6 +503,7 @@ test('set-version stamps one version across the packages and their links', async
     copied.setVersion('9.9.9-test');
 
     const names = new Set();
+    let pinned = 0;
     for (const pkg of PACKAGES) {
       const json = JSON.parse(readFileSync(join(dir, 'packages', pkg, 'package.json'), 'utf8'));
       names.add(json.name);
@@ -504,12 +515,15 @@ test('set-version stamps one version across the packages and their links', async
       for (const field of ['dependencies', 'devDependencies', 'peerDependencies']) {
         for (const [name, range] of Object.entries(json[field] ?? {})) {
           if (!names.has(name)) continue;
+          pinned += 1;
           // A workspace sibling must be pinned to exactly what is being
           // published alongside it, never a range or a stale literal.
           assert.equal(range, '9.9.9-test', `${pkg} -> ${name} must be pinned`);
         }
       }
     }
+    // A loop over no siblings would have passed just as well.
+    assert.ok(pinned >= 3, `sibling dependencies checked: ${pinned}`);
   } finally {
     process.chdir(cwd);
     rmSync(dir, { recursive: true, force: true });
@@ -640,6 +654,10 @@ test('a hub reaches a disconnected browser, and the push service cannot read it'
   const dir = tmp('webpush');
   const sent = [];
   const realFetch = globalThis.fetch;
+  // Restored by the `finally` further down. Everything between the stub and that
+  // `try` used to be unprotected, and a throw there left every later test in this
+  // file with a `fetch` that answers 201 with no body - which breaks the `/health`
+  // and `/metrics` tests in a way that points nowhere near the cause.
   globalThis.fetch = async (url, init) => {
     sent.push({ url: String(url), init });
     return new Response(null, { status: 201 });
@@ -902,6 +920,31 @@ test('a run: block never carries an expression GitHub will choke on', () => {
     const broken = spawnSync(process.execPath, [check, fixture], { encoding: 'utf8' });
     assert.equal(broken.status, 1, 'an empty expression in a run: block must fail');
     assert.match(broken.stderr, /empty expression/);
+
+    // An expression containing a brace was skipped entirely: the pattern matched
+    // "anything but a brace" between the delimiters, and `format('{0}', ...)` is
+    // the idiomatic way to write one - so the single shape this check most needs
+    // to catch walked straight past it.
+    const braced = join(dir, 'braced.yml');
+    writeFileSync(
+      braced,
+      [
+        'name: Braced',
+        'on: push',
+        'permissions:',
+        '  contents: read',
+        'jobs:',
+        '  a:',
+        '    runs-on: ubuntu-latest',
+        '    steps:',
+        '      - run: |',
+        "          echo \"${{ format('{0}', github.event.pull_request.title) }}\"",
+        '',
+      ].join('\n'),
+    );
+    const wrapped = spawnSync(process.execPath, [check, braced], { encoding: 'utf8' });
+    assert.equal(wrapped.status, 1, 'untrusted text wrapped in format() must fail');
+    assert.match(wrapped.stderr, /github\.event\./);
 
     // And the workflows this repository actually ships must stay loadable.
     // Running the checker over them here is what turns "GitHub rejected the
@@ -1718,13 +1761,20 @@ test('channel matching agrees with a reference implementation', async () => {
   const { channelMatches } = await import('@osqd/notifyjs-protocol');
 
   const alphabet = ['a', 'b', '.', '*'];
+  // Seeded, so a mismatch can be reproduced. Unseeded `Math.random` meant a
+  // failure printed a case nobody could get back to.
+  let seed = 0x2f6e2b1;
+  const random = () => {
+    seed = (seed * 1103515245 + 12345) & 0x7fffffff;
+    return seed / 0x7fffffff;
+  };
   const pick = (n) =>
-    Array.from({ length: n }, () => alphabet[Math.floor(Math.random() * alphabet.length)]).join('');
+    Array.from({ length: n }, () => alphabet[Math.floor(random() * alphabet.length)]).join('');
 
   const mismatches = [];
   for (let i = 0; i < 20_000; i++) {
-    const pattern = pick(Math.floor(Math.random() * 7));
-    const value = pick(Math.floor(Math.random() * 7)).replace(/\*/g, 'c');
+    const pattern = pick(Math.floor(random() * 7));
+    const value = pick(Math.floor(random() * 7)).replace(/\*/g, 'c');
     if (channelMatches([pattern], value) !== referenceGlob(pattern, value)) {
       mismatches.push({ pattern, value });
       if (mismatches.length > 4) break;
@@ -1786,10 +1836,22 @@ test('quiet hours wrap past midnight', async () => {
 
 /** A socket speaking the wire protocol by hand, for things a client will not do. */
 function rawSocket(hub) {
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
     const ws = new WebSocket(hub.url.replace('localhost', '127.0.0.1'));
     const queue = [];
     let waiting;
+
+    // A refused connection is what a connection-limit or allow-list regression
+    // produces, and this used to wait for an `open` that was never coming - so
+    // the test hung at an `await` before reaching a single assertion, with no
+    // output at all. It has to fail instead.
+    const deadline = setTimeout(() => reject(new Error('the hub never accepted the socket')), 5000);
+    deadline.unref?.();
+    ws.on('error', (err) => {
+      clearTimeout(deadline);
+      reject(err);
+    });
+
     ws.on('message', (m) => {
       const frame = JSON.parse(m.toString());
       if (waiting) {
@@ -1797,14 +1859,26 @@ function rawSocket(hub) {
         waiting = undefined;
       } else queue.push(frame);
     });
-    ws.on('open', () =>
+    ws.on('open', () => {
+      clearTimeout(deadline);
       resolve({
         ws,
         send: (o) => ws.send(JSON.stringify(o)),
+        // Bounded for the same reason: a frame that never arrives is a failure,
+        // not a reason to sit there.
         next: () =>
-          queue.length ? Promise.resolve(queue.shift()) : new Promise((r) => (waiting = r)),
-      }),
-    );
+          queue.length
+            ? Promise.resolve(queue.shift())
+            : new Promise((r, rejectNext) => {
+                const timer = setTimeout(() => rejectNext(new Error('no frame arrived')), 5000);
+                timer.unref?.();
+                waiting = (frame) => {
+                  clearTimeout(timer);
+                  r(frame);
+                };
+              }),
+      });
+    });
   });
 }
 
@@ -1826,9 +1900,10 @@ function hostileHub(dir, extra = {}) {
   });
 }
 
-async function pairRaw(hub, role, label) {
+async function pairRaw(hub, role, label, existingCode) {
   const { canonical, SIG_PAIR, normalizePairingCode } = await import('@osqd/notifyjs-protocol');
-  const code = normalizePairingCode(hub.createPairingCode({ role }).code);
+  // A caller that minted its own code - to restrict it, say - passes it in.
+  const code = normalizePairingCode(existingCode ?? hub.createPairingCode({ role }).code);
   const keys = await nodeCrypto.generateKeyPair();
   const c = await rawSocket(hub);
   const hello = await c.next();
@@ -2007,6 +2082,9 @@ test('a forged X-Forwarded-For is not an identity while trustProxy is off', asyn
 
   const ips = new Set(hub.auditLog(30).map((e) => e.ip).filter(Boolean));
   assert.ok(!ips.has('10.9.9.9'), `the header was believed: ${[...ips].join(',')}`);
+  // The positive control: an audit line that stopped carrying an address at all
+  // would have satisfied the assertion above over an empty set.
+  assert.ok(ips.has('127.0.0.1'), `the real address was recorded: ${[...ips].join(',')}`);
 
   ws.close();
   await hub.stop();
@@ -2030,5 +2108,1716 @@ test('demoting a device takes effect without waiting for it to reconnect', async
 
   device.ws.close();
   await hub.stop();
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test('a handshake ws abandons gives its connection slot back', async () => {
+  // The upgrade charges a slot before `ws` is handed the socket, and `ws`
+  // never calls back for a handshake it abandons - no `Sec-WebSocket-Key`, a
+  // version it does not speak. Nothing else released the slot, and since the
+  // sweeper keeps any address whose count is not zero, a burst of malformed
+  // upgrades answered every honest device with 429 for the life of the hub.
+  const dir = tmp('upgrade-slot');
+  const hub = new Notifier({
+    port: 0,
+    storeDir: dir,
+    dashboard: false,
+    logger: false,
+    security: { maxUnauthenticated: 4, maxConnectionsPerIp: 3 },
+  });
+  await hub.start();
+  const port = Number(new URL(hub.url).port);
+
+  const abandoned = () =>
+    new Promise((resolve) => {
+      const socket = connect(port, '127.0.0.1', () => {
+        socket.write(
+          'GET / HTTP/1.1\r\n' +
+            'Host: 127.0.0.1\r\n' +
+            'Connection: Upgrade\r\n' +
+            'Upgrade: websocket\r\n' +
+            'Sec-WebSocket-Version: 13\r\n\r\n',
+        );
+      });
+      socket.on('data', () => socket.destroy());
+      socket.on('close', resolve);
+      socket.on('error', resolve);
+    });
+
+  for (let i = 0; i < 8; i += 1) await abandoned();
+
+  const ws = new WebSocket(hub.url.replace('localhost', '127.0.0.1'));
+  const admitted = await new Promise((resolve) => {
+    ws.on('open', () => resolve(true));
+    ws.on('error', () => resolve(false));
+  });
+  assert.ok(admitted, 'an honest device still gets in after eight abandoned handshakes');
+
+  ws.close();
+  await hub.stop();
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test('one good handshake does not lift a running ban', async () => {
+  // `succeed()` preserved the ban's level so the next one would be longer, but
+  // wrote `until: 0` - which is the ban itself. Any device the attacker
+  // already held, or anybody honest behind the same NAT, bought them another
+  // `maxFailuresBeforeBan` guesses, round after round.
+  const { Guard } = await import('../dist/index.js');
+
+  let record;
+  const store = {
+    ban: () => record,
+    putBan: (b) => {
+      record = b;
+    },
+    clearBan: () => {
+      record = undefined;
+    },
+    bans: () => (record ? [record] : []),
+  };
+  const guard = new Guard(
+    {
+      maxConnectionsPerIp: 10,
+      connectionBurst: 10,
+      connectionRefillPerSec: 1,
+      maxUnauthenticated: 50,
+      maxFailuresBeforeBan: 3,
+      failureWindowMs: 60_000,
+      banBaseMs: 60_000,
+      banMaxMs: 3_600_000,
+    },
+    store,
+  );
+
+  for (let i = 0; i < 3; i += 1) guard.fail('198.51.100.7');
+  assert.ok(guard.bannedFor('198.51.100.7') > 0, 'three failures ban the address');
+
+  guard.succeed('198.51.100.7');
+
+  assert.ok(guard.bannedFor('198.51.100.7') > 0, 'and a later success leaves it banned');
+  assert.equal(guard.admit('198.51.100.7').ok, false, 'so new connections are still refused');
+  assert.equal(record.failures, 0, 'while the failure counter still resets');
+
+  guard.stop();
+});
+
+test('a client whose signing fails reports it instead of killing the process', async () => {
+  // `receive()` was called with `void`, and it awaits the host application's
+  // crypto and storage. A credential truncated by a half-written file threw
+  // inside the handshake, where the rejection had nowhere to go: the CLI
+  // daemon and the desktop main process both die on an unhandled rejection,
+  // and with a handler installed the client just sat in `connecting` for ever.
+  const { NotifyClient, memoryStorage } = await import('@osqd/notifyjs-protocol');
+  const dir = tmp('sign-fails');
+  const hub = hostileHub(dir);
+  await hub.start();
+
+  const errors = [];
+  const statuses = [];
+  const client = new NotifyClient({
+    url: `ws://127.0.0.1:${Number(new URL(hub.url).port)}`,
+    crypto: {
+      ...nodeCrypto,
+      sign: async () => {
+        throw new Error('Ed25519 seed must be 32 bytes');
+      },
+    },
+    storage: memoryStorage(),
+    createSocket: (url) => new WebSocket(url),
+    deviceName: 'broken-keys',
+    platform: 'node-test',
+    connectTimeoutMs: 200,
+  });
+  client.on('error', (e) => errors.push(e));
+  client.on('status', (v) => statuses.push(v));
+
+  await client.pair(hub.createPairingCode({ role: 'viewer' }).code);
+  await delay(700);
+
+  assert.ok(
+    errors.some((e) => e.code === 'client_error'),
+    'the app is told the client cannot sign',
+  );
+  // The failure itself no longer latches the status: an incidental one on a
+  // working socket must not mark the source dead. What ends the wait is the
+  // handshake deadline, which drops a socket that never got anywhere - here with
+  // no reconnect, since this client did not ask for one.
+  assert.ok(
+    statuses.includes('idle'),
+    `the client stops claiming to be connecting: ${statuses.join(',')}`,
+  );
+  assert.ok(!statuses.includes('ready'), 'and never claims to be ready');
+
+  client.disconnect();
+  await hub.stop();
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test('a source that cannot be dialled leaves the rest of the list usable', async () => {
+  // `load()` memoized the rejected promise, and `add`, `remove` and
+  // `setEnabled` all begin by awaiting it - so one stored source whose URL the
+  // platform refuses (mixed content in a browser, a malformed URL on a phone)
+  // left the user unable to add a hub or remove the broken one, for good.
+  const { SourceManager, memoryStorage } = await import('@osqd/notifyjs-protocol');
+  const storage = memoryStorage();
+  await storage.set(
+    'notifyjs.sources',
+    JSON.stringify([
+      { id: 'broken', url: 'ws://192.0.2.1:7741', label: 'Broken', enabled: true, addedAt: 1 },
+      { id: 'quiet', url: 'ws://192.0.2.2:7741', label: 'Quiet', enabled: false, addedAt: 2 },
+    ]),
+  );
+
+  const manager = new SourceManager({
+    storage,
+    crypto: nodeCrypto,
+    createSocket: (url) => {
+      if (url.includes('192.0.2.1')) throw new Error('SecurityError: mixed content');
+      return new WebSocket(url);
+    },
+    platform: 'node-test',
+    deviceName: () => 'my-phone',
+    minSeverity: () => 'info',
+  });
+
+  await manager.load();
+  assert.equal(manager.list().length, 2, 'both sources are still listed');
+  assert.equal(
+    manager.list().find((s) => s.id === 'broken').status,
+    'error',
+    'the one that could not be dialled says so',
+  );
+
+  await manager.remove('broken');
+  assert.deepEqual(
+    manager.list().map((s) => s.id),
+    ['quiet'],
+    'and it can be removed rather than being stuck there',
+  );
+
+  manager.disconnectAll();
+});
+
+test('a restarted hub no longer counts the sockets it was holding', async () => {
+  // `stop()` emptied the session map before each socket's close event arrived,
+  // so `closeSession` returned at its `delete` guard without releasing the
+  // connection slot. The guard outlives `stop()`, so a hub cycled with devices
+  // connected came back refusing the very devices it had been holding.
+  const dir = tmp('restart-slots');
+  const hub = new Notifier({
+    port: 0,
+    storeDir: dir,
+    dashboard: false,
+    logger: false,
+    security: { maxConnectionsPerIp: 2 },
+  });
+  await hub.start();
+
+  const dial = (port) =>
+    new Promise((resolve, reject) => {
+      const ws = new WebSocket(`ws://127.0.0.1:${port}`);
+      ws.on('open', () => resolve(ws));
+      ws.on('error', reject);
+    });
+
+  const first = await dial(Number(new URL(hub.url).port));
+  const second = await dial(Number(new URL(hub.url).port));
+
+  await hub.stop();
+  await hub.start();
+
+  const again = await dial(Number(new URL(hub.url).port)).catch(() => undefined);
+  assert.ok(again, 'the slots those two sockets held were given back');
+
+  first.close();
+  second.close();
+  again.close();
+  await hub.stop();
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test('a heartbeat asked for over the wire cannot page on every tick', async () => {
+  // `heartbeat.expect` was the one wire-reachable path with no ceiling, and it
+  // needs only `notify.send`. `{ every: 1, repeat: true }` was accepted as
+  // written: overdue on every sweep, re-armed each time, raising a critical
+  // alert that flood control never collapses - and stored, so it outlived both
+  // a restart and the device that set it.
+  const dir = tmp('heartbeat-floor');
+  const hub = hostileHub(dir, { heartbeatTickMs: 500 });
+  await hub.start();
+  const device = await pairRaw(hub, 'admin', 'setter');
+
+  const result = await device.ask('heartbeat.expect', {
+    name: 'evil',
+    every: 1,
+    repeat: 'yes',
+    severity: 'not-a-severity',
+  });
+  assert.equal(result.ok, true, 'the beat is still accepted');
+  assert.equal(
+    result.data.heartbeat.every,
+    500,
+    'with an interval the sweep can actually satisfy',
+  );
+  assert.equal(result.data.heartbeat.repeat, false, 'and `repeat` only honours a real boolean');
+  assert.equal(result.data.heartbeat.severity, 'critical', 'and an unknown severity falls back');
+
+  // A cadence somebody may genuinely want is left exactly as asked for, and the
+  // hub's own programmatic API is not bounded at all.
+  const asked = await device.ask('heartbeat.expect', { name: 'honest', every: 900 });
+  assert.equal(asked.data.heartbeat.every, 900);
+  assert.equal(hub.expect('mine', { every: 80 }).every, 80);
+
+  device.ws.close();
+  await hub.stop();
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test('an option left unset keeps its default rather than erasing it', async () => {
+  // `{ ...defaults, ...caller }` copies an explicit `undefined` over the value
+  // beneath it, which is what an application wiring options from its own
+  // config produces for a key that is not set. The watchdog spec was then sent
+  // to every paired device with no numbers in it.
+  const dir = tmp('undefined-option');
+  const hub = hostileHub(dir, {
+    deviceWatchdog: { enabled: true, intervalMs: undefined, graceMs: undefined },
+  });
+  await hub.start();
+  const device = await pairRaw(hub, 'oncall', 'watching');
+
+  let spec;
+  for (let i = 0; i < 8 && !spec; i += 1) {
+    const frame = await Promise.race([device.next(), delay(500).then(() => undefined)]);
+    if (!frame) break;
+    if (frame.t === 'watchdog') spec = frame;
+  }
+  assert.ok(spec, 'the device is told what to watch for');
+  assert.equal(spec.intervalMs, 30_000, 'with the default interval, not undefined');
+  assert.equal(spec.graceMs, 30_000, 'and the default grace');
+
+  device.ws.close();
+  await hub.stop();
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test('a watchdog spec with no numbers in it is ignored, not armed', async () => {
+  // `intervalMs + graceMs` of `undefined` is NaN, which `setTimeout` clamps to
+  // 1ms: the alarm fired a millisecond after connecting and, when `isOnline()`
+  // said the device had no connectivity, re-armed itself at the same 1ms - an
+  // unbounded loop of probes on a phone in a tunnel, persisted to storage so it
+  // outlived a restart.
+  const { NotifyClient, memoryStorage } = await import('@osqd/notifyjs-protocol');
+
+  let socket;
+  const client = new NotifyClient({
+    url: 'ws://127.0.0.1:1',
+    crypto: nodeCrypto,
+    storage: memoryStorage(),
+    createSocket: () => {
+      socket = {
+        onopen: null,
+        onmessage: null,
+        onclose: null,
+        onerror: null,
+        sent: [],
+        send(d) {
+          this.sent.push(d);
+        },
+        close() {},
+      };
+      return socket;
+    },
+    deviceName: 'in-a-tunnel',
+    platform: 'node-test',
+    isOnline: () => false,
+  });
+
+  await client.connect();
+  const frame = (extra) =>
+    socket.onmessage({
+      data: JSON.stringify({
+        v: 1,
+        t: 'watchdog',
+        enabled: true,
+        alert: { title: 'the hub may be down', severity: 'critical' },
+        ...extra,
+      }),
+    });
+
+  frame({});
+  await delay(50);
+  assert.equal(client.watchdog, undefined, 'a spec with no numbers is refused');
+
+  frame({ intervalMs: 'soon', graceMs: 0 });
+  await delay(50);
+  assert.equal(client.watchdog, undefined, 'and so is one whose interval is not a number');
+
+  frame({ intervalMs: -1, graceMs: 0 });
+  await delay(50);
+  assert.equal(client.watchdog, undefined, 'and so is a negative one');
+
+  // A short interval is the hub's business rather than nonsense, so it stands.
+  frame({ intervalMs: 200, graceMs: 100 });
+  await delay(50);
+  assert.equal(client.watchdog?.intervalMs, 200, 'a fast hub is still watched');
+
+  frame({ intervalMs: 30_000, graceMs: 30_000 });
+  await delay(50);
+  assert.equal(client.watchdog?.intervalMs, 30_000, 'while a usable one is armed');
+
+  client.disconnect();
+});
+
+test('disconnecting detaches the socket it drops', async () => {
+  // `close()` only begins the closing handshake, so frames already queued on
+  // the host's event loop still arrived at the handlers of a socket the client
+  // had let go: a source the user had just muted could ring once more, and a
+  // `hello` signed after a later `connect()` went down the new socket, where
+  // `auth_failed` latches `rejected` and stops every reconnect.
+  const { NotifyClient, memoryStorage } = await import('@osqd/notifyjs-protocol');
+
+  let socket;
+  const client = new NotifyClient({
+    url: 'ws://127.0.0.1:1',
+    crypto: nodeCrypto,
+    storage: memoryStorage(),
+    createSocket: () => {
+      socket = {
+        onopen: null,
+        onmessage: null,
+        onclose: null,
+        onerror: null,
+        send() {},
+        close() {},
+      };
+      return socket;
+    },
+    deviceName: 'muted',
+    platform: 'node-test',
+  });
+
+  await client.connect();
+  assert.equal(typeof socket.onmessage, 'function', 'attached while connected');
+
+  client.disconnect();
+  assert.equal(socket.onmessage, null, 'and detached the moment it is dropped');
+  assert.equal(socket.onclose, null);
+});
+
+test('a call naming a policy that does not exist is refused, not reported placed', async () => {
+  // Both `notify.send` and `call.place` started the work, discarded the
+  // rejection and replied `ok`. `call()` raises for a policy it cannot find, so
+  // `notifyjs call --policy nigt-shift` printed "call placed" and rang nobody at
+  // all - the failure mode a pager can least afford.
+  const dir = tmp('bad-policy');
+  const hub = hostileHub(dir);
+  await hub.start();
+  const device = await pairRaw(hub, 'admin', 'caller');
+
+  const bad = await device.ask('call.place', { message: 'the disk is full', policy: 'nigt-shift' });
+  assert.equal(bad.ok, false, 'the caller is told');
+  assert.match(bad.error, /unknown escalation policy/);
+
+  hub.upsertPolicy({ name: 'night-shift', steps: [{ ringSeconds: 5 }] });
+  const good = await device.ask('call.place', { message: 'the disk is full', policy: 'night-shift' });
+  assert.equal(good.ok, true, 'a policy that exists still places the call');
+
+  const sent = await device.ask('notify.send', { title: 'and an ordinary alert' });
+  assert.equal(sent.ok, true);
+
+  device.ws.close();
+  await hub.stop();
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test('an IP allow list accepts the CIDR range it looks like it accepts', async () => {
+  // Both lists were sets of exact strings and nothing said so, so
+  // `allowIps: ['127.0.0.0/8']` - the obvious way to write "only my LAN" -
+  // matched no real address: the hub looked locked to a subnet and was locked to
+  // nobody, refusing every device it had. The same entry in `denyIps` refused
+  // nobody at all.
+  const dir = tmp('allow-cidr');
+  const dialled = (hub) =>
+    new Promise((resolve) => {
+      const ws = new WebSocket(hub.url.replace('localhost', '127.0.0.1'));
+      ws.on('open', () => {
+        ws.close();
+        resolve(true);
+      });
+      ws.on('error', () => resolve(false));
+    });
+
+  const allowing = new Notifier({
+    port: 0,
+    storeDir: join(dir, 'allow'),
+    dashboard: false,
+    logger: false,
+    security: { allowIps: ['127.0.0.0/8'] },
+  });
+  await allowing.start();
+  assert.equal(await dialled(allowing), true, 'an address inside the range gets in');
+  await allowing.stop();
+
+  const denying = new Notifier({
+    port: 0,
+    storeDir: join(dir, 'deny'),
+    dashboard: false,
+    logger: false,
+    security: { denyIps: ['127.0.0.0/8'] },
+  });
+  await denying.start();
+  assert.equal(await dialled(denying), false, 'and the same range can be refused');
+  await denying.stop();
+
+  const elsewhere = new Notifier({
+    port: 0,
+    storeDir: join(dir, 'elsewhere'),
+    dashboard: false,
+    logger: false,
+    security: { allowIps: ['10.0.0.0/24'] },
+  });
+  await elsewhere.start();
+  assert.equal(await dialled(elsewhere), false, 'a range that does not cover us still refuses');
+  await elsewhere.stop();
+
+  // Refused by name while the operator is still reading output, rather than by
+  // silently matching nothing once the hub is live.
+  for (const entry of ['10.0.0.0/', 'not-an-address', '10.0.0.0/64']) {
+    assert.throws(
+      () =>
+        new Notifier({
+          port: 0,
+          storeDir: join(dir, 'bad'),
+          dashboard: false,
+          logger: false,
+          security: { allowIps: [entry] },
+        }),
+      /not an IP address or CIDR range/,
+      `"${entry}" is refused`,
+    );
+  }
+
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test('the audit log says who rewrote a role, not just that it changed', async () => {
+  // `admin.denied` named the device that was turned away, while a change that
+  // succeeded left a line naming its target and nothing about the administrator
+  // behind it - and roles, policies and revoked pairing codes left no line at
+  // all. Rewriting a role is how somebody grants themselves the rest of the hub.
+  const dir = tmp('audit-actor');
+  const hub = hostileHub(dir);
+  await hub.start();
+  const device = await pairRaw(hub, 'admin', 'the-admin');
+
+  const upsert = await device.ask('roles.upsert', {
+    name: 'oncall',
+    channels: ['*'],
+    minSeverity: 'warning',
+    capabilities: ['notify.receive'],
+  });
+  assert.equal(upsert.ok, true, `upsert refused: ${upsert.error}`);
+
+  const applied = hub.auditLog(50).filter((e) => e.kind === 'admin.applied');
+  const line = applied.find((e) => e.detail?.op === 'roles.upsert');
+  assert.ok(line, 'the change is in the log at all');
+  assert.equal(line.deviceId, device.deviceId, 'attributed to the device that made it');
+  assert.equal(line.detail.target, 'oncall', 'and names what it changed');
+
+  // A refused one is still recorded as refused, and not as applied.
+  const viewer = await pairRaw(hub, 'viewer', 'a-viewer');
+  const denied = await viewer.ask('roles.delete', { name: 'oncall' });
+  assert.equal(denied.ok, false);
+  assert.equal(
+    hub.auditLog(50).filter((e) => e.kind === 'admin.applied' && e.detail?.op === 'roles.delete')
+      .length,
+    0,
+    'nothing claims the refused change was applied',
+  );
+
+  device.ws.close();
+  viewer.ws.close();
+  await hub.stop();
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test('a number that would switch off what it configures is refused by name', async () => {
+  // `port: 70000` validated cleanly and then failed at bind time with a
+  // `RangeError` from inside Node. The quieter ones never failed at all:
+  // `historyLimit: 0` made `readTail` hand back the whole file on load and then
+  // had the next notification splice the cache empty, so replay to a device
+  // coming back from offline delivered nothing for ever, silently.
+  const dir = tmp('bad-options');
+  const cases = [
+    [{ port: 70_000 }, /port must be between 0 and 65535/],
+    [{ historyLimit: 0 }, /historyLimit must be between 1/],
+    [{ auditLimit: -5 }, /auditLimit must be between 1/],
+    [{ heartbeatTickMs: 0 }, /heartbeatTickMs must be between 1/],
+    [{ replayLimit: -1 }, /replayLimit must be between 0/],
+    [{ defaultRingSeconds: 5_000 }, /defaultRingSeconds must be between 1 and 600/],
+  ];
+
+  for (const [extra, pattern] of cases) {
+    assert.throws(
+      () => new Notifier({ storeDir: dir, dashboard: false, logger: false, ...extra }),
+      pattern,
+      JSON.stringify(extra),
+    );
+  }
+
+  // A numeric string is what `process.env.PORT` hands you, and it worked before
+  // this validation existed, so it still does.
+  const fromEnv = new Notifier({
+    port: '0',
+    storeDir: dir,
+    dashboard: false,
+    logger: false,
+    historyLimit: '250',
+  });
+  await fromEnv.start();
+  await fromEnv.stop();
+  assert.throws(
+    () => new Notifier({ storeDir: dir, dashboard: false, logger: false, port: '' }),
+    /port must be between/,
+    'but an empty string is not a port',
+  );
+
+  // Zero replay is a real choice and still allowed - it now means none, where
+  // `slice(-0)` used to mean all of it.
+  const none = new Notifier({ port: 0, storeDir: dir, dashboard: false, logger: false, replayLimit: 0 });
+  await none.start();
+  await none.stop();
+
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test('a severity with a typo in it is not a severity', async () => {
+  // `flood: { alwaysDeliver: ['criticial'] }` is the whole setting defeated by one
+  // letter: the list is matched with `includes`, so the misspelling matched nothing
+  // and every critical waited for a summary window, while the configuration said -
+  // and the operator believed - that criticals are never held back. The same typo
+  // in `deviceWatchdog.severity` was shipped to every paired device as the severity
+  // of the alert raised when this hub goes quiet.
+  //
+  // `webPush.subject` is the third of these: this file always documented it as a
+  // mailto: or https: URI, per RFC 8292, and nothing checked. A bare address went
+  // into the signed token and Apple rejected every push, for a reason visible only
+  // in a push service's response body.
+  const dir = tmp('bad-values');
+  for (const [extra, pattern] of [
+    [{ flood: { alwaysDeliver: ['criticial'] } }, /flood\.alwaysDeliver\[0\] must be one of debug, info/],
+    [{ flood: { alwaysDeliver: 'critical' } }, /flood\.alwaysDeliver must be an array of severities/],
+    [{ deviceWatchdog: { severity: 'criticial' } }, /deviceWatchdog\.severity must be one of/],
+    [{ webPush: { subject: 'ops@example.com' } }, /webPush\.subject must be a mailto: or https: URI/],
+    [{ webPush: { subject: '' } }, /webPush\.subject must be a mailto: or https: URI/],
+  ]) {
+    assert.throws(
+      () => new Notifier({ port: 0, storeDir: dir, dashboard: false, logger: false, ...extra }),
+      pattern,
+      JSON.stringify(extra),
+    );
+  }
+
+  // Both forms the RFC allows, an emptied list, and a second severity all resolve.
+  for (const ok of [
+    { webPush: { subject: 'mailto:ops@example.com' } },
+    { webPush: { subject: 'https://ops.example.com/oncall' } },
+    { flood: { alwaysDeliver: [] } },
+    { flood: { alwaysDeliver: ['critical', 'error'] } },
+    { deviceWatchdog: { severity: 'warning' } },
+  ]) {
+    const fine = new Notifier({ port: 0, storeDir: dir, dashboard: false, logger: false, ...ok });
+    await fine.start();
+    await fine.stop();
+  }
+
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test('a number one object deep cannot switch off what it configures either', async () => {
+  // Validation stopped at the top level, so every number in `security`, `flood`,
+  // `ingest`, `webPush` and `deviceWatchdog` was taken as given.
+  // `maxMessageBytes: 0` dropped every frame the hub was sent and disconnected the
+  // sender; `maxConnectionsPerIp: 0` refused every device. Worse than any zero is
+  // what an unset environment variable produces: `Number(undefined)` is `NaN`, it
+  // compares false against everything, so the limit was not low but absent - and
+  // `livenessIntervalMs` carried it into `setInterval`, which treats `NaN` as one
+  // millisecond and pings every connected device that often.
+  const dir = tmp('bad-nested');
+  const cases = [
+    [{ security: { maxConnectionsPerIp: 0 } }, /security\.maxConnectionsPerIp must be between 1/],
+    [{ security: { maxMessageBytes: 0 } }, /security\.maxMessageBytes must be between 1/],
+    [{ security: { messageRate: { windowMs: 0 } } }, /security\.messageRate\.windowMs must be between 1/],
+    [{ security: { maxBufferedBytes: -1 } }, /security\.maxBufferedBytes must be between 1/],
+    [{ flood: { windowMs: 0 } }, /flood\.windowMs must be between 1/],
+    [{ flood: { burst: -1 } }, /flood\.burst must be between 0/],
+    [{ ingest: { maxBodyBytes: 0 } }, /ingest\.maxBodyBytes must be between 1/],
+    [{ ingest: { ratePerMinute: 0 } }, /ingest\.ratePerMinute must be between 1/],
+    [{ webPush: { ttlSeconds: Number.NaN } }, /webPush\.ttlSeconds must be between 0 and \d+, not NaN/],
+    [{ deviceWatchdog: { intervalMs: Number.NaN } }, /deviceWatchdog\.intervalMs must be between 1 and \d+, not NaN/],
+    [{ livenessIntervalMs: Number(process.env.NOT_SET_ANYWHERE) }, /livenessIntervalMs must be between 1 and \d+, not NaN/],
+  ];
+  for (const [extra, pattern] of cases) {
+    assert.throws(
+      () => new Notifier({ port: 0, storeDir: dir, dashboard: false, logger: false, ...extra }),
+      pattern,
+      JSON.stringify(extra),
+    );
+  }
+
+  // The values this repository and its documentation actually use still resolve,
+  // including the one option that is a rate and would be floored to "never" by a
+  // whole-number rule, and the zeros that mean something.
+  const fine = new Notifier({
+    port: 0,
+    storeDir: dir,
+    dashboard: false,
+    logger: false,
+    security: {
+      connectionRefillPerSec: 0.5,
+      uniformFailureMs: 0,
+      banBaseMs: 0,
+      clockSkewMs: 0,
+      messageRate: { points: 1, windowMs: 50 },
+    },
+    deviceWatchdog: { intervalMs: 40, graceMs: 0 },
+    flood: { burst: 0 },
+    webPush: { ttlSeconds: 0 },
+  });
+  await fine.start();
+  await fine.stop();
+
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test('an alert with no title is refused rather than shown blank', async () => {
+  // `title` is required by `notify`'s own type and by the HTTP endpoint, which
+  // answers 400 with this same sentence. The embedded API quietly accepted its
+  // absence: `notify({})`, or `notify({ title: someVariableNobodySet })`, published
+  // a notification with no title at all - every device buzzed and showed a blank
+  // line - and every titleless alert shared one flood key, so they coalesced with
+  // each other.
+  const dir = tmp('no-title');
+  const hub = hostileHub(dir);
+  await hub.start();
+  try {
+    for (const input of [{}, { title: '' }, { title: '   ' }, { title: null }, { body: 'only a body' }]) {
+      await assert.rejects(
+        () => hub.notify(input),
+        /notify requires a title/,
+        JSON.stringify(input),
+      );
+    }
+    // And a title is trimmed, so trailing whitespace is not a different alert.
+    assert.equal((await hub.notify({ title: '  Disk 91%  ' })).title, 'Disk 91%');
+    assert.equal((await hub.notify('just a string')).title, 'just a string');
+  } finally {
+    await hub.stop();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a severity that is not one is refused rather than quietly becoming info', async () => {
+  // The quietest failure in the library. `notify({ severity: 'criticial' })` - one
+  // letter - was coerced to `info`, which is below the floor every on-call role
+  // filters on: the alert reached nobody, and the caller was handed a
+  // `SentNotification` saying `reached: 0` in a field nothing checks. `'CRITICAL'`
+  // did the same, and that one is not even a typo.
+  const dir = tmp('bad-severity');
+  const hub = hostileHub(dir, {
+    flood: { enabled: false },
+    ingest: { enabled: true, allowInsecure: true },
+  });
+  await hub.start();
+  // Admin, because this device both receives (its floor is `debug`) and publishes.
+  const device = await pairRaw(hub, 'admin', 'phone');
+  try {
+    for (const bad of ['criticial', 'warn', 3, {}, 'sev-1']) {
+      await assert.rejects(
+        () => hub.notify({ title: 'x', severity: bad }),
+        /severity must be one of debug, info, success, warning, error, critical/,
+        JSON.stringify(bad),
+      );
+    }
+    await assert.rejects(
+      () => hub.call({ message: 'x', severity: 'criticial' }),
+      /severity must be one of/,
+    );
+
+    // Case and surrounding space are the same word, not a typo, so they are forgiven.
+    const shouted = await hub.notify({ title: 'shouted', severity: ' CRITICAL ' });
+    assert.equal(shouted.severity, 'critical');
+    assert.equal(shouted.reached, 1, 'and it actually reached the paired phone');
+
+    // An absent severity still means the documented default, which is what nearly
+    // every caller relies on.
+    assert.equal((await hub.notify({ title: 'plain' })).severity, 'info');
+    assert.equal((await hub.notify('just a string')).severity, 'info');
+
+    // Over the wire it is an error reply rather than a throw that would take the hub
+    // with it, and the session carries on afterwards.
+    const refused = await device.ask('notify.send', { title: 'wire', severity: 'criticial' });
+    assert.equal(refused.ok, false);
+    assert.match(refused.error, /severity must be one of/);
+
+    // `call.place` cannot await the ring, so it checks up front what would otherwise
+    // fail inside a rejection it discards - exactly as it already does for an unknown
+    // policy and a malformed `to`. Without this, refusing a bad severity turned a
+    // lenient call into "call placed" followed by silence.
+    const badCall = await device.ask('call.place', { message: 'db is down', severity: 'criticial' });
+    assert.equal(badCall.ok, false, 'the caller hears about it rather than being told ok');
+    assert.match(badCall.error, /severity must be one of/);
+    const fine = await device.ask('notify.send', { title: 'wire', severity: 'error' });
+    assert.equal(fine.ok, true, 'and the connection still works');
+
+    // And a token holder gets a 400 rather than a 202 for an alert nobody was paged
+    // about - the same answer, in the shape that endpoint speaks.
+    const { token } = hub.createIngestToken({ role: 'admin', label: 'ci' });
+    const res = await fetch(`http://127.0.0.1:${new URL(hub.url).port}/api/notify`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+      body: JSON.stringify({ title: 'from ci', severity: 'criticial' }),
+    });
+    assert.equal(res.status, 400);
+    assert.match((await res.json()).message, /severity must be one of/);
+  } finally {
+    // In a `finally`, because a hub left listening does not fail the test that left
+    // it - it hangs the whole file at the per-file timeout, with nothing named.
+    device.ws.close();
+    await hub.stop();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a flag set to the string 'false' does not mean true", async () => {
+  // `security: { trustProxy: process.env.TRUST_PROXY }` is how an application
+  // wires this, and with that variable set to 'false' the string is truthy: the
+  // hub read every client's address out of `X-Forwarded-For`, so both IP lists,
+  // every ban and the per-address connection limit became a header the caller
+  // wrote for themselves. The same spelling turned HTTP publishing on and the
+  // device watchdog off.
+  const dir = tmp('bad-flags');
+  const hub = hostileHub(dir, {
+    security: { uniformFailureMs: 1, maxFailuresBeforeBan: 1000, trustProxy: 'false' },
+    ingest: { enabled: 'false' },
+  });
+  await hub.start();
+
+  const ws = new WebSocket(hub.url.replace('localhost', '127.0.0.1'), {
+    headers: { 'x-forwarded-for': '10.9.9.9' },
+  });
+  await new Promise((r) => ws.on('open', r));
+  ws.send(JSON.stringify({ v: 1, t: 'pair', code: 'AAAA-AAAA-AAAA', publicKey: 'x' }));
+  await new Promise((r) => setTimeout(r, 250));
+
+  const ips = new Set(hub.auditLog(30).map((e) => e.ip).filter(Boolean));
+  assert.ok(!ips.has('10.9.9.9'), `'false' left the header believed: ${[...ips].join(',')}`);
+  assert.ok(ips.has('127.0.0.1'), `the real address was recorded: ${[...ips].join(',')}`);
+
+  // And HTTP publishing stayed off, rather than being switched on by the word for
+  // off. 404 is what a hub with `ingest` disabled answers.
+  const res = await fetch(`http://127.0.0.1:${new URL(hub.url).port}/api/notify`, {
+    method: 'POST',
+    headers: { authorization: 'Bearer nope', 'content-type': 'application/json' },
+    body: JSON.stringify({ title: 'in' }),
+  });
+  assert.equal(res.status, 404, 'ingest stayed off');
+
+  ws.close();
+  await hub.stop();
+
+  // Anything that is neither answer is refused by name rather than guessed at.
+  for (const [extra, pattern] of [
+    [{ security: { trustProxy: 'maybe' } }, /security\.trustProxy must be true or false/],
+    [{ flood: { enabled: 'sometimes' } }, /flood\.enabled must be true or false/],
+    [{ actions: { enabled: null } }, /actions\.enabled must be true or false/],
+    [{ metrics: 2 }, /metrics must be true or false/],
+  ]) {
+    assert.throws(
+      () => new Notifier({ port: 0, storeDir: dir, logger: false, ...extra }),
+      pattern,
+      JSON.stringify(extra),
+    );
+  }
+
+  // 1 and 0 worked when this was a truthiness test, so they still do, and so does
+  // the other spelling a config file produces.
+  for (const ok of [{ metrics: 1 }, { dashboard: 0 }, { metrics: 'on' }, { dashboard: 'no' }]) {
+    const fine = new Notifier({ port: 0, storeDir: dir, logger: false, ...ok });
+    await fine.start();
+    await fine.stop();
+  }
+
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test('a freshly paired device is not handed the backlog from before it existed', async () => {
+  // The hub enrols a new device at the head on purpose, and the client undid it:
+  // `ackedSeq` was 0, so the `sync()` every app sends on `ready` - and on every
+  // foreground and wake - asked for everything from the beginning. A new phone
+  // rang for incidents that were over before anybody paired it.
+  const { NotifyClient, memoryStorage } = await import('@osqd/notifyjs-protocol');
+  const dir = tmp('fresh-cursor');
+  const hub = hostileHub(dir, { flood: { enabled: false } });
+  await hub.start();
+
+  for (let i = 0; i < 5; i += 1) {
+    await hub.notify({ title: `old incident ${i}`, severity: 'critical', channel: 'ops' });
+  }
+
+  const arrived = [];
+  const client = new NotifyClient({
+    url: `ws://127.0.0.1:${Number(new URL(hub.url).port)}`,
+    crypto: nodeCrypto,
+    storage: memoryStorage(),
+    createSocket: (url) => new WebSocket(url),
+    deviceName: 'new-phone',
+    platform: 'node-test',
+  });
+  client.on('notification', (n) => arrived.push(n.title));
+
+  const ready = new Promise((resolve) => client.on('ready', resolve));
+  await client.pair(hub.createPairingCode({ role: 'oncall' }).code);
+  await ready;
+
+  // What every app does on ready, on foreground and on wake.
+  client.sync();
+  await delay(300);
+
+  assert.deepEqual(arrived, [], 'nothing from before the device was paired');
+
+  // An alert raised now still arrives, and is still replayed after a reconnect.
+  await hub.notify({ title: 'a real incident', severity: 'critical', channel: 'ops' });
+  await delay(200);
+  assert.deepEqual(arrived, ['a real incident']);
+
+  client.disconnect();
+  await hub.stop();
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test('giving up on a socket that never opened does not take the process down', async () => {
+  // The test below this one proves the deadline fires. It could not prove what
+  // happens when it does, because its socket is a stub whose `close()` is a no-op.
+  // A real one is not: closing a socket that has not finished connecting makes `ws`
+  // emit an `error` event, an `error` event with no listener is an uncaught
+  // exception, and the deadline detached every handler before closing - so the one
+  // path that only ever runs mid-connect ended the process every single time it did
+  // its job. Twenty seconds after pointing a phone at a hub that accepts TCP and
+  // says nothing, which is what a captive portal and a switching radio both look
+  // like, the app was gone.
+  //
+  // A real `ws` against a real silent port, in this process: if the throw comes
+  // back, it is an uncaught exception and this run fails on it.
+  const { NotifyClient, memoryStorage } = await import('@osqd/notifyjs-protocol');
+
+  // Accepts the connection and never speaks, so the handshake never completes and
+  // the socket is still CONNECTING when the deadline fires. The accepted sockets are
+  // kept so they can be destroyed - `close()` alone waits for them.
+  const accepted = [];
+  const silent = createTcpServer((c) => accepted.push(c));
+  await new Promise((resolve) => silent.listen(0, '127.0.0.1', resolve));
+  const { port } = silent.address();
+
+  const statuses = [];
+  const client = new NotifyClient({
+    url: `ws://127.0.0.1:${port}`,
+    crypto: nodeCrypto,
+    storage: memoryStorage(),
+    createSocket: (url) => new WebSocket(url),
+    deviceName: 'never-opens',
+    platform: 'node-test',
+    connectTimeoutMs: 200,
+    autoReconnect: false,
+  });
+  client.on('status', (v) => statuses.push(v));
+  client.on('error', () => {});
+
+  await client.pair('AAAA-AAAA-AAAA').catch(() => {});
+  await delay(900);
+
+  assert.ok(statuses.includes('connecting'), `it dialled: ${statuses.join(',')}`);
+  assert.ok(
+    statuses.at(-1) === 'idle' || statuses.at(-1) === 'error',
+    `and gave up cleanly rather than crashing: ${statuses.join(',')}`,
+  );
+
+  client.disconnect();
+  for (const c of accepted) c.destroy();
+  silent.close();
+});
+
+test('a socket that never opens is given up on rather than waited on for ever', async () => {
+  // The keepalive only starts at `ready`, the watchdog only arms once a frame
+  // has arrived, and `resume()` - what a phone calls on waking - treats
+  // `connecting` as progress. A socket that neither opens nor closes nor errors,
+  // which is what a radio changing network mid-connect produces, left the client
+  // in `connecting` for ever with no timer pending anywhere.
+  const { NotifyClient, memoryStorage } = await import('@osqd/notifyjs-protocol');
+
+  const sockets = [];
+  const statuses = [];
+  const client = new NotifyClient({
+    url: 'ws://192.0.2.1:7741',
+    crypto: nodeCrypto,
+    storage: memoryStorage(),
+    // A black hole: connects to nothing and reports nothing either way.
+    createSocket: () => {
+      const socket = {
+        onopen: null,
+        onmessage: null,
+        onclose: null,
+        onerror: null,
+        send() {},
+        close() {},
+      };
+      sockets.push(socket);
+      return socket;
+    },
+    deviceName: 'mid-handover',
+    platform: 'node-test',
+    connectTimeoutMs: 120,
+    // Not the default, and deliberately so: the deadline honours it exactly as
+    // `onclose` does, so a CLI client - which passes false - gives up instead.
+    autoReconnect: true,
+  });
+  client.on('status', (v) => statuses.push(v));
+
+  await client.connect();
+  assert.equal(sockets.length, 1, 'one socket is dialled');
+
+  // Long enough for the deadline and the first backoff, which is jittered
+  // between half a second and a second.
+  await delay(1600);
+  assert.ok(statuses.includes('reconnecting'), 'the client notices and retries');
+  assert.ok(sockets.length > 1, `and dials again, sockets: ${sockets.length}`);
+
+  client.disconnect();
+});
+
+test('a ring time off the wire cannot collapse the whole ladder', async () => {
+  // `ringSeconds` went from the frame into `setTimeout(ringSeconds * 1000)` for
+  // every rung, unclamped: `"soon"` is NaN, which fires at 1ms, so the phone got
+  // a call frame followed at once by `call.cancel: missed`, nothing rang, and
+  // the caller was told the page was missed. `1e12` reads like "ring for a long
+  // time" and overflowed into the same instant collapse.
+  const dir = tmp('ring-clamp');
+  const hub = hostileHub(dir);
+  await hub.start();
+  // Two devices: `ask()` consumes frames until the admin result, so the call
+  // frame has to arrive somewhere else to be looked at.
+  const caller = await pairRaw(hub, 'admin', 'caller');
+  const phone = await pairRaw(hub, 'oncall', 'phone');
+
+  for (const asked of ['soon', -5, 1e12, 0]) {
+    const placed = await caller.ask('call.place', {
+      message: 'the disk is full',
+      ringSeconds: asked,
+    });
+    assert.equal(placed.ok, true, `ringSeconds: ${asked}`);
+
+    let frame;
+    for (let i = 0; i < 8 && !frame; i += 1) {
+      const next = await Promise.race([phone.next(), delay(500).then(() => undefined)]);
+      if (!next) break;
+      if (next.t === 'call') frame = next;
+    }
+    assert.ok(frame, `a call still rings for ringSeconds: ${asked}`);
+    assert.ok(
+      frame.c.ringSeconds >= 1 && frame.c.ringSeconds <= 600,
+      `and for a usable length, got ${frame.c.ringSeconds}`,
+    );
+    hub.cancelCall(frame.c.id);
+  }
+
+  caller.ws.close();
+  phone.ws.close();
+  await hub.stop();
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test('a store that lost its counter to a crash does not hand a number out twice', async () => {
+  // `flush()` drains `history.jsonl` before writing `store.json`, so a crash
+  // between the two leaves an alert on disk whose `seq` the counter forgot.
+  // Reusing it is worse than skipping it: a device whose cursor already passed
+  // that number never receives the second alert, because `since()` compares
+  // strictly, and no reconnect will ever deliver it.
+  const dir = tmp('seq-torn');
+  writeFileSync(
+    join(dir, 'store.json'),
+    JSON.stringify({ serverId: 'srv', seq: 4, devices: {}, roles: {}, codes: {}, bans: {} }),
+  );
+  writeFileSync(
+    join(dir, 'history.jsonl'),
+    `${JSON.stringify({ id: 'n1', seq: 5, ts: Date.now(), channel: 'ops', severity: 'error', title: 'landed before the crash' })}\n`,
+  );
+
+  const store = new Store(dir, { history: 50, audit: 50 }, () => 'unused');
+  assert.equal(store.nextSeq(), 6, 'the counter carries on past what is on disk');
+  store.close();
+
+  // And a line holding a number nothing could have issued is ignored, rather
+  // than pushing the counter somewhere it can never return from.
+  const tampered = tmp('seq-absurd');
+  writeFileSync(
+    join(tampered, 'store.json'),
+    JSON.stringify({ serverId: 'srv', seq: 4, devices: {}, roles: {}, codes: {}, bans: {} }),
+  );
+  writeFileSync(
+    join(tampered, 'history.jsonl'),
+    `${JSON.stringify({ id: 'n2', seq: 1e30, ts: Date.now(), channel: 'ops', severity: 'error', title: 'nonsense' })}\n`,
+  );
+  const guarded = new Store(tampered, { history: 50, audit: 50 }, () => 'unused');
+  assert.equal(guarded.nextSeq(), 5, 'an impossible sequence number is not adopted');
+  guarded.close();
+  rmSync(tampered, { recursive: true, force: true });
+
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test('a hub that recovered from a corrupt store keeps the identity it chose', async () => {
+  // `load()` sets the corrupt file aside and returns a brand new document, but
+  // the file had existed - so nothing was marked dirty and the new serverId was
+  // never written. The restart the log line invites produced a third identity,
+  // invalidating every device that had just re-paired.
+  const dir = tmp('recovered-id');
+  writeFileSync(join(dir, 'store.json'), '{ this is not json');
+
+  let n = 0;
+  const first = new Store(dir, { history: 10, audit: 10 }, () => `server-${++n}`);
+  const chosen = first.serverId;
+  assert.ok(first.recoveredFrom, 'the corrupt file was set aside');
+  first.close();
+
+  const second = new Store(dir, { history: 10, audit: 10 }, () => `server-${++n}`);
+  assert.equal(second.serverId, chosen, 'the identity survives the restart');
+  assert.equal(second.recoveredFrom, undefined, 'and there is nothing left to recover from');
+  second.close();
+
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test('an allow list that is present but empty still refuses everybody', async () => {
+  // Absent and empty are different answers. An operator building the list from
+  // configuration gets `[]` when the source is empty, and reading that as "no
+  // rule" turns a hub that refuses everyone - loudly, and visibly - into one
+  // that has an allow list and enforces nothing.
+  const { Guard } = await import('../dist/index.js');
+  const store = { ban: () => undefined, putBan() {}, clearBan() {}, bans: () => [] };
+  const base = {
+    maxConnectionsPerIp: 5,
+    connectionBurst: 5,
+    connectionRefillPerSec: 1,
+    maxUnauthenticated: 10,
+  };
+
+  const empty = new Guard({ ...base, allowIps: [] }, store);
+  assert.equal(empty.refused('1.2.3.4'), true, 'an empty allow list admits nobody');
+  empty.stop();
+
+  const absent = new Guard(base, store);
+  assert.equal(absent.refused('1.2.3.4'), false, 'no allow list at all admits everybody');
+  absent.stop();
+
+  const deny = new Guard({ ...base, denyIps: [] }, store);
+  assert.equal(deny.refused('1.2.3.4'), false, 'an empty deny list refuses nobody');
+  deny.stop();
+});
+
+test('a pairing code restricted to a range can be redeemed from inside it', async () => {
+  // The hub-wide lists learned about CIDR ranges and this check did not: an
+  // exact-string `includes` meant a code restricted to `127.0.0.0/8` matched no
+  // address at all, and since the restriction refuses anything unlisted, the
+  // code was unusable by anybody.
+  const dir = tmp('code-cidr');
+  const hub = hostileHub(dir);
+  await hub.start();
+
+  const inRange = hub.createPairingCode({ role: 'viewer', allowIps: ['127.0.0.0/8'] });
+  const device = await pairRaw(hub, 'viewer', 'in-range', inRange.code);
+  assert.ok(device.deviceId, 'a device inside the range pairs');
+  device.ws.close();
+
+  // And one that cannot be satisfied is refused while the person minting it is
+  // still looking at the answer.
+  assert.throws(
+    () => hub.createPairingCode({ role: 'viewer', allowIps: ['10.0.0.0/'] }),
+    /not an IP address or CIDR range/,
+  );
+
+  await hub.stop();
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test('the handshake deadline honours autoReconnect and never replays a pairing code', async () => {
+  // The deadline checked only which socket it belonged to, so it retried in the
+  // states `onclose` deliberately does not: a client built with
+  // `autoReconnect: false` - the CLI's default - dialled an address that accepts
+  // TCP and never speaks for ever, and a pairing attempt was replayed with a code
+  // the timed-out attempt may already have consumed, which earns a `pair_failed`
+  // and latches `rejected`.
+  const { NotifyClient, memoryStorage } = await import('@osqd/notifyjs-protocol');
+
+  const blackHole = (sockets) => () => {
+    const socket = {
+      onopen: null,
+      onmessage: null,
+      onclose: null,
+      onerror: null,
+      sent: [],
+      send(d) {
+        this.sent.push(d);
+      },
+      close() {},
+    };
+    sockets.push(socket);
+    return socket;
+  };
+
+  const quiet = [];
+  const giveUp = new NotifyClient({
+    url: 'ws://192.0.2.1:7741',
+    crypto: nodeCrypto,
+    storage: memoryStorage(),
+    createSocket: blackHole(quiet),
+    deviceName: 'one-shot',
+    platform: 'node-test',
+    connectTimeoutMs: 100,
+  });
+  await giveUp.connect();
+  await delay(600);
+  assert.equal(quiet.length, 1, 'autoReconnect: false dials once and stops');
+
+  // A hub that says hello, takes the pairing frame and then goes quiet - the
+  // case where the code may already have been spent.
+  const pairing = [];
+  const errors = [];
+  const pairingClient = new NotifyClient({
+    url: 'ws://192.0.2.1:7741',
+    crypto: nodeCrypto,
+    storage: memoryStorage(),
+    createSocket: blackHole(pairing),
+    deviceName: 'pairing',
+    platform: 'node-test',
+    connectTimeoutMs: 250,
+    autoReconnect: true,
+  });
+  pairingClient.on('error', (e) => errors.push(e));
+
+  await pairingClient.pair('ABCD-EFGH-JKMN');
+  pairing[0].onmessage({
+    data: JSON.stringify({
+      v: 1,
+      t: 'hello',
+      serverId: 'srv',
+      nonce: 'nonce-1',
+      name: 'quiet hub',
+      serverTime: Date.now(),
+    }),
+  });
+  await delay(150);
+  assert.ok(
+    pairing[0].sent.some((f) => JSON.parse(f).t === 'pair'),
+    'the code went out once',
+  );
+
+  await delay(600);
+  assert.equal(pairing.length, 1, 'and is not replayed on a second socket');
+  assert.ok(
+    errors.some((e) => e.code === 'pair_timeout'),
+    `the UI is told to ask for a fresh one: ${errors.map((e) => e.code).join(',')}`,
+  );
+
+  giveUp.disconnect();
+  pairingClient.disconnect();
+});
+
+test('a heartbeat longer than the ceiling is refused, not quietly halved', async () => {
+  // Arming 30 days for a task that checks in quarterly manufactures exactly what
+  // this module exists to avoid: a critical page, repeated every tick, for a job
+  // that is not late - and the CLI printed the interval that was asked for, so
+  // nobody would have known.
+  const dir = tmp('heartbeat-ceiling');
+  const hub = hostileHub(dir);
+  await hub.start();
+  const device = await pairRaw(hub, 'admin', 'setter');
+
+  const tooLong = await device.ask('heartbeat.expect', { name: 'quarterly', every: '90d' });
+  assert.equal(tooLong.ok, false, 'refused');
+  assert.match(tooLong.error, /30d or less/);
+
+  const fine = await device.ask('heartbeat.expect', { name: 'nightly', every: '24h' });
+  assert.equal(fine.ok, true, 'and an ordinary interval still works');
+  assert.equal(fine.data.heartbeat.every, 24 * 60 * 60_000);
+
+  device.ws.close();
+  await hub.stop();
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test('a graceful shutdown does not report every device as going offline', async () => {
+  // `stop()` releases each session's connection slot through `closeSession`,
+  // which also emits `device:offline` when a device's last session goes. A deploy
+  // is not a device going offline, and an application that pages on that event
+  // would have been paged once per device every time the hub restarted.
+  const dir = tmp('quiet-shutdown');
+  const hub = hostileHub(dir);
+  await hub.start();
+  const device = await pairRaw(hub, 'oncall', 'phone');
+
+  const offline = [];
+  hub.on('device:offline', (d) => offline.push(d.name));
+  await hub.stop();
+  await delay(200);
+
+  assert.deepEqual(offline, [], 'nothing was reported as going offline');
+
+  device.ws.close();
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test('a restore will not land on logs that are still there', async () => {
+  // The occupancy guard covered `store.json` alone, and `if (doc.audit)` treated
+  // an empty array as "carried" - and `exportStore` always sets both fields. So
+  // restoring into a directory whose store had been set aside as corrupt, with
+  // both logs intact and holding this month's incidents, succeeded without
+  // `--force` and emptied the audit log on the way past.
+  const { exportStore, importStore } = await import('../dist/index.js');
+
+  const source = tmp('restore-source');
+  const hub = hostileHub(source);
+  await hub.start();
+  await hub.notify({ title: 'from the backup', severity: 'error', channel: 'ops' });
+  await hub.stop();
+
+  const doc = exportStore(source, { history: true });
+  // A hub with no audit rows exports exactly this.
+  doc.audit = [];
+
+  const target = tmp('restore-target');
+  writeFileSync(join(target, 'history.jsonl'), '{"id":"live-incident","seq":9}\n');
+  writeFileSync(join(target, 'audit.jsonl'), '{"kind":"pair.created","ts":1}\n');
+
+  assert.throws(() => importStore(target, doc, {}), /already exists/, 'refused');
+  assert.equal(
+    existsSync(join(target, 'store.json')),
+    false,
+    'and refused before writing anything - a swapped serverId would invalidate every device',
+  );
+  assert.match(
+    readFileSync(join(target, 'history.jsonl'), 'utf8'),
+    /live-incident/,
+    'the history that was there is untouched',
+  );
+  assert.match(
+    readFileSync(join(target, 'audit.jsonl'), 'utf8'),
+    /pair\.created/,
+    'and so is the audit trail',
+  );
+
+  // Said out loud, it still works.
+  const forced = importStore(target, doc, { force: true });
+  assert.ok(forced.restoredHistory > 0, 'with --force the backup lands');
+  assert.equal(forced.restoredAudit, 0, 'and an empty audit list writes nothing');
+  assert.match(
+    readFileSync(join(target, 'audit.jsonl'), 'utf8'),
+    /pair\.created/,
+    'so the audit log is still not emptied',
+  );
+
+  rmSync(source, { recursive: true, force: true });
+  rmSync(target, { recursive: true, force: true });
+});
+
+test('a malformed device restriction is refused, and never poisons the store', async () => {
+  // `to` was copied from the frame and persisted before delivery, and
+  // `canDeliver` then called `.includes` on it. `{ devices: { length: 1 } }` -
+  // accepted from the lowest publishing capability there is - threw inside
+  // `deliver()` and, far worse, inside `replay()`: every client syncs on `ready`,
+  // on foregrounding and on waking, so every device was closed with an internal
+  // error and reconnected into the same failure, across restarts, while the hub
+  // went on looking healthy because new alerts still delivered.
+  const dir = tmp('poison-to');
+  const hub = hostileHub(dir);
+  await hub.start();
+  const publisher = await pairRaw(hub, 'admin', 'publisher');
+
+  const refused = await publisher.ask('notify.send', {
+    title: 'poison',
+    channel: 'ops',
+    to: { devices: { length: 1 } },
+  });
+  assert.equal(refused.ok, false, 'refused at the boundary');
+  assert.match(refused.error, /to\.devices/);
+  assert.equal(hub.history().length, 0, 'and nothing was written to the store');
+
+  // Targeting that is well formed still restricts.
+  const phone = await pairRaw(hub, 'oncall', 'phone');
+  await hub.notify({ title: 'for the phone', severity: 'critical', channel: 'ops', to: { devices: [phone.deviceId] } });
+  await delay(200);
+  assert.equal(hub.history().length, 1);
+
+  publisher.ws.close();
+  phone.ws.close();
+  await hub.stop();
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test('a poisoned alert already in the store does not disconnect every device', async () => {
+  // Defence in depth for the hub that already has one: `replay()` runs the
+  // delivery check against whatever the store holds, and a throw there closed the
+  // session with an internal error - which the client then reconnected into.
+  const dir = tmp('poison-stored');
+  writeFileSync(
+    join(dir, 'history.jsonl'),
+    `${JSON.stringify({
+      id: 'poisoned',
+      seq: 1,
+      ts: Date.now(),
+      channel: 'ops',
+      severity: 'critical',
+      title: 'already in the store',
+      to: { devices: { length: 1 } },
+    })}\n`,
+  );
+
+  const hub = hostileHub(dir);
+  await hub.start();
+  const device = await pairRaw(hub, 'oncall', 'phone');
+
+  // What every client does on ready, on foreground and on wake.
+  device.send({ v: 1, t: 'sync', since: 0 });
+  await delay(300);
+
+  const alive = await Promise.race([
+    device.ask('heartbeats.list', {}).then(() => 'answered'),
+    delay(1000).then(() => 'silent'),
+  ]);
+  assert.equal(alive, 'answered', 'the session survived the replay');
+  assert.equal(device.ws.readyState, 1, 'and was not closed');
+
+  device.ws.close();
+  await hub.stop();
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test('a snoozed device is not pushed the alert its snooze held back', async () => {
+  // The socket path knew about snoozing and the Web Push fan-out did not, and it
+  // filtered on `deliveredTo` - the set a snoozed device is absent from. So
+  // snoozing did not merely fail to suppress the push, it was the reason the push
+  // happened: a lock-screen notification for an alert the app was deliberately
+  // not showing, and one that is not in the feed to find afterwards.
+  const dir = tmp('snooze-push');
+  const pushes = [];
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async (url, init) => {
+    pushes.push(String(url));
+    return new Response(null, { status: 201 });
+  };
+
+  const hub = new Notifier({
+    port: 0,
+    storeDir: dir,
+    dashboard: false,
+    logger: false,
+    webPush: { enabled: true, subject: 'mailto:test@example.invalid' },
+  });
+  await hub.start();
+
+  try {
+    const client = makeClient(hub, 'browser');
+    const paired = new Promise((resolve) => client.on('paired', resolve));
+    await client.pair(hub.createPairingCode({ role: 'oncall' }).code);
+    await paired;
+
+    const ua = createECDH('prime256v1');
+    ua.generateKeys();
+    client.registerWebPush({
+      endpoint: 'https://push.example.invalid/wpush/v2/snoozed',
+      keys: {
+        p256dh: ua.getPublicKey().toString('base64url'),
+        auth: randomBytes(16).toString('base64url'),
+      },
+    });
+    await delay(200);
+
+    client.snooze(60_000);
+    await delay(200);
+
+    pushes.length = 0;
+    await hub.error({ title: 'disk filling up', channel: 'ops' });
+    await delay(300);
+    assert.deepEqual(pushes, [], 'a snooze holds the push back too');
+
+    // A critical alert is never held, which is the other half of what a snooze
+    // promises. Checked with the browser closed, since an open one is reached over
+    // its socket and needs no push at all.
+    client.disconnect();
+    await delay(300);
+    pushes.length = 0;
+
+    await hub.notify({ title: 'the database is down', severity: 'critical', channel: 'ops' });
+    await delay(300);
+    assert.equal(pushes.length, 1, 'critical still wakes a snoozed device');
+
+    // While one the snooze covers stays held even with the browser closed.
+    pushes.length = 0;
+    await hub.error({ title: 'still filling up', channel: 'ops' });
+    await delay(300);
+    assert.deepEqual(pushes, [], 'and the snooze still applies when offline');
+  } finally {
+    globalThis.fetch = realFetch;
+    await hub.stop();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a watchdog spec restored from storage is checked like a fresh one', async () => {
+  // The frame gets validated; the stored copy did not, so the bug that validation
+  // exists for came straight back through storage - a spec with no numbers makes
+  // the deadline NaN, `setTimeout` clamps it to 1ms, and a phone reporting no
+  // connectivity then probes in a loop. An older build's spec, or a half-written
+  // file, is where one comes from.
+  const { NotifyClient, memoryStorage } = await import('@osqd/notifyjs-protocol');
+
+  const storage = memoryStorage();
+  await storage.set('notifyjs.deviceId', 'dev-1');
+  await storage.set('notifyjs.publicKey', 'pk');
+  await storage.set('notifyjs.secretSeed', 'seed');
+  await storage.set(
+    'notifyjs.watchdog',
+    JSON.stringify({ enabled: true, alert: { title: 'the hub may be down' } }),
+  );
+
+  const client = new NotifyClient({
+    url: 'ws://127.0.0.1:1',
+    crypto: nodeCrypto,
+    storage,
+    createSocket: () => ({
+      onopen: null,
+      onmessage: null,
+      onclose: null,
+      onerror: null,
+      send() {},
+      close() {},
+    }),
+    deviceName: 'restored',
+    platform: 'node-test',
+  });
+
+  assert.equal(await client.loadCredentials(), true, 'the credentials still load');
+  assert.equal(client.watchdog, undefined, 'but a spec with no numbers is not armed');
+
+  // One that is usable survives, which is the point of storing it at all.
+  await storage.set(
+    'notifyjs.watchdog',
+    JSON.stringify({
+      enabled: true,
+      intervalMs: 30_000,
+      graceMs: 30_000,
+      alert: { title: 'the hub may be down' },
+    }),
+  );
+  const second = new NotifyClient({
+    url: 'ws://127.0.0.1:1',
+    crypto: nodeCrypto,
+    storage,
+    createSocket: () => ({
+      onopen: null,
+      onmessage: null,
+      onclose: null,
+      onerror: null,
+      send() {},
+      close() {},
+    }),
+    deviceName: 'restored',
+    platform: 'node-test',
+  });
+  await second.loadCredentials();
+  assert.equal(second.watchdog?.intervalMs, 30_000, 'a usable spec is restored');
+});
+
+test('a hub started a second time still writes to disk', async () => {
+  // `stop()` closes the store, and a closed store refuses to arm its drain timer -
+  // which is right, except that `Notifier` keeps one store for its whole life. So
+  // for the entire second life of a restarted hub nothing reached disk: devices
+  // paired, roles rewritten, tokens minted, every history and audit line, all of it
+  // lost to anything but another graceful stop. `stop()`/`start()` is a supported
+  // pattern and two tests here already use it; neither looked at the files.
+  const dir = tmp('restart-persist');
+  const hub = new Notifier({ port: 0, storeDir: dir, dashboard: false, logger: false });
+
+  await hub.start();
+  hub.createPairingCode({ role: 'viewer' });
+  await hub.stop();
+
+  await hub.start();
+  hub.createPairingCode({ role: 'viewer' });
+  await hub.notify({ title: 'after the restart', channel: 'ops', severity: 'error' });
+  await delay(300);
+
+  const store = JSON.parse(readFileSync(join(dir, 'store.json'), 'utf8'));
+  assert.equal(Object.keys(store.codes ?? {}).length, 2, 'both codes are on disk');
+  assert.ok(store.seq >= 1, 'and the sequence the notification took');
+  assert.match(
+    readFileSync(join(dir, 'history.jsonl'), 'utf8'),
+    /after the restart/,
+    'and the alert itself',
+  );
+
+  await hub.stop();
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test('a denied address gets nothing over HTTP either', async () => {
+  // The allow and deny lists, and every ban, were consulted on the WebSocket
+  // upgrade and on an HTTP publish - and nowhere else. So a hub locked to one subnet
+  // still served `/hub.json`, `/metrics` and the whole dashboard to anybody who
+  // asked, and a banned address kept all of it: the hub's name, its serverId, device
+  // counts, auth-failure and ban counters - which is a live readout of how an
+  // attacker's own attempt is going.
+  const dir = tmp('http-guard');
+  const hub = new Notifier({
+    port: 0,
+    storeDir: dir,
+    dashboard: false,
+    logger: false,
+    // Nothing on this machine is in that range, so we are the denied case.
+    security: { allowIps: ['10.99.0.0/24'] },
+  });
+  await hub.start();
+
+  for (const path of ['/health', '/hub.json', '/metrics']) {
+    const res = await fetch(`${hub.dashboardUrl}${path}`);
+    assert.equal(res.status, 403, `${path} is refused`);
+  }
+
+  await hub.stop();
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test('a resolve tells each device only about alerts it could see', async () => {
+  // The one fan-out with no role filter: every resolved id and the `resolveKey` went
+  // to every connected device. Resolve keys are written to be descriptive, so a role
+  // excluded from a channel learned the names of incidents on it anyway.
+  const dir = tmp('resolve-leak');
+  const hub = hostileHub(dir);
+  await hub.start();
+
+  hub.upsertRole({
+    name: 'public-only',
+    channels: ['public.*'],
+    minSeverity: 'info',
+    capabilities: ['notify.receive', 'notify.ack'],
+  });
+  const limited = await pairRaw(hub, 'public-only', 'limited');
+  const admin = await pairRaw(hub, 'admin', 'everything');
+
+  await hub.notify({
+    title: 'CEO laptop exfiltrating data',
+    channel: 'secret.incident',
+    severity: 'critical',
+    resolveKey: 'incident:ceo-laptop',
+  });
+  await delay(200);
+
+  await hub.resolve({ key: 'incident:ceo-laptop' });
+  await delay(300);
+
+  const resolves = [];
+  for (let i = 0; i < 4; i += 1) {
+    const frame = await Promise.race([limited.next(), delay(300).then(() => undefined)]);
+    if (!frame) break;
+    if (frame.t === 'resolve') resolves.push(frame);
+  }
+  assert.deepEqual(resolves, [], 'the excluded device is told nothing about it');
+
+  // The device that could see the alert still gets its resolution.
+  let told;
+  for (let i = 0; i < 6 && !told; i += 1) {
+    const frame = await Promise.race([admin.next(), delay(400).then(() => undefined)]);
+    if (!frame) break;
+    if (frame.t === 'resolve') told = frame;
+  }
+  assert.ok(told, 'a device that saw it is told');
+  assert.equal(told.key, 'incident:ceo-laptop');
+
+  limited.ws.close();
+  admin.ws.close();
+  await hub.stop();
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test('a hub that is not the one this device paired with gets nothing', async () => {
+  // Nothing in the protocol authenticates a hub to a device, and the client signed
+  // whatever `serverId` arrived. So anything answering at the address - an on-path
+  // party against the `ws://` LAN default - was believed about the device's own role,
+  // could forge a critical all-clear, ring the machine, and then send `revoked`,
+  // which used to delete the device's Ed25519 seed outright.
+  const { NotifyClient, memoryStorage } = await import('@osqd/notifyjs-protocol');
+  const dir = tmp('wrong-hub');
+  const hub = hostileHub(dir);
+  await hub.start();
+
+  const storage = memoryStorage();
+  const port = Number(new URL(hub.url).port);
+  const real = new NotifyClient({
+    url: `ws://127.0.0.1:${port}`,
+    crypto: nodeCrypto,
+    storage,
+    createSocket: (url) => new WebSocket(url),
+    deviceName: 'pinned',
+    platform: 'node-test',
+  });
+  const ready = new Promise((resolve) => real.on('ready', resolve));
+  await real.pair(hub.createPairingCode({ role: 'oncall' }).code);
+  await ready;
+  real.disconnect();
+  await hub.stop();
+
+  // An impostor at the same address, claiming to be a hub.
+  const impostor = createServer();
+  const wss = new WebSocketServer({ server: impostor });
+  let sawAuth = false;
+  wss.on('connection', (ws) => {
+    ws.on('message', () => {
+      sawAuth = true;
+    });
+    ws.send(
+      JSON.stringify({
+        v: 1,
+        t: 'hello',
+        serverId: 'not-the-hub-you-paired-with',
+        nonce: 'nonce-1',
+        name: 'Totally Your Hub',
+        serverTime: Date.now(),
+      }),
+    );
+    // What the attack is for: a forged all-clear, and then a de-pairing.
+    ws.send(JSON.stringify({ v: 1, t: 'revoked', reason: 'go away' }));
+  });
+  await new Promise((resolve) => impostor.listen(port, '127.0.0.1', resolve));
+
+  const errors = [];
+  const client = new NotifyClient({
+    url: `ws://127.0.0.1:${port}`,
+    crypto: nodeCrypto,
+    storage,
+    createSocket: (url) => new WebSocket(url),
+    deviceName: 'pinned',
+    platform: 'node-test',
+  });
+  client.on('error', (e) => errors.push(e.code));
+  await client.connect();
+  await delay(400);
+
+  assert.ok(errors.includes('wrong_hub'), `the impostor is refused: ${errors.join(',')}`);
+  assert.equal(sawAuth, false, 'nothing was signed for it');
+  assert.ok(await storage.get('notifyjs.secretSeed'), 'and the keypair is still there');
+
+  client.disconnect();
+  wss.close();
+  await new Promise((resolve) => impostor.close(resolve));
   rmSync(dir, { recursive: true, force: true });
 });

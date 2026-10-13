@@ -41,6 +41,25 @@ function inspectableStorage() {
   };
 }
 
+/**
+ * Waits for the handshake instead of guessing at it.
+ *
+ * Five tests here paired and then slept 300ms, racing the handshake: on a slow
+ * machine `client.admin()` then rejects because the client is not ready yet, and an
+ * `assert.rejects(..., /forbidden/)` fails for the wrong reason entirely.
+ */
+function ready(client, timeout = 5000) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('never became ready')), timeout);
+    timer.unref?.();
+    const off = client.on('ready', (payload) => {
+      clearTimeout(timer);
+      off();
+      resolve(payload);
+    });
+  });
+}
+
 /** Opens a raw socket so the test controls the exact bytes on the wire. */
 function raw(port = PORT) {
   const ws = new WebSocket(`ws://127.0.0.1:${port}`);
@@ -115,7 +134,11 @@ test('an oversized frame terminates the connection', async () => {
   const c = raw();
   await c.next();
   c.send({ v: PROTOCOL_VERSION, t: 'pair', code: 'A'.repeat(200_000) });
-  assert.ok(await c.closed(), 'connection closed rather than buffered');
+  // 1009 is "message too big", which `ws` sends when it refuses the frame at the
+  // limit. `assert.ok` accepted any non-zero code, so this passed just as well
+  // when the whole 200 KB was buffered and parsed and the close came from
+  // somewhere else entirely.
+  assert.equal(await c.closed(), 1009, 'refused at the frame limit, not after it');
 });
 
 test('a captured auth frame cannot be replayed on a new connection', async () => {
@@ -128,8 +151,9 @@ test('a captured auth frame cannot be replayed on a new connection', async () =>
     deviceName: 'replay-victim',
     platform: 'node-test',
   });
+  const settled = ready(client);
   await client.pair(hub.createPairingCode({ role: 'viewer' }).code);
-  await new Promise((r) => setTimeout(r, 300));
+  await settled;
   client.disconnect();
 
   const deviceId = storage.map.get('notifyjs.deviceId');
@@ -170,8 +194,9 @@ test('an auth frame with a stale timestamp is refused', async () => {
     deviceName: 'stale-clock',
     platform: 'node-test',
   });
+  const settled = ready(client);
   await client.pair(hub.createPairingCode({ role: 'viewer' }).code);
-  await new Promise((r) => setTimeout(r, 300));
+  await settled;
   client.disconnect();
 
   const deviceId = storage.map.get('notifyjs.deviceId');
@@ -201,8 +226,9 @@ test('a role without devices.manage cannot enumerate devices', async () => {
     deviceName: 'nosy-viewer',
     platform: 'node-test',
   });
+  const settled = ready(client);
   await client.pair(hub.createPairingCode({ role: 'viewer' }).code);
-  await new Promise((r) => setTimeout(r, 300));
+  await settled;
 
   await assert.rejects(() => client.admin('devices.list'), /forbidden/);
   await assert.rejects(() => client.admin('pair.create', { role: 'admin' }), /forbidden/);
@@ -218,8 +244,9 @@ test('an admin role can manage devices and mint codes', async () => {
     deviceName: 'console',
     platform: 'node-test',
   });
+  const settled = ready(client);
   await client.pair(hub.createPairingCode({ role: 'admin' }).code);
-  await new Promise((r) => setTimeout(r, 300));
+  await settled;
 
   const listed = await client.admin('devices.list');
   assert.ok(listed.devices.length > 0);
@@ -238,8 +265,9 @@ test('a revoked device cannot authenticate again', async () => {
     deviceName: 'stolen-phone',
     platform: 'node-test',
   });
+  const settled = ready(client);
   await client.pair(hub.createPairingCode({ role: 'oncall' }).code);
-  await new Promise((r) => setTimeout(r, 300));
+  await settled;
   const deviceId = storage.map.get('notifyjs.deviceId');
   client.disconnect();
 

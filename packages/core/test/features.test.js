@@ -397,3 +397,60 @@ test('quiet hours include their start and exclude their end', () => {
   assert.equal(inQuietHours(daytime, at(17)), false);
   assert.equal(inQuietHours(daytime, at(8, 59)), false);
 });
+
+test('a crash loop collapses, and a critical is never held back', async () => {
+  // Two halves of one rule. `flood.alwaysDeliver` is the operator's statement that a
+  // severity is never withheld, and it wins over any key a caller supplies - this
+  // briefly worked the other way round, which delayed a critical page by a whole
+  // window and released it as a summary that had lost the original's targeting and
+  // `requireAck`. So a caller that wants its repeats collapsed picks a severity the
+  // operator coalesces, which is what `captureCrashes` now does.
+  const dir = mkdtempSync(join(tmpdir(), 'notifyjs-crashloop-'));
+  const hub = new Notifier({
+    port: 0,
+    storeDir: dir,
+    dashboard: false,
+    logger: false,
+    flood: { enabled: true, windowMs: 400, burst: 2 },
+  });
+  await hub.start();
+
+  try {
+    const collapsed = [];
+    for (let i = 0; i < 12; i += 1) {
+      collapsed.push(
+        await hub.notify({
+          title: 'out of memory',
+          severity: 'error',
+          channel: 'crash',
+          dedupeKey: 'crash:out of memory',
+        }),
+      );
+    }
+    assert.equal(
+      collapsed.filter((o) => !o.coalesced).length,
+      2,
+      'the burst goes out and the repeats are held',
+    );
+
+    const criticals = [];
+    for (let i = 0; i < 6; i += 1) {
+      criticals.push(
+        await hub.notify({
+          title: 'the database is down',
+          severity: 'critical',
+          channel: 'crash',
+          dedupeKey: 'crash:db',
+        }),
+      );
+    }
+    assert.equal(
+      criticals.filter((o) => o.coalesced).length,
+      0,
+      'and a critical is never held, key or no key',
+    );
+  } finally {
+    await hub.stop();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

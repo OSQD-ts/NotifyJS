@@ -1,4 +1,5 @@
 import { EventEmitter } from 'node:events';
+import { isIP, isIPv4 } from 'node:net';
 import { networkInterfaces } from 'node:os';
 import { createServer as createHttpServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { createServer as createHttpsServer } from 'node:https';
@@ -22,7 +23,10 @@ import {
   normalizePairingCode,
   pairingCodeHash,
   coerceSeverity,
+  isSeverity,
+  SEVERITIES,
   sanitizeRole,
+  CAPABILITIES,
   timingSafeEqual,
   toBase64Url,
   type AuditEvent,
@@ -43,7 +47,14 @@ import { nodeCrypto } from '@osqd/notifyjs-protocol/node';
 
 import { resolveOptions, type NotifierOptions, type ResolvedOptions } from './options.js';
 import { Store } from './store.js';
-import { Guard, MessageLimiter, normalizeIp, uniformDelay } from './guard.js';
+import {
+  Guard,
+  MessageLimiter,
+  compileIpList,
+  matchesIp,
+  normalizeIp,
+  uniformDelay,
+} from './guard.js';
 import {
   bearerFrom,
   findIngestToken,
@@ -54,7 +65,7 @@ import {
 } from './ingest.js';
 import { Session } from './session.js';
 import { CallOrchestrator, type CallEvent, type CallStep, type CallTarget } from './calls.js';
-import { Watchdog, formatDuration, type Heartbeat, type HeartbeatSpec } from './watchdog.js';
+import { Watchdog, formatDuration, type Heartbeat, type HeartbeatSpec, parseDuration } from './watchdog.js';
 import { Metrics } from './metrics.js';
 import { FloodControl, summaryTitle, type FloodSummary } from './flood.js';
 import { WebPushSender, generateVapidKeys } from './webpush.js';
@@ -68,6 +79,12 @@ export interface NotifyInput {
   tags?: string[];
   data?: Record<string, unknown>;
   actions?: NotificationAction[];
+  /**
+   * Keep re-delivering until a device acknowledges it, or the TTL expires.
+   *
+   * A device, not a person: every client acks on receipt. See
+   * `scheduleAckRetry`.
+   */
   requireAck?: boolean;
   ttl?: number;
   to?: Targeting;
@@ -191,6 +208,18 @@ export class Notifier extends EventEmitter<NotifierEvents> {
   private dashboardRoot: string | undefined;
   private started = false;
 
+  /**
+   * The in-flight `start()`, so `stop()` waits for it rather than cutting it off.
+   *
+   * `stop()` used to close the HTTP server the moment it was asked, and a server
+   * whose `listen()` has not called back yet never emits `listening` and never
+   * emits `error` - so `start()`'s promise stayed pending for the life of the
+   * process. An application whose SIGTERM handler calls `stop()` - which is the
+   * documented shape - hung on `await hub.start()` for ever if the signal arrived
+   * during startup, which is exactly when a container being rescheduled sends it.
+   */
+  private starting: Promise<void> | undefined;
+
   constructor(options: NotifierOptions = {}) {
     super();
     this.opts = resolveOptions(options);
@@ -198,6 +227,21 @@ export class Notifier extends EventEmitter<NotifierEvents> {
       this.opts.storeDir,
       { history: this.opts.historyLimit, audit: this.opts.auditLimit },
       () => randomId(8),
+      // Said out loud, because every write in the store refuses to take the process
+      // down over a failure - which is right for a pager - and that left nobody to
+      // tell. A hub on a full or read-only disk went on pairing devices and
+      // delivering alerts while none of it was being saved, and a restart rolled it
+      // back to whenever the disk broke.
+      (writable, trouble) => {
+        if (writable) {
+          this.opts.logger('the store is writable again', { dir: this.opts.storeDir });
+        } else {
+          this.opts.logger(
+            'the store cannot be written - devices paired and alerts sent from now on will be lost if this hub restarts',
+            { file: trouble?.file, error: trouble?.error.message },
+          );
+        }
+      },
     );
     // Said as loudly as a constructor can: every paired device is about to fail
     // to authenticate, because the serverId their signatures are bound to is
@@ -367,9 +411,25 @@ export class Notifier extends EventEmitter<NotifierEvents> {
     this.store.touchHistory();
 
     const ids = matched.map((n) => n.id);
+
+    // Filtered per device, like every other fan-out in this file. This was the one
+    // that was not: it sent every resolved id and the `resolveKey` to every
+    // connected device, and resolve keys are written to be descriptive -
+    // `incident:ceo-laptop`, `heartbeat:nightly-payroll` - so a role excluded from a
+    // channel learned the names of incidents on it anyway. The rule this breaks is
+    // stated plainly in SECURITY.md: reading is filtered the same way as delivery,
+    // or the capability that puts a device on the receiving end of one channel is a
+    // way to read every other.
+    //
+    // A device whose role has narrowed since it saw the alert no longer gets the
+    // resolution, which is the same retroactive narrowing replay already applies.
     for (const session of this.sessions.values()) {
       if (session.state !== 'ready') continue;
-      session.send({ v: PROTOCOL_VERSION, t: 'resolve', ids, key: spec.key });
+      const visible = matched
+        .filter((n) => this.allowed(session, n.channel, n.severity, n.to, false))
+        .map((n) => n.id);
+      if (visible.length === 0) continue;
+      session.send({ v: PROTOCOL_VERSION, t: 'resolve', ids: visible, key: spec.key });
     }
 
     // A resolved alert must stop nagging, or `requireAck` outlives the incident.
@@ -423,7 +483,18 @@ export class Notifier extends EventEmitter<NotifierEvents> {
       channel: summary.sample.channel,
       severity: summary.sample.severity,
       tags: [...(summary.sample.tags ?? []), 'coalesced'],
+      // Carried across from the alert this stands for. A summary is a new
+      // notification, and building it from the title and body alone meant a
+      // restricted alert came back out as a broadcast: `to` was dropped, so the
+      // devices the original had deliberately excluded were told about it after all.
+      // `requireAck` went the same way, so a coalesced alert that was meant to keep
+      // nagging quietly stopped, and the caller's own `data` was replaced rather than
+      // extended.
+      to: summary.sample.to,
+      requireAck: summary.sample.requireAck,
+      actions: summary.sample.actions,
       data: {
+        ...(summary.sample.data ?? {}),
         occurrences: summary.total,
         suppressed: summary.suppressed,
         windowMs: summary.windowMs,
@@ -450,6 +521,9 @@ export class Notifier extends EventEmitter<NotifierEvents> {
     const targets = this.store.devices().filter((device) => {
       if (!device.pushToken || device.status !== 'active') return false;
       if (online.has(device.id)) return false;
+      // The same rule the socket path applies. Without it a snooze was not just
+      // ignored here, it was the reason the push happened.
+      if (snoozeHolds(device, n.severity)) return false;
       const role = this.store.role(device.role);
       if (!role) return false;
       return canDeliver({
@@ -490,10 +564,35 @@ export class Notifier extends EventEmitter<NotifierEvents> {
     return this.url.replace(/^ws/, 'http');
   }
 
+  /**
+   * Whether the dashboard is actually being served at `dashboardUrl`.
+   *
+   * `dashboard: true` is a request, not an outcome - the assets may not be
+   * installed beside a packaged binary, in which case the hub logs that it is
+   * serving the API only. The CLI needs to know, because it was printing "open
+   * this in a browser" underneath that very line.
+   */
+  get servesDashboard(): boolean {
+    return this.dashboardRoot !== undefined;
+  }
+
   async start(): Promise<this> {
     if (this.started) return this;
     this.started = true;
 
+    let brought!: () => void;
+    this.starting = new Promise<void>((settle) => {
+      brought = settle;
+    });
+    try {
+      return await this.bringUp();
+    } finally {
+      this.starting = undefined;
+      brought();
+    }
+  }
+
+  private async bringUp(): Promise<this> {
     if (this.opts.dashboard) this.dashboardRoot = await this.locateDashboard();
 
     const handler = (req: IncomingMessage, res: ServerResponse) => {
@@ -567,6 +666,25 @@ export class Notifier extends EventEmitter<NotifierEvents> {
     // Everything `stop()` shut down comes back with the hub. These were armed
     // once, at construction, so a stopped-and-restarted hub silently ran
     // without its IP sweeper and without checking a single heartbeat.
+    //
+    // The store belongs on that list too: `stop()` closes it, and a closed store
+    // refuses to schedule a write - so without this nothing the hub's second life
+    // did would ever reach disk.
+    this.store.reopen();
+
+    // Two hubs on one store directory overwrite each other's whole document on a
+    // timer, so pairing codes and devices from one simply vanish - and every device
+    // paired against one stops authenticating the moment the other's serverId
+    // lands, because that value is part of every auth signature. Said on each start
+    // rather than at construction, so a hub that has been stopped and started
+    // reports a collision that began while it was down.
+    if (this.store.sharedWith !== undefined) {
+      this.opts.logger(
+        'another hub is already using this store directory - both will overwrite each other and devices paired with either may stop working',
+        { dir: this.opts.storeDir, otherPid: this.store.sharedWith },
+      );
+    }
+
     this.guard.start();
     this.watchdog.start();
 
@@ -584,6 +702,22 @@ export class Notifier extends EventEmitter<NotifierEvents> {
       dashboard: this.opts.dashboard ? this.dashboardUrl : false,
       devices: this.store.devices().length,
     });
+    // Said out loud, because the failure it warns about is silence. Devices past the
+    // per-address limit are answered `too_many_connections` and retry, so they come
+    // back in waves or not at all, and nobody sees an error: the operator sees a phone
+    // that is "sometimes late". Behind a reverse proxy with `trustProxy` off - the
+    // default - every device shares the proxy's address, so the limit applies to all of
+    // them together, and ten is the default.
+    const paired = this.store.devices().filter((d) => d.status === 'active').length;
+    if (paired > this.opts.security.maxConnectionsPerIp) {
+      this.opts.logger(
+        `${paired} devices are paired and security.maxConnectionsPerIp is ` +
+          `${this.opts.security.maxConnectionsPerIp}: devices sharing an address beyond that ` +
+          'are refused and retry, which looks like alerts arriving late',
+        { devices: paired, maxConnectionsPerIp: this.opts.security.maxConnectionsPerIp },
+      );
+    }
+
     this.emit('listening', { url: this.url, port: this.opts.port });
     return this;
   }
@@ -596,6 +730,17 @@ export class Notifier extends EventEmitter<NotifierEvents> {
    */
   async stop(reason = 'shutting down', expectedDowntimeMs = 0): Promise<void> {
     if (!this.started) return;
+
+    // A stop that arrives while the hub is still coming up waits for it. Closing
+    // the server underneath a pending `listen()` left `start()` waiting on an event
+    // that would never arrive; and there is nothing to tear down until the things
+    // `start()` creates exist.
+    if (this.starting) {
+      await this.starting;
+      // `start()` may have failed while we waited, or another `stop()` may have got
+      // here first - either way it is already stopped.
+      if (!this.started) return;
+    }
     this.started = false;
 
     if (this.beatTimer) clearInterval(this.beatTimer);
@@ -614,9 +759,25 @@ export class Notifier extends EventEmitter<NotifierEvents> {
     for (const timer of this.ackWaiters.values()) clearTimeout(timer);
     this.ackWaiters.clear();
 
-    for (const session of [...this.sessions.values()]) session.close(1001, 'shutting down');
-    this.sessions.clear();
+    // Torn down here rather than left to each socket's close event. That
+    // event arrives a tick later, by which time the map has been emptied and
+    // `closeSession` returns at its `delete` guard - before releasing the
+    // connection slot. The `Guard` is built once and outlives `stop()`, so
+    // those phantom counts were still charged after the next `start()`: a hub
+    // cycled a few times with devices connected refused the very devices it
+    // had been holding, and the sweeper could never reclaim them.
+    // Emptied before the loop, not after it. `closeSession` releases the slot -
+    // which is why it is called here at all - but it also emits
+    // `device:offline` when a device's last session goes, and a graceful
+    // shutdown is not a device going offline. An application that pages on that
+    // event would have been paged once per device on every deploy, which is the
+    // false alarm the `bye` frame exists to prevent on the device side.
     this.byDevice.clear();
+    for (const session of [...this.sessions.values()]) {
+      session.close(1001, 'shutting down');
+      this.closeSession(session);
+    }
+    this.sessions.clear();
 
     this.guard.stop();
     this.wss?.close();
@@ -749,6 +910,7 @@ export class Notifier extends EventEmitter<NotifierEvents> {
     const online = new Set(ringing);
     const targets = this.store.devices().filter((device) => {
       if (!device.pushToken || device.status !== 'active' || online.has(device.id)) return false;
+      if (snoozeHolds(device, req.severity)) return false;
       const role = this.store.role(device.role);
       if (!role) return false;
       return canDeliver({
@@ -844,10 +1006,19 @@ export class Notifier extends EventEmitter<NotifierEvents> {
       createdAt: Date.now(),
       expiresAt,
       usesLeft: clampNumber(input.uses, 1, MAX_CODE_USES, 1),
+      // Compiled and discarded, purely to refuse a restriction nobody could
+      // satisfy while the person minting the code is still looking at the
+      // answer. A code restricted to an address that is not one cannot be
+      // redeemed by anybody, and at redemption time there is no one to tell.
       allowIps: Array.isArray(input.allowIps)
-        ? input.allowIps.filter((ip) => typeof ip === 'string').slice(0, 50)
+        ? ((list) => {
+            compileIpList('pairing code allowIps', list);
+            return list;
+          })(input.allowIps.filter((ip) => typeof ip === 'string').slice(0, 50))
         : undefined,
-      label: typeof input.label === 'string' ? input.label.slice(0, 64) : undefined,
+      // Through the same filter as a name: a label is printed by `notifyjs token
+      // list` and by the dashboard.
+      label: input.label === undefined ? undefined : sanitizeName(input.label),
     });
     this.audit('pair.created', { detail: { role: roleName, expiresAt } });
 
@@ -918,7 +1089,15 @@ export class Notifier extends EventEmitter<NotifierEvents> {
     // that `pair` already refuses.
     const clean = sanitizeName(name);
     if (!clean) return undefined;
-    return this.store.updateDevice(deviceId, { name: clean });
+    const updated = this.store.updateDevice(deviceId, { name: clean });
+    if (updated) {
+      // Refreshed on live sessions, exactly as a role change is. Without it the
+      // old name went on being used until the device reconnected - and it is the
+      // name that appears in a call's result, in the `action` event, and in the
+      // lines logged when a device is dropped for not reading its socket.
+      for (const session of this.byDevice.get(deviceId) ?? []) session.device = updated;
+    }
+    return updated;
   }
 
   setDeviceRole(deviceId: string, role: string): Device | undefined {
@@ -940,10 +1119,43 @@ export class Notifier extends EventEmitter<NotifierEvents> {
   }
 
   upsertRole(role: Role): void {
-    this.store.putRole(role);
+    // Through the same validation the wire goes through. This wrote whatever it was
+    // handed straight into the store: `upsertRole(0)` and `upsertRole('viewer')` both
+    // produced a role whose name persisted as the string "undefined", and
+    // `channels: 'not-a-list'` - the exact shape a test already proves cannot reach
+    // the store from a device - reached it from here. A `minSeverity` typo was worse
+    // than useless: it ranks below `debug`, so a role meant to filter saw everything.
+    //
+    // `true` for what may be granted, because a caller holding a reference to the
+    // hub already owns the process; the restriction exists to stop a *device*
+    // widening its own authority.
+    const next = sanitizeRole(this.assertKnownCapabilities(role), true);
+    this.store.putRole(next);
     for (const session of this.sessions.values()) {
-      if (session.device?.role === role.name) session.role = role;
+      if (session.device?.role === next.name) session.role = next;
     }
+  }
+
+  /**
+   * Refuses a capability that is not one, by name.
+   *
+   * `sanitizeRole` drops them, which is right over the wire - a device must not be
+   * able to make the hub throw, and an unknown capability there is a client from
+   * another version. From here it can only be a typo, and a silently dropped
+   * `'notify.recieve'` is a role that receives nothing.
+   */
+  private assertKnownCapabilities(role: Role): Role {
+    const caps = (role as Partial<Role> | undefined)?.capabilities;
+    if (!Array.isArray(caps)) return role;
+    const unknown = caps.filter((c) => !(CAPABILITIES as readonly string[]).includes(c as string));
+    if (unknown.length > 0) {
+      throw new Error(
+        `unknown ${unknown.length === 1 ? 'capability' : 'capabilities'} ${unknown
+          .map((c) => JSON.stringify(c))
+          .join(', ')} - see CAPABILITIES`,
+      );
+    }
+    return role;
   }
 
   deleteRole(name: string): boolean {
@@ -978,6 +1190,34 @@ export class Notifier extends EventEmitter<NotifierEvents> {
       'Content-Security-Policy',
       "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self' ws: wss:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
     );
+
+    // The operator's allow and deny lists, and any ban, apply to this port as a
+    // whole - not only to the WebSocket upgrade and the HTTP publish, which were
+    // the only two paths that consulted the guard. A hub locked to one subnet
+    // still served `/hub.json`, `/metrics` and the entire dashboard to anybody who
+    // asked, and a banned address kept all of that too: everything an attacker
+    // wants for reconnaissance, including a metrics endpoint that reports how their
+    // own attempt is going.
+    // The publish endpoints check the guard themselves and answer in their own
+    // shape - deliberately not distinguishing a ban from a deny list, so a caller
+    // cannot tell which it tripped - so they are left to it.
+    const publishing = url.pathname === '/api/notify' || url.pathname === '/api/call';
+    const ip = this.clientIp(req);
+    if (!publishing && this.guard.refused(ip)) {
+      this.audit('http.refused', { ip, detail: { path: url.pathname } });
+      res.writeHead(403, { 'content-type': 'text/plain' });
+      res.end('Forbidden\n');
+      return;
+    }
+    const banned = publishing ? 0 : this.guard.bannedFor(ip);
+    if (banned > 0) {
+      res.writeHead(429, {
+        'content-type': 'text/plain',
+        'retry-after': String(Math.ceil(banned / 1000)),
+      });
+      res.end('Too Many Requests\n');
+      return;
+    }
 
     if (url.pathname === '/health') {
       res.writeHead(200, { 'content-type': 'application/json' });
@@ -1048,6 +1288,8 @@ export class Notifier extends EventEmitter<NotifierEvents> {
       heartbeats: beats.length,
       heartbeatsMissing: beats.filter((b) => b.missing).length,
       activeCalls: this.calls.activeCount,
+      storeWritable: this.store.persistence.writable,
+      storeWriteFailures: this.store.persistence.failures,
     });
   }
 
@@ -1096,9 +1338,23 @@ export class Notifier extends EventEmitter<NotifierEvents> {
       return refuse(socket, 429, 'Too Many Requests', verdict.retryAfter);
     }
 
+    // A handshake `ws` abandons never reaches this callback: no
+    // `Sec-WebSocket-Key`, a version it does not speak, an unparseable
+    // extension header. Node has emitted `upgrade` by then and `admit()` above
+    // has already charged a slot, so without releasing it here the count is
+    // held by a session that never existed - `closeSession` is the only other
+    // caller of `release()`, and the sweeper keeps any address whose count is
+    // not zero. A hundred such requests answer every honest device with 429,
+    // for the life of the process.
+    //
+    // The flag is enough because `ws` completes an upgrade synchronously in
+    // this configuration - `noServer`, and no `verifyClient` to defer on.
+    let opened = false;
     this.wss!.handleUpgrade(req, socket, head, (ws) => {
+      opened = true;
       this.openSession(ws, ip, origin);
     });
+    if (!opened) this.guard.release(ip, false);
   }
 
   /**
@@ -1284,7 +1540,11 @@ export class Notifier extends EventEmitter<NotifierEvents> {
           message,
           from: typeof body.from === 'string' ? body.from : `token:${token.label ?? token.id}`,
           channel: typeof body.channel === 'string' ? body.channel : undefined,
-          severity: coerceSeverity(body.severity, 'critical'),
+          // Passed through rather than coerced, so a token holder who typed a
+          // severity wrong is answered with a 400 naming the six - exactly as a
+          // local caller is answered with a throw. The `catch` around this whole
+          // block turns the refusal into that 400.
+          severity: body.severity as Severity | undefined,
           policy: typeof body.policy === 'string' ? body.policy : undefined,
         });
         this.audit('ingest.call', {
@@ -1314,7 +1574,10 @@ export class Notifier extends EventEmitter<NotifierEvents> {
         title,
         body: typeof body.body === 'string' ? body.body : undefined,
         channel: typeof body.channel === 'string' ? body.channel : undefined,
-        severity: coerceSeverity(body.severity, 'info'),
+        // See the call path above: refused by name rather than quietly becoming
+        // `info`, which is below the floor every on-call role filters on - so a CI
+        // job publishing `severity: 'criticial'` was told 202 and paged nobody.
+        severity: body.severity as Severity | undefined,
         tags: Array.isArray(body.tags)
           ? body.tags.filter((t): t is string => typeof t === 'string').slice(0, 20)
           : undefined,
@@ -1370,7 +1633,11 @@ export class Notifier extends EventEmitter<NotifierEvents> {
       id,
       hash,
       role: input.role,
-      label: input.label,
+      // Filtered here, where every caller passes through - the admin path filtered
+      // its own copy and an embedding application's did not, and this label is
+      // printed by `notifyjs token list`, where an escape sequence can redraw the
+      // row above and make a live token look like a revoked one.
+      label: input.label === undefined ? undefined : sanitizeMessage(input.label, 120) || undefined,
       createdAt: Date.now(),
     });
     this.audit('ingest.token.created', { detail: { token: id, role: input.role } });
@@ -1642,8 +1909,23 @@ export class Notifier extends EventEmitter<NotifierEvents> {
       return fail(reason);
     };
 
-    if (record.allowIps && !record.allowIps.includes(session.ip)) {
-      return rejectAndRelease('ip_not_allowed');
+    // Through the same matcher as the hub-wide lists, so a range works here
+    // too. This was an exact-string `includes`, which meant a code restricted to
+    // `10.0.0.0/24` could be redeemed by nobody at all - and the restriction
+    // refuses anything unlisted, so the code was simply unusable.
+    if (record.allowIps) {
+      let allowed;
+      try {
+        allowed = compileIpList('pairing code allowIps', record.allowIps);
+      } catch {
+        // A restriction that cannot be read is not one anybody may redeem
+        // against: "only these addresses" has to fail closed, and a code stored
+        // by an older build could hold anything.
+        return rejectAndRelease('ip_not_allowed');
+      }
+      if (allowed && !matchesIp(allowed, session.ip)) {
+        return rejectAndRelease('ip_not_allowed');
+      }
     }
 
     const role = this.store.role(record.role);
@@ -1791,6 +2073,9 @@ export class Notifier extends EventEmitter<NotifierEvents> {
       capabilities: role.capabilities,
       seq: this.store.seq,
       serverTime: Date.now(),
+      // Only while it is still running: an expired one is not news.
+      snoozedUntil:
+        device.snoozedUntil && device.snoozedUntil > Date.now() ? device.snoozedUntil : undefined,
       // Minted on first use, so a hub with Web Push off never generates one.
       vapidPublicKey: this.opts.webPush.enabled
         ? this.store.vapid(generateVapidKeys).publicKey
@@ -1839,7 +2124,9 @@ export class Notifier extends EventEmitter<NotifierEvents> {
     // A device back from a week offline should not be handed hundreds of
     // notifications at once; it gets the recent ones and a count of the rest.
     const limit = this.opts.replayLimit;
-    const shown = eligible.length > limit ? eligible.slice(-limit) : eligible;
+    // `slice(-0)` is `slice(0)`, which is everything - so a hub configured to
+    // replay nothing replayed the lot. Said explicitly instead.
+    const shown = limit <= 0 ? [] : eligible.length > limit ? eligible.slice(-limit) : eligible;
     const skipped = eligible.length - shown.length;
 
     if (skipped > 0) {
@@ -1884,23 +2171,60 @@ export class Notifier extends EventEmitter<NotifierEvents> {
     // published itself.
     const claimed = typeof msg.action === 'string' ? msg.action.slice(0, 128) : undefined;
     const offered = claimed ? this.declaredActions(ids) : undefined;
+    // Built once for the frame. `takeAction` used to call `store.history()` -
+    // which copies the whole retained array - and then scan it linearly, per
+    // id, which is the scan `declaredActions` exists to avoid reintroduced one
+    // line below it.
+    // Built for every frame now, not only one carrying an action: an id has to be
+    // checked against what this device could actually have been shown.
+    const held = new Map(this.store.history().map((entry) => [entry.id, entry]));
+    let taken = false;
 
     for (const id of ids) {
-      const action = claimed ? this.takeAction(session, id, claimed, offered) : undefined;
+      // An acknowledgement for an alert this device was never entitled to see is not
+      // an acknowledgement. It used to be taken at face value: it cleared the
+      // hub-wide retry - so a device could stop a `requireAck` alert nagging the
+      // people it was actually for - and raised an `ack` event that the embedding
+      // application acts on. The ids are 80 bits of randomness, which was the only
+      // thing making it hard.
+      const n = held.get(id);
+      if (!n || !this.allowed(session, n.channel, n.severity, n.to, false)) {
+        this.audit('ack.ignored', { deviceId: session.deviceId, detail: { id } });
+        continue;
+      }
+
+      const action = claimed ? this.takeAction(session, id, claimed, offered, held) : undefined;
+      if (action) taken = true;
       this.emit('ack', { notificationId: id, deviceId: session.device.id, action });
-      // One acknowledgement is enough: a human has seen it, so stop retrying.
+      // One acknowledgement from any entitled device settles the alert. Not a
+      // person: see `scheduleAckRetry`, which says what this does and does not mean.
       const timer = this.ackWaiters.get(id);
       if (timer) {
         clearTimeout(timer);
         this.ackWaiters.delete(id);
       }
     }
+    // One write for the frame, not one per id. `touchHistory()` is a synchronous
+    // serialise, write and rename of the entire retained history, and a device
+    // may acknowledge up to five hundred ids in a single frame - five hundred
+    // rewrites inside one message, during which the hub answers no pings and
+    // rings no calls.
+    if (taken) this.store.touchHistory();
+
     // Clamped to what the hub has actually issued: a device that reported a
     // cursor from the future - a bug, a bad clock, a hostile client - would
     // silently opt itself out of every replay from then on.
-    if (Number.isFinite(msg.seq) && (msg.seq as number) > session.device.ackedSeq) {
+    // Compared against the stored record rather than this session's copy of it. A
+    // device may hold two sessions - a phone with the app open and its watch
+    // service, a browser in two tabs - and each carried its own snapshot, so an
+    // ack on one could move the cursor *backwards* over the other's progress. The
+    // consequence is a replay of what was already seen rather than a loss, since
+    // every client dedupes by id, but it is still the hub forgetting something it
+    // had been told.
+    const known = this.store.device(session.device.id) ?? session.device;
+    if (Number.isFinite(msg.seq) && (msg.seq as number) > known.ackedSeq) {
       const seq = Math.min(msg.seq as number, this.store.seq);
-      if (seq > session.device.ackedSeq) {
+      if (seq > known.ackedSeq) {
         const updated = this.store.updateDevice(session.device.id, { ackedSeq: seq });
         if (updated) session.device = updated;
       }
@@ -1928,6 +2252,7 @@ export class Notifier extends EventEmitter<NotifierEvents> {
     id: string,
     claimed: string,
     offered: Map<string, Set<string>> | undefined,
+    held: Map<string, Notification> | undefined,
   ): string | undefined {
     const refuse = (reason: string): undefined => {
       this.audit('ack.action.rejected', {
@@ -1943,12 +2268,13 @@ export class Notifier extends EventEmitter<NotifierEvents> {
     }
     if (!offered?.get(id)?.has(claimed)) return refuse('the notification did not offer it');
 
-    const n = this.store.history().find((entry) => entry.id === id);
+    const n = held?.get(id);
     if (!n) return refuse('unknown notification');
     if (n.actionTaken) return refuse(`already taken by ${n.actionTaken.deviceId}`);
 
+    // Marked on the entry the store holds, by reference; the caller persists
+    // once for the whole frame.
     n.actionTaken = { id: claimed, deviceId: session.device!.id, at: Date.now() };
-    this.store.touchHistory();
 
     this.audit('ack.action', { deviceId: session.device!.id, detail: { id, action: claimed } });
     this.emit('action', {
@@ -2035,7 +2361,9 @@ export class Notifier extends EventEmitter<NotifierEvents> {
         this.audit('push.rejected', { deviceId: session.device.id });
         this.opts.logger('rejected a web push subscription', {
           deviceId: session.device.id,
-          reason: keys ? 'endpoint is not an https URL' : 'missing or malformed keys',
+          reason: keys
+            ? 'endpoint is not a public https URL'
+            : 'missing or malformed keys',
         });
         return;
       }
@@ -2078,8 +2406,23 @@ export class Notifier extends EventEmitter<NotifierEvents> {
   }
 
   private handleSync(session: Session, msg: Extract<ClientMessage, { t: 'sync' }>): void {
-    const since = Number.isFinite(msg.since) ? Math.max(0, Number(msg.since)) : 0;
-    this.replay(session, since);
+    let since = Number.isFinite(msg.since) ? Math.max(0, Number(msg.since)) : 0;
+
+    // What a snooze held back is handed over on the first sync after it ends - which
+    // is the sync the client now sends when the snooze expires or is lifted. Without
+    // this the promise that a snooze holds alerts rather than dropping them was only
+    // kept while nothing paged you: one critical through the snooze, acknowledged on
+    // receipt, took the cursor past the rest for good.
+    const held = session.device?.snoozeHeldFrom;
+    if (held !== undefined && session.device && !snoozeHolds(session.device, 'info')) {
+      since = Math.min(since, held - 1);
+      const updated = this.store.updateDevice(session.device.id, { snoozeHeldFrom: undefined });
+      if (updated) {
+        for (const other of this.byDevice.get(session.device.id) ?? []) other.device = updated;
+      }
+    }
+
+    this.replay(session, Math.max(0, since));
   }
 
   /* ------------------------------ admin ------------------------------ */
@@ -2088,14 +2431,41 @@ export class Notifier extends EventEmitter<NotifierEvents> {
     session: Session,
     msg: Extract<ClientMessage, { t: 'admin' }>,
   ): Promise<void> {
-    const reply = (ok: boolean, data?: unknown, error?: string) =>
-      session.send({ v: PROTOCOL_VERSION, t: 'admin.result', id: msg.id, ok, data, error });
+    const reply = (ok: boolean, data?: unknown, error?: string) => {
+      // Says who exercised a privilege, and not only who was refused.
+      //
+      // `admin.denied` has always named the device turned away, while a change
+      // that succeeded left either a line naming its target and nothing about
+      // the administrator behind it, or - for roles, policies and revoked
+      // pairing codes - no line at all. An audit log that can say a role was
+      // rewritten but not by whom is half a log, and rewriting a role is how
+      // somebody grants themselves the rest of the hub.
+      //
+      // Here rather than in each method: this is the one place every admin
+      // frame passes through on its way back out, and it fires only for a
+      // mutation that actually succeeded.
+      if (ok && ATTRIBUTED_ADMIN_OPS.has(msg.op)) {
+        this.audit('admin.applied', {
+          ip: session.ip,
+          deviceId: session.deviceId,
+          detail: { op: msg.op, target: adminTarget(args) },
+        });
+      }
+      return session.send({ v: PROTOCOL_VERSION, t: 'admin.result', id: msg.id, ok, data, error });
+    };
 
     const role = session.role;
     if (!role) return reply(false, undefined, 'not ready');
 
     const required = ADMIN_CAPABILITY[msg.op];
-    if (!required || !hasCapability(role, required)) {
+    // One operation two different capabilities legitimately need: whoever edits
+    // roles has to be able to read them, and whoever mints pairing codes has to pick
+    // one to point at. Everything else maps to exactly one capability.
+    const alternatives = EITHER_CAPABILITY[msg.op];
+    const allowed = alternatives
+      ? alternatives.some((cap) => hasCapability(role, cap))
+      : Boolean(required) && hasCapability(role, required!);
+    if (!allowed) {
       this.audit('admin.denied', { deviceId: session.deviceId, detail: { op: msg.op } });
       return reply(false, undefined, 'forbidden');
     }
@@ -2129,7 +2499,7 @@ export class Notifier extends EventEmitter<NotifierEvents> {
           // a role you do not hold is privilege escalation with an extra step.
           const wanted = String(args.role ?? 'viewer');
           this.assertMayGrantRole(session, role, wanted);
-          const label = typeof args.label === 'string' ? args.label.slice(0, 120) : undefined;
+          const label = typeof args.label === 'string' ? args.label : undefined;
           return reply(true, this.createIngestToken({ role: wanted, label }));
         }
         case 'ingest.list':
@@ -2158,21 +2528,57 @@ export class Notifier extends EventEmitter<NotifierEvents> {
         case 'roles.delete':
           return reply(true, { deleted: this.deleteRole(String(args.name)) });
         case 'notify.send':
-          void this.notify(args as NotifyInput).catch(() => {});
+          // Awaited. Sending touches no network - the Web Push fan-out is
+          // deliberately left to run on its own - so there is nothing to wait
+          // for beyond the work itself, and the caller hears about a failure
+          // instead of being told `ok` while the rejection was discarded.
+          await this.notify(args as NotifyInput);
           return reply(true, {});
-        case 'call.place':
+        case 'call.place': {
+          // A call rings for as long as its ladder says, so this one reply
+          // cannot wait for the outcome. It must still not claim success for a
+          // call that never got off the ground: the one failure raised before
+          // anything rings is a policy name that does not exist, and that is
+          // precisely the typo a caller needs to hear about. `notifyjs call
+          // --policy nigt-shift` printed "call placed" and rang nobody.
+          const wanted = typeof args.policy === 'string' ? args.policy.trim() : '';
+          if (wanted && !this.store.policy(wanted)) {
+            return reply(false, undefined, `unknown escalation policy: ${wanted}`);
+          }
+          // Checked here as well, because the ring cannot be awaited: `call()`
+          // would refuse the same values, but into a rejection this case discards -
+          // so a malformed `to`, or a severity with a typo in it, answered "call
+          // placed" and rang nobody.
+          try {
+            sanitizeTargeting(args.to as Targeting | undefined);
+            requireSeverity(args.severity, 'critical');
+          } catch (err) {
+            return reply(false, undefined, err instanceof Error ? err.message : String(err));
+          }
+          // The checked value is the one that gets used. Validating the trimmed
+          // name and then passing the original meant `policy: ' night-shift '`
+          // walked through the guard and threw inside `call()` instead, into the
+          // same swallowed catch - answering `ok` for a call that rang nobody,
+          // one space away from the bug this check was added for.
+          if (wanted) args.policy = wanted;
           void this.call(args as CallInput).catch(() => {});
           return reply(true, {});
+        }
         case 'notify.resolve':
           // Awaited: replying with the promise itself serialises to `{}`, so
           // every caller was told nothing had been resolved.
           return reply(true, { resolved: await this.resolve(args as { id?: string; key?: string }) });
         case 'heartbeats.list':
           return reply(true, { heartbeats: this.heartbeats() });
-        case 'heartbeat.expect':
+        case 'heartbeat.expect': {
+          const floor = this.opts.heartbeatTickMs;
           return reply(true, {
-            heartbeat: this.expect(String(args.name), args as unknown as HeartbeatSpec),
+            heartbeat: this.expect(
+              String(args.name),
+              sanitizeHeartbeat(args as unknown as HeartbeatSpec, floor),
+            ),
           });
+        }
         case 'heartbeat.checkin':
           return reply(true, { known: this.checkIn(String(args.name)) });
         case 'heartbeat.forget':
@@ -2268,18 +2674,25 @@ export class Notifier extends EventEmitter<NotifierEvents> {
       seq: this.store.nextSeq(),
       ts: Date.now(),
       channel: sanitizeChannel(input.channel),
-      // An unrecognised severity would sort as `debug`, bypass the
-      // `alwaysDeliver` list, and be written verbatim into a Prometheus label
-      // at `/metrics`.
-      severity: coerceSeverity(input.severity, 'info'),
-      title: String(input.title ?? '').slice(0, 200),
+      // Refused rather than coerced. An unrecognised severity would sort as
+      // `debug`, bypass the `alwaysDeliver` list, and be written verbatim into a
+      // Prometheus label at `/metrics` - and coercing it to `info` instead put the
+      // alert below the floor every on-call role filters on, so it reached nobody
+      // and said nothing about it.
+      severity: requireSeverity(input.severity, 'info'),
+      // Required by this method's own type, and by the HTTP endpoint, which answers
+      // 400 with this same sentence. Here it was quietly accepted: `notify({})`, or
+      // `notify({ title: undefined })` from a variable that was not set, published a
+      // notification with no title - every device buzzed and showed a blank line,
+      // and the flood key it fell under was shared by every other titleless alert.
+      title: requireTitle(input.title),
       body: input.body ? String(input.body).slice(0, 4000) : undefined,
       tags: input.tags?.slice(0, 20),
       data: input.data,
       actions: input.actions?.slice(0, 5),
       requireAck: input.requireAck,
       ttl: input.ttl,
-      to: input.to,
+      to: sanitizeTargeting(input.to),
       resolveKey: input.resolveKey,
     };
   }
@@ -2290,15 +2703,29 @@ export class Notifier extends EventEmitter<NotifierEvents> {
       seq: this.store.nextSeq(),
       ts: Date.now(),
       channel: sanitizeChannel(input.channel),
-      severity: coerceSeverity(input.severity, 'critical'),
+      severity: requireSeverity(input.severity, 'critical'),
       from: sanitizeName(input.from) || this.opts.name,
-      message: String(input.message ?? '').slice(0, 2000),
+      message: sanitizeMessage(input.message, 2000),
       lang: input.lang,
       rate: input.rate,
       pitch: input.pitch,
-      ringSeconds: input.ringSeconds ?? this.opts.defaultRingSeconds,
+      // Clamped like every other number a timer will consume. This one reaches
+      // `setTimeout(ringSeconds * 1000)` for every rung of the ladder, and it
+      // arrived straight off the wire: `"soon"` multiplied out to NaN, which
+      // `setTimeout` fires at 1ms, so each phone got a `call` frame followed
+      // immediately by `call.cancel: missed`, nothing rang audibly, and the
+      // caller was told the page was missed. A negative value did the same, and
+      // `1e12` - which reads like "ring for a long time" - overflowed the timer
+      // into the same instant collapse. `sanitizePolicy` already clamps a
+      // policy's own steps; this is the value they fall back to.
+      ringSeconds: clampNumber(
+        input.ringSeconds,
+        1,
+        MAX_RING_SECONDS,
+        this.opts.defaultRingSeconds,
+      ),
       repeat: input.repeat,
-      to: input.to,
+      to: sanitizeTargeting(input.to),
       escalate: input.escalate,
       policy: input.policy,
     };
@@ -2313,10 +2740,7 @@ export class Notifier extends EventEmitter<NotifierEvents> {
   ): boolean {
     if (!session.role || !session.device) return false;
 
-    // A snoozed device still gets critical alerts: the point is to quiet
-    // noise, not to disable the pager.
-    const snoozed = session.device.snoozedUntil ?? 0;
-    if (snoozed > Date.now() && severity !== 'critical') return false;
+    if (snoozeHolds(session.device, severity)) return false;
 
     return canDeliver({
       role: session.role,
@@ -2344,13 +2768,48 @@ export class Notifier extends EventEmitter<NotifierEvents> {
     const reached = new Set<string>();
     for (const session of this.sessions.values()) {
       if (session.state !== 'ready' || !session.device) continue;
-      if (!this.allowed(session, n.channel, n.severity, n.to, false)) continue;
+      if (!this.allowed(session, n.channel, n.severity, n.to, false)) {
+        // Noted when it was the snooze that held it: the alert is in history and
+        // this device is meant to see it once the snooze ends, and its own cursor
+        // will not lead it back there - a critical delivered through the snooze,
+        // acknowledged as every client does on receipt, moves that cursor past
+        // everything the snooze suppressed.
+        if (snoozeHolds(session.device, n.severity) && this.couldSee(session, n)) {
+          this.markSnoozeHeld(session, n.seq);
+        }
+        continue;
+      }
       session.send({ v: PROTOCOL_VERSION, t: 'notification', n });
       if (!this.awake(session)) continue;
       // A device may hold several sockets; it is still one device reached.
       reached.add(session.device.id);
     }
     return [...reached];
+  }
+
+  /** Whether the snooze is the only thing standing between this device and an alert. */
+  private couldSee(session: Session, n: Notification): boolean {
+    if (!session.role || !session.device) return false;
+    return canDeliver({
+      role: session.role,
+      deviceId: session.device.id,
+      channel: n.channel,
+      severity: n.severity,
+      to: n.to,
+      isCall: false,
+    });
+  }
+
+  /** Remembers the earliest alert a snooze held back from this device. */
+  private markSnoozeHeld(session: Session, seq: number): void {
+    const device = session.device;
+    if (!device) return;
+    const held = device.snoozeHeldFrom ?? Number.POSITIVE_INFINITY;
+    if (seq >= held) return;
+
+    const updated = this.store.updateDevice(device.id, { snoozeHeldFrom: seq });
+    if (!updated) return;
+    for (const other of this.byDevice.get(device.id) ?? []) other.device = updated;
   }
 
   /**
@@ -2365,15 +2824,36 @@ export class Notifier extends EventEmitter<NotifierEvents> {
   }
 
   /**
-   * Re-sends an unacknowledged notification until somebody acks it, its TTL
-   * runs out, or we hit the attempt ceiling. This is what makes `requireAck`
-   * mean "a person saw this" rather than "a socket was open at the time".
+   * Re-sends an unacknowledged notification until some device acks it, its TTL
+   * runs out, or we hit the attempt ceiling.
+   *
+   * What this guarantees is that the alert reached a device that could show it -
+   * not that anybody looked. Every client here acknowledges as soon as it has the
+   * frame, and `SourceManager` deliberately acks even an alert the person's own
+   * severity floor hides from them, on the grounds that "the person chose not to
+   * see it, which is not the same as never having received it". So this is
+   * delivery confirmation with teeth, and a claim about a human being would need a
+   * second kind of acknowledgement that no client sends.
    *
    * Tracked hub-wide in `ackWaiters`, keyed by notification, rather than per
    * session: one acknowledgement from any entitled device is what settles an
    * alert, so a per-socket set of outstanding ids would have nothing to decide.
    */
   private scheduleAckRetry(n: Notification): void {
+    // Bounded. Each outstanding alert re-runs `deliver()` over every session for up to
+    // twenty rounds, so the work is "outstanding x sessions" and nothing capped the
+    // first term: an application that sets `requireAck` on a busy channel had the hub
+    // re-sending thousands of frames per round, holding the retained notification alive
+    // in each closure. Past the cap the alert is still delivered and still in history -
+    // what it loses is the nagging, which is the right thing to drop first, and the
+    // operator can see it happened.
+    if (this.ackWaiters.size >= MAX_ACK_WAITERS) {
+      this.audit('notify.ack_retry_skipped', {
+        detail: { id: n.id, outstanding: this.ackWaiters.size },
+      });
+      return;
+    }
+
     let attempts = 0;
     const tick = () => {
       // handleAck() deletes the entry, which is how an acknowledgement stops
@@ -2477,11 +2957,46 @@ export class Notifier extends EventEmitter<NotifierEvents> {
  * most of what an observer wants to know. See the metadata note in SECURITY.md.
  */
 function isPushEndpoint(value: string): boolean {
+  let url: URL;
   try {
-    return new URL(value).protocol === 'https:';
+    url = new URL(value);
   } catch {
     return false;
   }
+  if (url.protocol !== 'https:') return false;
+
+  // The endpoint is chosen by the device, and the hub then POSTs to it on every
+  // alert with a signed VAPID header - so `https` alone made this a request emitter
+  // pointed wherever a paired device liked, including at anything on the hub's own
+  // network that it could never otherwise reach. A push service lives on the public
+  // internet under a hostname; an address literal, or a name for this machine, is
+  // not one and is refused.
+  const host = url.hostname.replace(/^\[|\]$/g, '');
+  if (isIP(host)) return isPublicAddress(host);
+  return !/^(localhost|.*\.localhost|.*\.local|.*\.internal|.*\.home\.arpa)$/i.test(host);
+}
+
+/** Whether an address literal is one the internet could route to. */
+function isPublicAddress(host: string): boolean {
+  if (isIPv4(host)) {
+    const parts = host.split('.').map(Number) as [number, number, number, number];
+    const [a, b] = parts;
+    if (a === 10 || a === 127 || a === 0) return false;
+    if (a === 172 && b >= 16 && b <= 31) return false;
+    if (a === 192 && b === 168) return false;
+    if (a === 169 && b === 254) return false;
+    if (a === 100 && b >= 64 && b <= 127) return false;
+    if (a >= 224) return false;
+    return true;
+  }
+
+  const lower = host.toLowerCase();
+  if (lower === '::' || lower === '::1') return false;
+  // Link-local, unique-local, and anything IPv4-mapped goes through the rules above.
+  if (/^fe[89ab]/.test(lower) || /^f[cd]/.test(lower)) return false;
+  const mapped = /^::ffff:(.+)$/.exec(lower);
+  if (mapped?.[1] && isIPv4(mapped[1])) return isPublicAddress(mapped[1]);
+  return true;
 }
 
 /**
@@ -2527,13 +3042,47 @@ function webPushTargets(
   return targets;
 }
 
-/** Stamped in at bundle time; falls back for source checkouts. */
-const NOTIFYJS_VERSION = process.env.NOTIFYJS_VERSION ?? '0.1.0';
+/**
+ * The version this build reports, and how it knows.
+ *
+ * `process.env.NOTIFYJS_VERSION` is stamped in at bundle time, which covers the
+ * released binaries and the container. Everything installed from npm has no such
+ * stamp, and the literal that used to stand in its place meant an
+ * `npm i -g @osqd/notifyjs-cli` hub reported `0.1.0` for ever: `serve` asked the
+ * release feed whether anything newer existed, was told yes on every start for
+ * the rest of the project's life, and the dashboard's own upgrade nudge compared
+ * a constant and could never fire. Read from the manifest beside the code
+ * instead, which is the version that was actually published.
+ */
+function ownVersion(fallback: string): string {
+  const stamped = process.env.NOTIFYJS_VERSION;
+  if (stamped) return stamped;
+  try {
+    // `dist/` sits one level under the package root. `createRequire` rather than
+    // a JSON import, which needs an attribute older runtimes reject outright.
+    const version = createRequire(import.meta.url)('../package.json').version as unknown;
+    return typeof version === 'string' && version ? version : fallback;
+  } catch {
+    // A checkout run straight from source, or a layout nobody expected: saying
+    // the wrong version is better than refusing to start over it.
+    return fallback;
+  }
+}
+
+const NOTIFYJS_VERSION = ownVersion('0.1.0');
 
 /** How precisely an ingest token's last use is recorded. See `handleIngest`. */
 const INGEST_LAST_USED_RESOLUTION_MS = 60_000;
 
 const MAX_ACK_RETRIES = 20;
+
+/**
+ * Most alerts kept waiting for an acknowledgement at once.
+ *
+ * Each one costs a timer, a retained notification and a fan-out over every session on
+ * every round, so this is the term that has to be bounded rather than the rounds.
+ */
+const MAX_ACK_WAITERS = 500;
 
 /** A pairing code is meant to be redeemed now, not next week. */
 const MAX_CODE_TTL_MS = 7 * 24 * 60 * 60_000;
@@ -2603,16 +3152,27 @@ const ADMIN_CAPABILITY: Record<string, Capability> = Object.assign(Object.create
   'ingest.create': 'devices.manage',
   'ingest.list': 'devices.manage',
   'ingest.revoke': 'devices.manage',
-  'roles.list': 'notify.receive',
+  // Not `notify.receive`, which `rbac.ts` singles out as freely grantable because it
+  // "only decides whether a device is on the receiving end of something". Reading the
+  // hub's authorization topology is not that: a stock viewer could list every role
+  // with its channels and capabilities, and `policies.list` handed it device ids on
+  // top. See `EITHER_CAPABILITY` - this one is reachable with either of two.
+  'roles.list': 'roles.manage',
   'roles.upsert': 'roles.manage',
   'roles.delete': 'roles.manage',
   'notify.send': 'notify.send',
   'notify.resolve': 'notify.send',
-  'heartbeats.list': 'notify.receive',
+  // A publisher may reasonably ask what is being watched - `notifyjs watches` does -
+  // but the complete inventory of monitored jobs and their descriptions is not
+  // something a receiving-only role should be able to enumerate.
+  'heartbeats.list': 'notify.send',
   'heartbeat.expect': 'notify.send',
   'heartbeat.checkin': 'notify.send',
-  'heartbeat.forget': 'notify.send',
-  'policies.list': 'notify.receive',
+  // Removing a beat is not publishing: it deletes the monitoring configuration from
+  // the store, so the thing that would have noticed a dead process silently stops
+  // existing and does not come back on restart. Nothing shipped here calls it.
+  'heartbeat.forget': 'roles.manage',
+  'policies.list': 'roles.manage',
   'policies.upsert': 'roles.manage',
   'policies.delete': 'roles.manage',
   metrics: 'audit.read',
@@ -2621,6 +3181,57 @@ const ADMIN_CAPABILITY: Record<string, Capability> = Object.assign(Object.create
   history: 'notify.receive',
 });
 
+/**
+ * Admin operations whose success is recorded with the device that asked for it.
+ *
+ * The configuration and authority changes only. `notify.send`, `call.place` and
+ * `heartbeat.checkin` are left out: the first two already write their own audit
+ * line, and all three are ordinary traffic rather than a change to what the hub
+ * is - attributing them would bury the lines that matter under the ones that do
+ * not.
+ */
+const ATTRIBUTED_ADMIN_OPS = new Set([
+  'devices.revoke',
+  'devices.rename',
+  'devices.setRole',
+  'pair.create',
+  'pair.revoke',
+  'ingest.create',
+  'ingest.revoke',
+  'roles.upsert',
+  'roles.delete',
+  'policies.upsert',
+  'policies.delete',
+  'heartbeat.expect',
+  'heartbeat.forget',
+]);
+
+/**
+ * What an admin frame was aimed at, for the audit line.
+ *
+ * Deliberately never `args.code`: a pairing code is a live credential until it
+ * is redeemed, and the audit log is readable by anybody holding `audit.read`.
+ */
+function adminTarget(args: Record<string, unknown>): string | undefined {
+  for (const key of ['deviceId', 'name', 'id', 'label', 'role']) {
+    const value = args[key];
+    if (typeof value === 'string' && value) return value.slice(0, 64);
+  }
+  return undefined;
+}
+
+/**
+ * Operations more than one capability legitimately reaches.
+ *
+ * Only `roles.list`: a `roles.manage` device must be able to read the roles it edits,
+ * and a `devices.manage` device must be able to pick the role a new pairing code
+ * points at. Everything else in `ADMIN_CAPABILITY` maps to exactly one.
+ */
+const EITHER_CAPABILITY: Record<string, readonly Capability[]> = Object.assign(
+  Object.create(null),
+  { 'roles.list': ['roles.manage', 'devices.manage'] satisfies readonly Capability[] },
+);
+
 /** A valid, throwaway key used to keep failed-auth timing flat. */
 const DECOY_PUBLIC_KEY = 'BdC4l3lXbNIqjRfjP8ycxHDCiMMVBpjs7ymEQR8lPFY';
 
@@ -2628,11 +3239,139 @@ function randomId(bytes: number): string {
   return toBase64Url(nodeCrypto.randomBytes(bytes));
 }
 
+/**
+ * Whether a snooze on this device holds an alert of this severity back.
+ *
+ * Extracted because it was written into the socket path alone, and the Web Push
+ * fan-out filtered with `canDeliver`, which knows nothing about snoozing. The two
+ * combined perversely: `deliver()` skipped the snoozed session, so the device was
+ * absent from `deliveredTo` - the very set the fan-out treats as "already
+ * reached" - and snoozing a device therefore *promoted* it from suppressed to
+ * "offline, wake it". Somebody who asked for quiet got a lock-screen push for an
+ * alert their app was deliberately not showing them.
+ *
+ * A critical alert is never held: the point is to quiet noise, not to switch the
+ * pager off.
+ */
+function snoozeHolds(
+  device: { snoozedUntil?: number },
+  severity: Severity,
+  now = Date.now(),
+): boolean {
+  return (device.snoozedUntil ?? 0) > now && severity !== 'critical';
+}
+
 /** Whether a device satisfies an explicit role/device restriction. */
 function matchesTargeting(to: Targeting, deviceId: string, role: string): boolean {
-  if (to.devices?.length && !to.devices.includes(deviceId)) return false;
-  if (to.roles?.length && !to.roles.includes(role)) return false;
+  // Guarded like `canDeliver`: an unreadable restriction matches nothing.
+  if (to.devices !== undefined) {
+    if (!Array.isArray(to.devices)) return false;
+    if (to.devices.length > 0 && !to.devices.includes(deviceId)) return false;
+  }
+  if (to.roles !== undefined) {
+    if (!Array.isArray(to.roles)) return false;
+    if (to.roles.length > 0 && !to.roles.includes(role)) return false;
+  }
   return true;
+}
+
+/**
+ * Validates an explicit device or role restriction.
+ *
+ * Refused rather than repaired, and refused here, because this value is
+ * persisted with the notification: `notify()` writes to history *before* it
+ * delivers. A `to` of `{ devices: { length: 1 } }` - accepted from the lowest
+ * publishing capability there is, and one an HTTP ingest token holds - was
+ * stored verbatim, and `canDeliver` then threw on `.includes` inside `deliver()`
+ * and, far worse, inside `replay()`. Every client syncs on `ready`, on returning
+ * to the foreground and on waking, so every device on the hub was closed with an
+ * internal error and reconnected into the same failure, indefinitely, across
+ * restarts - recoverable only by editing `history.jsonl` by hand, while the hub
+ * went on looking healthy because new alerts still delivered.
+ */
+function sanitizeTargeting(to: Targeting | undefined): Targeting | undefined {
+  if (to === undefined || to === null) return undefined;
+  if (typeof to !== 'object' || Array.isArray(to)) {
+    throw new Error('`to` must be an object with `devices` or `roles`');
+  }
+
+  const clean: Targeting = {};
+  for (const key of ['devices', 'roles'] as const) {
+    const list = (to as Record<string, unknown>)[key];
+    if (list === undefined || list === null) continue;
+    if (!Array.isArray(list) || list.some((entry) => typeof entry !== 'string')) {
+      throw new Error(`\`to.${key}\` must be an array of strings`);
+    }
+    // Refused, not trimmed: every other malformed shape here is refused by name,
+    // and quietly delivering an alert aimed at 250 devices to 200 of them is the
+    // kind of silence this function exists to remove.
+    if (list.length > MAX_TARGETS) {
+      throw new Error(`\`to.${key}\` may name at most ${MAX_TARGETS} entries, not ${list.length}`);
+    }
+    // Copied, not aliased. This value is persisted with the notification, and a
+    // caller that reuses or clears its target buffer afterwards was silently
+    // rewriting history: an emptied list reads as "no restriction", so a
+    // device-restricted alert became a broadcast on the next replay.
+    clean[key] = [...(list as string[])];
+  }
+  return clean.devices || clean.roles ? clean : undefined;
+}
+
+/** Most devices or roles one alert may be aimed at. */
+const MAX_TARGETS = 200;
+
+/** Ceiling for a heartbeat that arrived over the wire. */
+const MAX_WIRE_HEARTBEAT_MS = 30 * 24 * 60 * 60_000;
+
+/**
+ * Bounds a heartbeat asked for over the wire.
+ *
+ * `heartbeat.expect` was the one wire-reachable path that armed a timer with
+ * nothing clamping it, and it needs only `notify.send` - the lowest publishing
+ * capability, and one an HTTP ingest token can hold. `{ every: 1, repeat: true }`
+ * was taken as written: the sweep found it overdue on every tick, `repeat`
+ * re-armed the clock, and each miss raised a `critical` alert - which flood
+ * control never collapses and `requireAck` then re-sends for twenty rounds. The
+ * beat is stored, so it outlived both a restart and the device that set it.
+ *
+ * The floor is the sweep interval itself, and nothing more: a deadline shorter
+ * than the tick that checks it is missed on the next tick however honest the
+ * task, while anything above it is a cadence somebody may genuinely want -
+ * `RemoteNotifier.keepAlive` is the documented way for a monitored process to
+ * check in, and it comes through here. A programmatic caller on the hub's own
+ * side keeps the unbounded API; it is describing its own process rather than
+ * pointing a repeating page at somebody else's phone.
+ */
+function sanitizeHeartbeat(input: HeartbeatSpec, floorMs: number): HeartbeatSpec {
+  const raw = (input ?? {}) as Partial<HeartbeatSpec>;
+  if (raw.every === undefined) throw new Error('a heartbeat needs an interval');
+
+  const asked = parseDuration(raw.every);
+  // Refused rather than trimmed. Silently arming 30 days for a task that checks
+  // in quarterly manufactures the thing this module exists to avoid: a critical
+  // page, repeated every tick, for a job that is not late. The floor may only
+  // make a deadline later, so that one is safe to apply quietly.
+  if (asked > MAX_WIRE_HEARTBEAT_MS) {
+    throw new Error(
+      `a heartbeat interval must be ${formatDuration(MAX_WIRE_HEARTBEAT_MS)} or less, not ${formatDuration(asked)}`,
+    );
+  }
+  const grace = raw.grace === undefined ? 0 : parseDuration(raw.grace);
+  if (grace > MAX_WIRE_HEARTBEAT_MS) {
+    throw new Error(
+      `a heartbeat's grace must be ${formatDuration(MAX_WIRE_HEARTBEAT_MS)} or less, not ${formatDuration(grace)}`,
+    );
+  }
+
+  const clean: HeartbeatSpec = {
+    every: Math.max(floorMs, asked),
+    grace,
+    severity: coerceSeverity(raw.severity, 'critical'),
+    repeat: raw.repeat === true,
+  };
+  if (typeof raw.channel === 'string') clean.channel = raw.channel;
+  if (typeof raw.description === 'string') clean.description = raw.description;
+  return clean;
 }
 
 /** Ceilings for a ladder that arrived over the wire. */
@@ -2709,6 +3448,41 @@ function withSeverity(input: NotifyInput | string, severity: Severity): NotifyIn
  * printable characters would stop a role from matching the channel it was
  * configured for.
  */
+/**
+ * The severity a caller asked for, or a refusal.
+ *
+ * Coercing it silently was the quietest possible failure. `notify({ severity:
+ * 'criticial' })` - one letter - became `info`, which is below the floor every
+ * on-call role filters on, so the alert reached nobody and the caller was handed a
+ * `SentNotification` saying so in a field nothing checks. `'CRITICAL'` did the same.
+ * A paging alert that pages no one has to be an error, not a default.
+ *
+ * Case and surrounding space are forgiven rather than refused, because `'CRITICAL'`
+ * is not a typo, it is the same word. An absent severity still means the fallback,
+ * which is what almost every caller relies on.
+ *
+ * Safe to throw from: the two paths that carry an untrusted severity - HTTP ingest
+ * and an escalation rung off the wire - coerce before they get here, and the
+ * `notify.send` admin op turns a throw into an `ok: false` carrying this message.
+ */
+/** The title a caller must supply, trimmed and bounded. */
+function requireTitle(value: unknown): string {
+  const title = typeof value === 'string' ? value.trim() : '';
+  if (!title) throw new Error('notify requires a title');
+  return title.slice(0, 200);
+}
+
+function requireSeverity(value: unknown, fallback: Severity): Severity {
+  if (value === undefined || value === null) return fallback;
+  if (isSeverity(value)) return value;
+  if (typeof value === 'string' && isSeverity(value.trim().toLowerCase())) {
+    return value.trim().toLowerCase() as Severity;
+  }
+  throw new Error(
+    `severity must be one of ${SEVERITIES.join(', ')}, not ${JSON.stringify(value)}`,
+  );
+}
+
 function sanitizeChannel(value: unknown): string {
   if (typeof value !== 'string') return 'default';
   let out = '';
@@ -2720,7 +3494,6 @@ function sanitizeChannel(value: unknown): string {
   return out.trim().slice(0, 64) || 'default';
 }
 
-/** IPv4 or IPv6 literal, for deciding whether a proxy header is believable. */
 /** A JSON object and nothing else - arrays and null are not payloads. */
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -2767,6 +3540,7 @@ async function readJsonBody(
   return parsed;
 }
 
+/** IPv4 or IPv6 literal, for deciding whether a proxy header is believable. */
 function isIpAddress(value: string): boolean {
   if (/^\d{1,3}(\.\d{1,3}){3}$/.test(value)) {
     return value.split('.').every((part) => Number(part) <= 255);
@@ -2779,6 +3553,32 @@ function isIpAddress(value: string): boolean {
  * control characters keeps a device from smuggling ANSI escapes into an
  * operator's terminal or breaking a log line in two.
  */
+/**
+ * Text that will reach somebody's terminal, with the control characters removed.
+ *
+ * `sanitizeName` does this for names and channels, and SECURITY.md says titles and
+ * bodies are handled at the CLI - which left a call's spoken message and an ingest
+ * token's label as the two strings that reached a terminal raw. An escape sequence in
+ * a call message clears the operator's screen and repaints whatever it likes:
+ * `notifyjs listen` prints it the moment a call arrives, which is exactly when
+ * somebody is looking. Newlines are kept, because a message may legitimately have
+ * them and they cannot reposition a cursor.
+ */
+function sanitizeMessage(value: unknown, limit: number): string {
+  if (typeof value !== 'string') return '';
+  let out = '';
+  for (const ch of value) {
+    const code = ch.codePointAt(0) ?? 0;
+    if (ch === '\n') {
+      out += ch;
+      continue;
+    }
+    if (code < 0x20 || code === 0x7f || (code >= 0x80 && code <= 0x9f)) continue;
+    out += ch;
+  }
+  return out.slice(0, limit);
+}
+
 function sanitizeName(value: unknown): string {
   if (typeof value !== 'string') return '';
   let out = '';

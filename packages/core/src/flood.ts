@@ -53,6 +53,20 @@ export class FloodControl {
    */
   shouldCoalesce(n: Notification, explicitKey?: string): boolean {
     if (!this.opts.enabled) return false;
+
+    // `alwaysDeliver` wins, whatever key the caller supplied.
+    //
+    // This briefly did the opposite - honouring an explicit `dedupeKey` even for a
+    // severity the operator had exempted - to stop a crash loop becoming a thousand
+    // identical critical pages. That trade was wrong in two ways. It made a keyed
+    // critical wait up to a whole window, and the summary released afterwards is a
+    // *new* notification, so the original's targeting, `requireAck` and actions were
+    // dropped on the way. And it put a caller's argument above the operator's
+    // configuration, which is the wrong way round for the setting whose entire
+    // purpose is "these severities are never held back".
+    //
+    // A caller that wants its crash loop collapsed picks a severity the operator
+    // coalesces; `captureCrashes` now does exactly that.
     if (this.opts.alwaysDeliver.includes(n.severity)) return false;
 
     const key = explicitKey ?? defaultKey(n);

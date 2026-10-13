@@ -19,6 +19,7 @@ import {
   announcementFor,
   formatCodeInput,
   matchesFilter,
+  populateRoleSelect,
   qrDataUrl,
   renderNotificationItem,
 } from './view.js';
@@ -33,7 +34,9 @@ const client = new NotifyClient({
   crypto: webCrypto,
   storage: webStorage(),
   createSocket: (url) => new WebSocket(url) as never,
-  deviceName: loadPreferences().deviceName,
+  // Read when it is needed, not captured here: this runs as the page loads,
+  // before anybody has typed a name into the pairing form.
+  deviceName: () => loadPreferences().deviceName,
   platform: 'web',
   model: navigator.userAgent.slice(0, 60),
   autoReconnect: true,
@@ -143,7 +146,11 @@ function wireSettings(): void {
   // than being toggled programmatically.
   $('pref-desktop').addEventListener('change', async () => {
     await ringer.unlock();
-    await Notification.requestPermission();
+    // Guarded: iOS Safari has no `Notification` outside an installed web app, and
+    // this threw inside an async listener - an unhandled rejection, and the
+    // checkbox left showing the opposite of the truth because the render below
+    // never ran.
+    if ('Notification' in window) await Notification.requestPermission();
     renderSettings();
     updateNotificationButton();
   });
@@ -268,7 +275,7 @@ function updateNotificationButton(): void {
 
 $('enable-notifications').addEventListener('click', async () => {
   await ringer.unlock();
-  await Notification.requestPermission();
+  if ('Notification' in window) await Notification.requestPermission();
   updateNotificationButton();
   await subscribeToPush();
 });
@@ -572,16 +579,10 @@ async function refreshDevices(): Promise<void> {
 
 async function refreshRoles(): Promise<void> {
   const data = await client.admin('roles.list');
-  const select = $<HTMLSelectElement>('code-role');
-  select.replaceChildren(
-    ...data.roles.map((role) => {
-      const opt = document.createElement('option');
-      opt.value = role.name;
-      opt.textContent = role.name;
-      return opt;
-    }),
+  populateRoleSelect(
+    $<HTMLSelectElement>('code-role'),
+    data.roles.map((r) => r.name),
   );
-  select.value = 'viewer';
 }
 
 $('devices-toggle').addEventListener('click', () => {
@@ -636,10 +637,27 @@ client.on('status', (status) => {
 
 client.on('ready', (ready) => {
   showApp();
+  // Whatever the banner was saying, this tab is connected now.
+  //
+  // A `bye` arrives on every graceful shutdown, and the client only emits
+  // `service:back` when it had previously decided the service was missing - so
+  // a hub that restarted and came back inside its own grace window (the normal
+  // case for a deploy) left every open dashboard showing a red "Service
+  // restarting" alert permanently, while being perfectly healthy. Nothing but a
+  // reload cleared it.
+  $('service-down').hidden = true;
   $('hub-name').textContent = client.serverName ?? 'NotifyJS';
   $('device-line').textContent = `${ready.deviceName} · ${ready.role}`;
   $('devices-toggle').hidden = !canManage();
   $('snooze').hidden = false;
+  // The hub's answer, not this tab's memory of one: a snooze is stored on the
+  // device record and enforced on delivery, so a tab opened in the middle of one
+  // used to show "Snooze 30m" while alerts were being held back.
+  rememberSnooze(
+    ready.snoozedUntil === undefined
+      ? 0
+      : Date.now() + (ready.snoozedUntil - ready.serverTime),
+  );
   renderSnooze();
   $('settings-toggle').hidden = false;
   renderSettings();
@@ -655,13 +673,20 @@ client.on('ready', (ready) => {
 });
 
 client.on('notification', (n) => {
+  // Acknowledged before anything else, including for an alert already on screen.
+  // The hub's replay cursor only moves when an ack arrives, so returning early
+  // for a repeat left that cursor stuck: the alert was re-sent on every
+  // reconnect for ever, the device read as permanently behind, and a
+  // `requireAck` alert exhausted its retries and was recorded as unseen by
+  // somebody who had read it. `SourceManager` acks unconditionally for exactly
+  // this reason, even for alerts it filters out.
+  client.ack([n.id], { seq: n.seq });
   if (feed.some((existing) => existing.id === n.id)) return; // retries repeat ids
   feed.unshift(n);
   if (feed.length > 300) feed.pop();
   renderFeed();
   announce(announcementFor(n));
   popNotification(n);
-  client.ack([n.id], { seq: n.seq });
 });
 
 /** The condition ended, so the alert should stop occupying a screen. */
@@ -733,7 +758,15 @@ function renderSnooze(): void {
   button.dataset.active = String(active);
   button.textContent = active ? 'Snoozed - tap to resume' : 'Snooze 30m';
   if (snoozeExpiry) clearTimeout(snoozeExpiry);
-  snoozeExpiry = active ? setTimeout(renderSnooze, until - Date.now()) : undefined;
+  // Redraw when it ends, and collect what it held back. A snooze that runs out on
+  // its own changes nothing on either side, so without this a tab left open
+  // recovered those alerts never.
+  snoozeExpiry = active
+    ? setTimeout(() => {
+        renderSnooze();
+        client.sync();
+      }, until - Date.now() + 250)
+    : undefined;
 }
 
 function rememberSnooze(until: number): void {
@@ -750,6 +783,9 @@ $('snooze').addEventListener('click', () => {
   if ($<HTMLButtonElement>('snooze').dataset.active === 'true') {
     client.unsnooze();
     rememberSnooze(0);
+    // The hub held those alerts rather than dropping them, and nothing else would
+    // ask for them: resuming has to collect what was suppressed.
+    client.sync();
     announce('Notifications resumed.');
   } else {
     const duration = 30 * 60_000;

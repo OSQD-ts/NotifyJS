@@ -17,12 +17,13 @@ import { nodeCrypto } from '@osqd/notifyjs-protocol/node';
  * notices - and, just as importantly, that it stays quiet when it should.
  */
 
-let port = 7920;
-
 async function hubWith(options = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'notifyjs-dw-'));
   const hub = new Notifier({
-    port: ++port,
+    // Chosen by the OS. Fixed ports from 7921 up meant two runs on one machine -
+    // or anything else holding one - failed the whole file with EADDRINUSE, which
+    // is why `e2e` and `sources` moved off them.
+    port: 0,
     storeDir: dir,
     dashboard: false,
     logger: false,
@@ -35,7 +36,12 @@ async function hubWith(options = {}) {
     ...options.notifier,
   });
   await hub.start();
-  return { hub, dir, port, cleanup: () => rmSync(dir, { recursive: true, force: true }) };
+  return {
+    hub,
+    dir,
+    port: Number(new URL(hub.url).port),
+    cleanup: () => rmSync(dir, { recursive: true, force: true }),
+  };
 }
 
 function deviceFor(p, extra = {}) {
@@ -91,15 +97,48 @@ test('a device raises the alarm when the hub dies without warning', async () => 
 
   const missing = once(device, 'service:missing', 8000);
 
-  // Stop without the farewell frame a planned shutdown would send, which is
-  // what a crash looks like from the device's side.
-  await hub.stop('crash-simulation');
+  // A crash, not a shutdown. `hub.stop()` always sends `bye` - a reason string does
+  // not change that - and a device receiving one holds its alarm for four intervals
+  // plus the grace. So this test used to be measuring the announced-restart path
+  // while claiming to measure an unannounced death, and its assertion was loose
+  // enough to pass either way. Tearing the sockets down without a frame is what a
+  // process disappearing looks like from here.
+  for (const session of hub.sessions.values()) session.ws.terminate();
   const event = await missing;
 
+  // Inside the interval and its grace, and comfortably below the hold a `bye`
+  // would have earned - which is what distinguishes the two paths.
   assert.ok(event.silentForMs >= 200, 'it waited out the promised interval');
+  assert.ok(event.silentForMs < 1_000, `it did not wait out a farewell hold: ${event.silentForMs}`);
   assert.equal(event.certain, true, 'the device knew its own network was fine');
   assert.match(event.spec.alert.title, /Checkout Service may be down/);
   assert.equal(device.serviceLooksDown, true);
+
+  device.disconnect();
+  await hub.stop();
+  cleanup();
+});
+
+test('a planned shutdown does not raise the alarm the way a crash does', async () => {
+  // The other side of the same coin, and the reason the farewell frame exists: a
+  // deploy must not page anybody. Nothing in this file distinguished the two, so
+  // removing the `bye` send entirely left it green.
+  const { hub, port: p, cleanup } = await hubWith();
+  const device = deviceFor(p, { isOnline: () => true });
+
+  await device.pair(hub.createPairingCode({ role: 'oncall' }).code);
+  await once(device, 'ready');
+
+  const farewell = once(device, 'service:bye', 4000);
+  await hub.stop('deploying');
+  assert.match((await farewell).reason, /deploying/);
+
+  // The alarm a crash raises within half a second must not arrive here.
+  const quiet = await Promise.race([
+    once(device, 'service:missing', 1500).then(() => 'alarmed'),
+    new Promise((r) => setTimeout(() => r('quiet'), 1200)),
+  ]);
+  assert.equal(quiet, 'quiet', 'an announced shutdown is held, not paged');
 
   device.disconnect();
   cleanup();
@@ -153,9 +192,7 @@ test('a planned shutdown does not page anyone', async () => {
 
 test('the alarm clears when the hub comes back', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'notifyjs-dw-back-'));
-  const p = ++port;
   const opts = {
-    port: p,
     storeDir: dir,
     dashboard: false,
     logger: false,
@@ -163,8 +200,12 @@ test('the alarm clears when the hub comes back', async () => {
     security: { connectionBurst: 500, connectionRefillPerSec: 100, maxConnectionsPerIp: 200 },
   };
 
-  const first = new Notifier(opts);
+  // The device has to find the same address twice, so the port cannot be 0 for the
+  // second hub - but it need not be picked by hand either: the OS hands one out
+  // here, and it is free again the moment the first hub stops.
+  const first = new Notifier({ ...opts, port: 0 });
   await first.start();
+  const p = Number(new URL(first.url).port);
 
   const storage = memoryStorage();
   const device = deviceFor(p, { storage, isOnline: () => true, autoReconnect: true });
@@ -172,14 +213,17 @@ test('the alarm clears when the hub comes back', async () => {
   await once(device, 'ready');
 
   const missing = once(device, 'service:missing', 8000);
-  await first.stop('crash-simulation');
+  // Killed rather than stopped, for the same reason as the test above: `stop()`
+  // sends `bye`, and a device that gets one holds its alarm.
+  for (const session of first.sessions.values()) session.ws.terminate();
+  await first.stop();
   await missing;
   assert.equal(device.serviceLooksDown, true);
 
   // Same store, so the device's identity is still known: it reconnects on its
   // own and the alarm should clear without anyone touching the phone.
   const back = once(device, 'service:back', 15_000);
-  const second = new Notifier(opts);
+  const second = new Notifier({ ...opts, port: p });
   await second.start();
 
   const recovery = await back;

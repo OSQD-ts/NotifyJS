@@ -9,7 +9,6 @@ import {
   statSync,
 } from 'node:fs';
 import { readFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { pipeline } from 'node:stream/promises';
 import { Readable } from 'node:stream';
@@ -90,7 +89,22 @@ export async function apply(
     throw new Error(`release ${release.tag} names an asset with a path in it; refusing to update`);
   }
 
-  const work = mkdtempSync(join(tmpdir(), 'notifyjs-update-'));
+  // Beside the binary rather than in the system temp directory. `rename(2)`
+  // cannot cross filesystems, and `/tmp` is a different one on any machine with
+  // tmpfs - Fedora, Arch, RHEL, openSUSE - as well as anywhere the binary lives
+  // on its own mount. The release was found, downloaded and checksummed, the old
+  // binary was moved aside, and only then did the install fail with EXDEV: the
+  // rollback worked, so the machine was left intact and the update impossible.
+  //
+  // Replacing the binary needs write permission on this directory in any case,
+  // so a directory that cannot hold the work directory could never have taken
+  // the new binary either. Said here rather than three steps later.
+  let work: string;
+  try {
+    work = mkdtempSync(join(dirname(target), '.notifyjs-update-'));
+  } catch {
+    throw new Error(`cannot write next to ${target}; run the update as the user that owns it`);
+  }
   try {
     const archive = join(work, asset.name);
     await download(asset.url, archive);

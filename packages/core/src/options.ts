@@ -1,4 +1,4 @@
-import { DEFAULT_PORT, type Severity } from '@osqd/notifyjs-protocol';
+import { DEFAULT_PORT, isSeverity, SEVERITIES, type Severity } from '@osqd/notifyjs-protocol';
 
 /**
  * Brute-force defences. The hub is expected to sit on a port that is open to
@@ -33,9 +33,15 @@ export interface SecurityOptions {
    * Guards against an authenticated peer that never drains its socket.
    */
   maxBufferedBytes: number;
-  /** When set, only these IPs may connect at all. */
+  /**
+   * When set, only these addresses may connect at all.
+   *
+   * Each entry is a bare address or a CIDR range (`'10.0.0.5'`,
+   * `'10.0.0.0/24'`, `'2001:db8::/32'`). An entry that is neither is refused
+   * when the hub is constructed rather than quietly matching nothing.
+   */
   allowIps?: string[];
-  /** Always refused, checked before anything else. */
+  /** Always refused, checked before anything else. Same forms as `allowIps`. */
   denyIps?: string[];
   /**
    * Browser `Origin` values accepted on upgrade.
@@ -281,87 +287,373 @@ export interface ResolvedOptions
   logger: (line: string, meta?: Record<string, unknown>) => void;
 }
 
+/**
+ * Refuses a number that would quietly switch off the thing it configures.
+ *
+ * `port: 70000` used to validate cleanly, print cleanly, and then fail at bind
+ * time with a `RangeError` from inside Node. The quieter ones never failed at
+ * all: `historyLimit: 0` - a plausible way to write "keep nothing" - made
+ * `readTail` return the entire file on load and then had the next notification
+ * splice the whole cache away, so replay to a device coming back from offline
+ * silently delivered nothing, for ever, with no error anywhere. A
+ * `heartbeatTickMs` of 0 is a `setInterval` with no gap in it.
+ *
+ * Checked here, where an operator who mistyped a value is still reading output.
+ */
+function bounded(
+  option: string,
+  value: unknown,
+  min: number,
+  max = Number.MAX_SAFE_INTEGER,
+  whole = true,
+): number {
+  // A numeric string is accepted and converted. The types say `number`, but this
+  // library is imported from plain JavaScript - the examples in this repository
+  // are - and `new Notifier({ port: process.env.PORT })` worked before this
+  // validation existed, because `listen('8080')` is valid. Refusing it would have
+  // been a new failure introduced by a fix. An empty string is not a number and
+  // is refused: read as one it would mean "any free port", which is a hub nobody
+  // can be told the address of.
+  const n =
+    typeof value === 'number'
+      ? value
+      : typeof value === 'string' && value.trim() !== ''
+        ? Number(value)
+        : NaN;
+
+  if (!Number.isFinite(n) || n < min || n > max) {
+    throw new OptionError(`${option} must be between ${min} and ${max}, not ${describe(value)}`);
+  }
+  // Whole numbers almost throughout: these are ports, counts and milliseconds, and
+  // a fractional one only ever arrives from a bad division. The exception is a
+  // rate, where the default itself is 0.5 per second and flooring it would mean
+  // never refilling at all.
+  return whole ? Math.floor(n) : n;
+}
+
+/**
+ * Applies `bounded` to the named fields of a merged group of options.
+ *
+ * The floors are not decoration. Validation used to stop at the top level, and
+ * every number one object deeper was taken as given: `security.maxMessageBytes: 0`
+ * dropped every frame the hub was sent and disconnected the sender,
+ * `maxConnectionsPerIp: 0` refused every device, and `flood.windowMs: 0` opened a
+ * window that closed in the same tick. Worse than any zero was what an unset
+ * environment variable produces - `Number(undefined)` is `NaN`, which compares
+ * false against everything, so the limit was not low but absent.
+ */
+function numbers<T>(
+  prefix: string,
+  group: T,
+  mins: Partial<Record<keyof T & string, number | { min: number; max?: number; whole?: boolean }>>,
+): T {
+  const bag = group as Record<string, unknown>;
+  for (const [key, spec] of Object.entries(mins)) {
+    const rule = typeof spec === 'number' ? { min: spec } : (spec as { min: number; max?: number; whole?: boolean });
+    bag[key] = bounded(prefix + key, bag[key], rule.min, rule.max, rule.whole);
+  }
+  return group;
+}
+
+/**
+ * Refuses a boolean that is not one.
+ *
+ * `security: { trustProxy: process.env.TRUST_PROXY }` with that variable set to
+ * `'false'` is a truthy string, and what it switched on was reading the client's
+ * address out of a request header - so both IP lists, every ban and the
+ * per-address connection limit became a line the caller could write for
+ * themselves. The same spelling turns HTTP publishing on, or the device watchdog
+ * off.
+ *
+ * The strings are accepted because an option wired from a configuration file or
+ * an environment variable arrives as one, exactly as `bounded` accepts a numeric
+ * string. Anything that is neither answer is refused rather than guessed at.
+ */
+function flag(option: string, value: unknown): boolean {
+  if (typeof value === 'boolean') return value;
+  // 1 and 0 are the two numbers that are not a guess, and both worked when this
+  // was a plain truthiness test, so refusing them would be a fault introduced by
+  // a fix. Any other number is refused along with the rest.
+  if (value === 1) return true;
+  if (value === 0) return false;
+  if (typeof value === 'string') {
+    const s = value.trim().toLowerCase();
+    if (s === 'true' || s === '1' || s === 'yes' || s === 'on') return true;
+    if (s === 'false' || s === '0' || s === 'no' || s === 'off') return false;
+  }
+  throw new OptionError(`${option} must be true or false, not ${describe(value)}`);
+}
+
+/**
+ * A refused option, as opposed to a failure while running.
+ *
+ * Carried as its own class so a caller can tell the two apart - the CLI turns it
+ * into the exit code it reserves for "you typed it wrong", which a script wrapping
+ * `notifyjs serve` uses to decide whether retrying could ever help.
+ */
+export class OptionError extends Error {}
+
+/**
+ * How a refused value is quoted back.
+ *
+ * `JSON.stringify(NaN)` is `'null'`, and `NaN` is the value these options most
+ * often hold - it is what `Number(process.env.MISSING)` produces - so the message
+ * an operator read named something they had not written.
+ */
+function describe(value: unknown): string {
+  if (typeof value === 'number' && !Number.isFinite(value)) return String(value);
+  return JSON.stringify(value) ?? String(value);
+}
+
+/**
+ * Refuses a severity that is not one of the six.
+ *
+ * `flood: { alwaysDeliver: ['criticial'] }` is the whole setting defeated by one
+ * letter: the list is matched with `includes`, so a misspelt severity matches
+ * nothing and every critical alert waited for a summary window - while the
+ * configuration said, and the operator believed, that criticals are never held
+ * back. A misspelt `deviceWatchdog.severity` shipped to every paired device as the
+ * severity of the alert raised when this hub goes quiet.
+ *
+ * Refused rather than coerced. The nearest guess for a severity is `'info'`, and
+ * silently turning somebody's pager alert into an `info` is worse than not
+ * starting.
+ */
+function severity(option: string, value: unknown): Severity {
+  if (isSeverity(value)) return value;
+  throw new OptionError(`${option} must be one of ${SEVERITIES.join(', ')}, not ${describe(value)}`);
+}
+
+/** The same, for the list form. */
+function severityList(option: string, value: unknown): Severity[] {
+  if (!Array.isArray(value)) {
+    throw new OptionError(`${option} must be an array of severities, not ${describe(value)}`);
+  }
+  return value.map((entry, i) => severity(`${option}[${i}]`, entry));
+}
+
+/**
+ * The VAPID `sub` claim, which RFC 8292 requires to be a `mailto:` or `https:`
+ * URI. This file already said so; nothing checked it, and a bare address went
+ * into the signed token, where Apple rejects it - so every push to an iPhone
+ * failed for a reason visible only in a push service's response body.
+ */
+function vapidSubject(option: string, value: unknown): string {
+  if (typeof value === 'string' && value.trim() !== '') {
+    const text = value.trim();
+    let scheme = '';
+    try {
+      scheme = new URL(text).protocol;
+    } catch {
+      /* not a URI at all, which the throw below reports */
+    }
+    if (scheme === 'mailto:' || scheme === 'https:') return text;
+  }
+  throw new OptionError(`${option} must be a mailto: or https: URI, not ${describe(value)}`);
+}
+
+/**
+ * Validates a merged group of options in place: the booleans through `flag`, the
+ * numbers through `bounded` with each field's own floor.
+ *
+ * The floors are not decoration. Validation used to stop at the top level and
+ * every number one object deeper was taken as given: `security.maxMessageBytes: 0`
+ * dropped every frame the hub was sent and disconnected the sender,
+ * `maxConnectionsPerIp: 0` refused every device, and `flood.windowMs: 0` opened a
+ * window that closed in the same tick. Worse than any zero is what an unset
+ * environment variable produces - `Number(undefined)` is `NaN`, which compares
+ * false against everything, so the limit was not low but absent.
+ */
+function checked<T>(
+  prefix: string,
+  group: T,
+  rules: {
+    flags?: readonly (keyof T & string)[];
+    numbers?: Partial<Record<keyof T & string, number | NumberRule>>;
+  },
+): T {
+  const bag = group as Record<string, unknown>;
+  for (const key of rules.flags ?? []) bag[key] = flag(prefix + key, bag[key]);
+  for (const [key, spec] of Object.entries(rules.numbers ?? {})) {
+    const rule: NumberRule = typeof spec === 'number' ? { min: spec } : (spec as NumberRule);
+    bag[key] = bounded(prefix + key, bag[key], rule.min, rule.max, rule.whole);
+  }
+  return group;
+}
+
+interface NumberRule {
+  min: number;
+  max?: number;
+  /** Set false for the one option that is a rate rather than a count. */
+  whole?: boolean;
+}
+
+/**
+ * Drops keys whose value is `undefined`, so a spread cannot erase a default.
+ *
+ * `{ ...defaults, ...caller }` copies an explicit `undefined` over the value
+ * beneath it, and an application wiring its options from its own configuration
+ * produces exactly that: `{ intervalMs: cfg.watchdogMs }` with that key unset
+ * replaced a working default with nothing. For the device watchdog the result
+ * was shipped to every paired device, where the numbers it needs became
+ * `setTimeout(NaN)`.
+ */
+function defined<T extends object>(o: T | undefined): Partial<T> {
+  if (!o) return {};
+  return Object.fromEntries(Object.entries(o).filter(([, v]) => v !== undefined)) as Partial<T>;
+}
+
 export function resolveOptions(o: NotifierOptions = {}): ResolvedOptions {
   const log = o.logger === false ? () => {} : o.logger ?? defaultLogger;
-  return {
-    port: o.port ?? DEFAULT_PORT,
-    host: o.host ?? '0.0.0.0',
-    name: o.name ?? 'NotifyJS',
-    storeDir: o.storeDir ?? '.notifyjs',
-    dashboard: o.dashboard ?? true,
-    dashboardDir: o.dashboardDir,
-    tls: o.tls,
-    historyLimit: o.historyLimit ?? 500,
-    auditLimit: o.auditLimit ?? 1000,
-    ackRetryMs: o.ackRetryMs ?? 30_000,
-    defaultRingSeconds: o.defaultRingSeconds ?? 30,
-    replayLimit: o.replayLimit ?? 50,
-    heartbeatTickMs: o.heartbeatTickMs ?? 5_000,
-    // Matches the device watchdog's own cadence, so a hub with both on sends
-    // one frame and one ping on the same tick rather than two timers' worth.
-    livenessIntervalMs: Math.max(
-      1_000,
-      o.livenessIntervalMs ?? o.deviceWatchdog?.intervalMs ?? 30_000,
-    ),
-    metrics: o.metrics ?? true,
-    metricsToken: o.metricsToken,
-    publicUrl: o.publicUrl,
-    logger: log,
-    deviceWatchdog: {
-      // On by default: the failure it catches is the one that matters most,
-      // and it costs one small frame every 30 seconds per device.
+  // Resolved before the rest because `livenessIntervalMs` defaults to its cadence,
+  // and borrowing the validated number means a bad one is refused under the name
+  // the caller actually wrote rather than the one that read it.
+  const deviceWatchdog = checked(
+    'deviceWatchdog.',
+    {
+      // On by default: the failure it catches is the one that matters most, and
+      // it costs one small frame every 30 seconds per device.
       enabled: true,
       intervalMs: 30_000,
       graceMs: 30_000,
-      severity: 'critical',
-      ...o.deviceWatchdog,
+      ...defined(o.deviceWatchdog),
+      severity: severity('deviceWatchdog.severity', o.deviceWatchdog?.severity ?? 'critical'),
     },
-    flood: {
-      enabled: true,
-      windowMs: 60_000,
-      burst: 5,
-      alwaysDeliver: ['critical'],
-      ...o.flood,
-    },
-    actions: { enabled: false, ...o.actions },
-    ingest: {
-      enabled: false,
-      allowInsecure: false,
-      // Enough for a verbose Alertmanager group, far short of anything worth
-      // buffering from an unauthenticated caller.
-      maxBodyBytes: 64 * 1024,
-      ratePerMinute: 120,
-      ...o.ingest,
-    },
-    webPush: {
-      enabled: true,
-      includeBody: false,
-      evenWhenOnline: false,
-      subject: 'https://github.com/OSQD-ts/NotifyJS',
-      // Four hours. Long enough to survive a closed laptop over lunch, short
-      // enough that a pager alert never arrives stale enough to mislead.
-      ttlSeconds: 4 * 60 * 60,
-      ...o.webPush,
-    },
-    security: {
-      maxConnectionsPerIp: 10,
-      connectionBurst: 10,
-      connectionRefillPerSec: 0.5,
-      maxUnauthenticated: 100,
-      handshakeTimeoutMs: 10_000,
-      maxFailuresBeforeBan: 5,
-      failureWindowMs: 15 * 60_000,
-      banBaseMs: 60_000,
-      banMaxMs: 24 * 60 * 60_000,
-      maxMessageBytes: 64 * 1024,
-      messageRate: { points: 60, windowMs: 10_000 },
-      clockSkewMs: 60_000,
-      maxBufferedBytes: 1024 * 1024,
-      allowedOrigins: 'same-origin',
-      trustProxy: false,
-      uniformFailureMs: 250,
-      ...o.security,
-    },
+    { flags: ['enabled'], numbers: { intervalMs: 1, graceMs: 0 } },
+  );
+  return {
+    port: bounded('port', o.port ?? DEFAULT_PORT, 0, 65535),
+    host: o.host ?? '0.0.0.0',
+    name: o.name ?? 'NotifyJS',
+    storeDir: o.storeDir ?? '.notifyjs',
+    dashboard: flag('dashboard', o.dashboard ?? true),
+    dashboardDir: o.dashboardDir,
+    tls: o.tls,
+    historyLimit: bounded('historyLimit', o.historyLimit ?? 500, 1),
+    auditLimit: bounded('auditLimit', o.auditLimit ?? 1000, 1),
+    ackRetryMs: bounded('ackRetryMs', o.ackRetryMs ?? 30_000, 100),
+    defaultRingSeconds: bounded('defaultRingSeconds', o.defaultRingSeconds ?? 30, 1, 600),
+    replayLimit: bounded('replayLimit', o.replayLimit ?? 50, 0),
+    heartbeatTickMs: bounded('heartbeatTickMs', o.heartbeatTickMs ?? 5_000, 1),
+    // Matches the device watchdog's own cadence, so a hub with both on sends
+    // one frame and one ping on the same tick rather than two timers' worth.
+    //
+    // Floored rather than refused, because the floor is the documented behaviour,
+    // but the value still has to be a number: `Number(process.env.X)` with that
+    // variable unset is `NaN`, `Math.max(1_000, NaN)` is `NaN`, and
+    // `setInterval(NaN)` is a one-millisecond loop pinging every live device.
+    livenessIntervalMs: Math.max(
+      1_000,
+      bounded('livenessIntervalMs', o.livenessIntervalMs ?? deviceWatchdog.intervalMs, 1),
+    ),
+    metrics: flag('metrics', o.metrics ?? true),
+    metricsToken: o.metricsToken,
+    publicUrl: o.publicUrl,
+    logger: log,
+    deviceWatchdog,
+    flood: checked(
+      'flood.',
+      {
+        enabled: true,
+        windowMs: 60_000,
+        burst: 5,
+        ...defined(o.flood),
+        alwaysDeliver: severityList('flood.alwaysDeliver', o.flood?.alwaysDeliver ?? ['critical']),
+      },
+      { flags: ['enabled'], numbers: { windowMs: 1, burst: 0 } },
+    ),
+    actions: checked('actions.', { enabled: false, ...defined(o.actions) }, {
+      flags: ['enabled'],
+    }),
+    ingest: checked(
+      'ingest.',
+      {
+        enabled: false,
+        allowInsecure: false,
+        // Enough for a verbose Alertmanager group, far short of anything worth
+        // buffering from an unauthenticated caller.
+        maxBodyBytes: 64 * 1024,
+        ratePerMinute: 120,
+        ...defined(o.ingest),
+      },
+      {
+        flags: ['enabled', 'allowInsecure'],
+        numbers: { maxBodyBytes: 1, ratePerMinute: 1 },
+      },
+    ),
+    webPush: checked(
+      'webPush.',
+      {
+        enabled: true,
+        includeBody: false,
+        evenWhenOnline: false,
+        // Four hours. Long enough to survive a closed laptop over lunch, short
+        // enough that a pager alert never arrives stale enough to mislead.
+        ttlSeconds: 4 * 60 * 60,
+        ...defined(o.webPush),
+        subject: vapidSubject(
+          'webPush.subject',
+          o.webPush?.subject ?? 'https://github.com/OSQD-ts/NotifyJS',
+        ),
+      },
+      {
+        flags: ['enabled', 'includeBody', 'evenWhenOnline'],
+        numbers: { ttlSeconds: 0 },
+      },
+    ),
+    security: checked(
+      'security.',
+      {
+        maxConnectionsPerIp: 10,
+        connectionBurst: 10,
+        connectionRefillPerSec: 0.5,
+        maxUnauthenticated: 100,
+        handshakeTimeoutMs: 10_000,
+        maxFailuresBeforeBan: 5,
+        failureWindowMs: 15 * 60_000,
+        banBaseMs: 60_000,
+        banMaxMs: 24 * 60 * 60_000,
+        maxMessageBytes: 64 * 1024,
+        clockSkewMs: 60_000,
+        maxBufferedBytes: 1024 * 1024,
+        allowedOrigins: 'same-origin' as SecurityOptions['allowedOrigins'],
+        trustProxy: false,
+        uniformFailureMs: 250,
+        ...defined(o.security),
+        // After the spread, and merged rather than replaced: this is the one
+        // nested object in here, and a caller supplying just one of its two
+        // fields would otherwise lose the other to `undefined`.
+        messageRate: checked(
+          'security.messageRate.',
+          {
+            points: 60,
+            windowMs: 10_000,
+            ...defined(o.security?.messageRate),
+          },
+          { numbers: { points: 1, windowMs: 1 } },
+        ),
+      },
+      {
+        flags: ['trustProxy'],
+        numbers: {
+          maxConnectionsPerIp: 1,
+          connectionBurst: 1,
+          // The one rate in here, and so the one option that keeps its fraction:
+          // the default is half a connection per second.
+          connectionRefillPerSec: { min: 0, whole: false },
+          maxUnauthenticated: 1,
+          handshakeTimeoutMs: 1,
+          maxFailuresBeforeBan: 1,
+          failureWindowMs: 1,
+          banBaseMs: 0,
+          banMaxMs: 0,
+          maxMessageBytes: 1,
+          clockSkewMs: 0,
+          maxBufferedBytes: 1,
+          uniformFailureMs: 0,
+        },
+      },
+    ),
   };
 }
 

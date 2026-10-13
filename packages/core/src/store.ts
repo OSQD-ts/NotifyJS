@@ -1,9 +1,11 @@
 import {
   appendFileSync,
+  chmodSync,
   existsSync,
   mkdirSync,
   readFileSync,
   renameSync,
+  rmSync,
   writeFileSync,
 } from 'node:fs';
 import { join } from 'node:path';
@@ -62,6 +64,48 @@ function own<T>(map: Record<string, T>, key: string): T | undefined {
 /** Keys that would mutate a plain object's prototype rather than its contents. */
 function unsafeKey(key: string): boolean {
   return key === '__proto__' || key === 'constructor' || key === 'prototype';
+}
+
+/** Whether a pid belongs to a process that still exists. */
+function processAlive(pid: number): boolean {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  // Our own pid means another hub inside this process, which is very much alive.
+  if (pid === process.pid) return true;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    // EPERM means it exists and belongs to somebody else.
+    return (err as NodeJS.ErrnoException).code === 'EPERM';
+  }
+}
+
+/**
+ * The pid of a live hub holding this store directory, if one is.
+ *
+ * For the tools that read and write these files behind a hub's back. `export` and
+ * `import` both say to stop the hub first - a running one holds the document in
+ * memory and writes it on a timer, so an export can miss what was never flushed and
+ * an import is overwritten by the next flush - and neither could tell whether one
+ * was running. The claim a `Store` leaves behind answers it.
+ */
+export function hubHolding(dir: string): number | undefined {
+  try {
+    const held = JSON.parse(readFileSync(join(dir, 'owner.json'), 'utf8')) as { pid?: unknown };
+    const pid = typeof held?.pid === 'number' ? held.pid : undefined;
+    return pid !== undefined && processAlive(pid) ? pid : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Restates a mode on something that already exists; a no-op where modes are not. */
+function tighten(path: string, mode: number): void {
+  try {
+    chmodSync(path, mode);
+  } catch {
+    /* a filesystem without POSIX modes, or something we do not own */
+  }
 }
 
 /** Ceiling on retained ban records. See `Store.putBan`. */
@@ -126,6 +170,8 @@ export class Store {
   private readonly file: string;
   private readonly historyFile: string;
   private readonly auditFile: string;
+  /** Names the hub that currently has this directory open. See `sharedWith`. */
+  private readonly ownerFile: string;
   private saveTimer: NodeJS.Timeout | undefined;
   private dirty = false;
   /** Stops a failed final write from arming a timer nothing will service. */
@@ -157,10 +203,90 @@ export class Store {
    */
   readonly recoveredFrom: string | undefined;
 
+  /**
+   * Set when another live hub is already using this directory.
+   *
+   * Two hubs on one store is a real misconfiguration - `docker compose up
+   * --scale`, a second process started before the first was noticed, a systemd
+   * unit that restarted without the old one exiting - and it used to be silent and
+   * destructive. Both write the whole document on a timer, so the later write wins
+   * and whatever the other one had done is gone: pairing codes minted on one
+   * vanish, and devices paired against one fail to authenticate the moment the
+   * other's `serverId` lands, because that value is part of every auth signature.
+   *
+   * Reported rather than refused. A hub that will not start is worse than one that
+   * says something is wrong, which is the same trade every write in here makes.
+   */
+  get sharedWith(): number | undefined {
+    return this.shared;
+  }
+
+  private shared: number | undefined;
+
+  /** This instance's claim on the directory, so `close()` only clears its own. */
+  private readonly claim: string;
+
+  /**
+   * The files whose last write failed.
+   *
+   * Per file rather than one flag for the store, because these three are written
+   * separately and fail separately: a history log left unwritable by a permission
+   * change, or a full disk that still has room for a short append but not for the
+   * whole document, made a single flag alternate between failing and recovered on
+   * every drain - so the operator got two log lines a second and a gauge that read
+   * healthy at rest while a log was still being dropped.
+   */
+  private readonly failing = new Set<string>();
+
+  /** Every write that has failed, over the life of this store. */
+  private writeFailures = 0;
+
+  /** Whether everything can be written, and how many writes have not been. */
+  get persistence(): { writable: boolean; failures: number } {
+    return { writable: this.failing.size === 0, failures: this.writeFailures };
+  }
+
+  /**
+   * Records the outcome of one file's write, and reports the edges.
+   *
+   * Only the transitions are reported: a read-only mount fails on every drain, and
+   * an operator needs to be told once rather than every few seconds.
+   */
+  private wrote(file: string, ok: boolean, error?: Error): void {
+    const wasWritable = this.failing.size === 0;
+    if (ok) {
+      this.failing.delete(file);
+    } else {
+      this.writeFailures += 1;
+      this.failing.add(file);
+    }
+    const writable = this.failing.size === 0;
+    if (writable === wasWritable) return;
+    try {
+      this.onPersistence(writable, error ? { file, error } : undefined);
+    } catch {
+      /* a reporter that throws must not become the failure it is reporting */
+    }
+  }
+
   constructor(
     private readonly dir: string,
     private readonly limits: { history: number; audit: number },
     serverIdFactory: () => string,
+    /**
+     * Told when persistence stops working, and again when it starts again.
+     *
+     * Every write in here refuses to take the process down over a failed one,
+     * which is right - a pager must not die because a disk filled up - but it left
+     * nobody to tell. A hub on a full or read-only filesystem went on pairing
+     * devices, delivering alerts and reporting itself healthy while nothing since
+     * the failure was being saved, and a restart then rolled the hub back to
+     * whenever the disk broke.
+     */
+    private readonly onPersistence: (
+      writable: boolean,
+      trouble?: { file: string; error: Error },
+    ) => void = () => {},
   ) {
     // 0700: the store holds device public keys and audit history. Nothing
     // secret enough to be catastrophic, but no reason to let other local
@@ -169,6 +295,23 @@ export class Store {
     this.file = join(dir, 'store.json');
     this.historyFile = join(dir, 'history.jsonl');
     this.auditFile = join(dir, 'audit.jsonl');
+    this.ownerFile = join(dir, 'owner.json');
+
+    // Restated on open, because `mkdirSync`'s `mode` only applies to a directory it
+    // creates and `appendFileSync`'s only to a file it creates. A directory an
+    // operator made themselves, one restored from a tarball or a copy, or a store
+    // written by an older build kept whatever it had - and the two append-only logs
+    // hold every alert title and body and the whole pairing trail, which is more
+    // sensitive than the file that *does* self-heal (`store.json` is written through
+    // a rename, so it gets a fresh 0600 inode every time). The CLI's credential
+    // store has always done this, for this reason.
+    tighten(dir, 0o700);
+    for (const log of [this.historyFile, this.auditFile]) {
+      if (existsSync(log)) tighten(log, 0o600);
+    }
+
+    this.claim = `${process.pid}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+    this.shared = this.claimDirectory();
 
     const existed = existsSync(this.file);
     const loaded = this.load(serverIdFactory);
@@ -178,7 +321,14 @@ export class Store {
     // A fresh store must be written even if nothing is ever added to it. The
     // serverId is part of every auth signature, so letting it be regenerated
     // on the next boot would invalidate every paired device.
-    if (!existed) this.markDirty();
+    //
+    // `recoveredFrom` counts as fresh, and used not to: the file existed, so
+    // nothing was marked dirty, so the brand-new document `load()` returned -
+    // including its new serverId - was never written. A hub that booted with a
+    // corrupt store therefore invented a *third* identity on the restart its own
+    // log line invites, invalidating the devices that had just re-paired, and
+    // for the whole of that first run `exportStore` found no file to salvage.
+    if (!existed || loaded.recoveredFrom) this.markDirty();
 
     const history = readTail<Notification>(this.historyFile, limits.history);
     const audit = readTail<AuditEvent>(this.auditFile, limits.audit);
@@ -186,6 +336,26 @@ export class Store {
     this.historyLines = history.lines;
     this.auditCache = audit.entries;
     this.auditLines = audit.lines;
+
+    // The sequence counter lives in `store.json`, and `flush()` drains the
+    // append logs before it writes that file - so a crash in between, or a
+    // `store.json` write that fails on a full disk, leaves notifications on disk
+    // whose numbers the counter has forgotten. Handing one out twice is far worse
+    // than skipping it: a device whose cursor has already passed that number
+    // never receives the second alert, because `since()` compares strictly, and
+    // no amount of reconnecting will ever deliver it.
+    // Only a number that could have been issued counts. A torn or tampered line
+    // may hold anything at all, and `1e30` taken at face value would push the
+    // counter somewhere it can never come back from - every later `seq` absurd,
+    // for the life of the store.
+    const highest = this.historyCache.reduce(
+      (max, n) => (Number.isSafeInteger(n.seq) && n.seq > max ? n.seq : max),
+      0,
+    );
+    if (highest > this.data.seq) {
+      this.data.seq = highest;
+      this.markDirty();
+    }
 
     this.migrateInlineCollections();
   }
@@ -276,7 +446,11 @@ export class Store {
    * append does not drag a full store rewrite along with it.
    */
   private scheduleDrain(): void {
-    if (this.saveTimer) return;
+    // A closed store schedules nothing. The retry inside `drain()` already checked
+    // this, but an ordinary write after `close()` did not, so it armed a timer for
+    // a store nobody is going to service - and on a hub that was stopped and
+    // started again, that timer belongs to the instance that is gone.
+    if (this.closed || this.saveTimer) return;
     this.saveTimer = setTimeout(() => {
       this.saveTimer = undefined;
       this.flush();
@@ -295,12 +469,14 @@ export class Store {
     // Compacting only when the file has grown to twice the retained window
     // keeps rewrites rare while bounding the file to a predictable size.
     if (this.historyLines > this.limits.history * 2) {
-      this.compact(this.historyFile, this.historyCache);
-      this.historyLines = this.historyCache.length;
+      if (this.compact(this.historyFile, this.historyCache)) {
+        this.historyLines = this.historyCache.length;
+      }
     }
     if (this.auditLines > this.limits.audit * 2) {
-      this.compact(this.auditFile, this.auditCache);
-      this.auditLines = this.auditCache.length;
+      if (this.compact(this.auditFile, this.auditCache)) {
+        this.auditLines = this.auditCache.length;
+      }
     }
 
     if (!this.dirty) return;
@@ -310,18 +486,20 @@ export class Store {
       // rather than a half-serialised file that would fail to parse on boot.
       writeFileSync(tmp, JSON.stringify(this.data), { mode: 0o600 });
       renameSync(tmp, this.file);
+      this.wrote(this.file, true);
       // Cleared only once it is actually on disk. Clearing it first meant a
       // failed write was never retried: the store went on reporting itself
       // clean while memory and disk disagreed, and a device paired in that
       // window was gone after a restart.
       this.dirty = false;
-    } catch {
+    } catch (err) {
       // The two writes above this one already refuse to take the process down
       // over a failed append. This one had no such guard, and it is reached
       // from a `setTimeout`, so a full disk or a read-only mount raised an
       // uncaught exception from a timer and killed the hub - the one outcome a
       // pager must not have. Left dirty and tried again instead; the moment
       // the disk comes back, the pending state is written.
+      this.wrote(this.file, false, err as Error);
       if (!this.closed) this.scheduleDrain();
     }
   }
@@ -333,19 +511,61 @@ export class Store {
     try {
       appendFileSync(file, lines.join(''), { mode: 0o600 });
       onWritten(lines.length);
-    } catch {
-      // Losing a history line must never take down the app that embedded us.
+      this.wrote(file, true);
+    } catch (err) {
+      // Losing a history line must never take down the app that embedded us -
+      // but somebody is told that it happened.
+      this.wrote(file, false, err as Error);
     }
   }
 
-  private compact(file: string, entries: unknown[]): void {
+  /**
+   * Rewrites a log from the cache, and says whether it managed to.
+   *
+   * It used to swallow the failure and return nothing, while both callers went on
+   * to set the line count to the cache length as though the file had been
+   * rewritten. On a full or read-only filesystem that left the counter
+   * understating what is actually on disk, so later appends piled on top of
+   * content the count no longer described - and the next boot could read back two
+   * entries for one `seq`, which `since()` then replays twice.
+   */
+  private compact(file: string, entries: unknown[]): boolean {
     try {
       const tmp = `${file}.tmp`;
       writeFileSync(tmp, entries.map((e) => JSON.stringify(e) + '\n').join(''), { mode: 0o600 });
       renameSync(tmp, file);
-    } catch {
-      /* best effort */
+      this.wrote(file, true);
+      return true;
+    } catch (err) {
+      // Losing a compaction must never take down the app that embedded us; the
+      // caller keeps its old count and tries again on the next write.
+      this.wrote(file, false, err as Error);
+      return false;
     }
+  }
+
+  /**
+   * Makes a closed store writable again, for a hub that is starting a second time.
+   *
+   * `Notifier` holds one store for its whole life and `stop()` closes it, so after
+   * a `stop()`/`start()` - a supported and tested pattern - the guard in
+   * `scheduleDrain` refused to arm the drain timer ever again. `flush()` is only
+   * reachable from that timer or from `close()`, so nothing written during the
+   * hub's second life reached disk at all: devices paired, roles rewritten, tokens
+   * minted, every history and audit line, all lost to anything but another
+   * graceful stop.
+   */
+  reopen(): void {
+    this.closed = false;
+    // Claimed again, because `close()` gave the directory back. Without this a hub
+    // that had been stopped and started held no claim at all, and the next hub to
+    // open the same directory saw nothing to warn about - which is the collision
+    // this is here to catch.
+    //
+    // `??`, not a plain assignment: by the time a hub reaches its first `start()`
+    // the claim on disk is its own, so re-reading it says nothing, and overwriting
+    // what the constructor found threw away the only detection there was.
+    this.shared = this.claimDirectory() ?? this.shared;
   }
 
   close(): void {
@@ -353,7 +573,51 @@ export class Store {
     this.saveTimer = undefined;
     this.closed = true;
     this.flush();
+    this.releaseDirectory();
   }
+
+  /**
+   * Records this instance as the directory's owner, and reports a live previous one.
+   *
+   * The pid is checked with signal 0, which asks the kernel whether a process
+   * exists without touching it - so a hub killed outright leaves a file naming a
+   * pid that is gone, and the next one starts without a word. The instance id is
+   * what catches two hubs inside *one* process, where the pid is no help.
+   */
+  private claimDirectory(): number | undefined {
+    let held: { pid?: unknown; claim?: unknown } | undefined;
+    try {
+      held = JSON.parse(readFileSync(this.ownerFile, 'utf8')) as typeof held;
+    } catch {
+      /* nobody here, or nothing readable - either way this instance takes it */
+    }
+
+    let shared: number | undefined;
+    const pid = typeof held?.pid === 'number' ? held.pid : undefined;
+    if (pid !== undefined && held?.claim !== this.claim && processAlive(pid)) shared = pid;
+
+    try {
+      writeFileSync(this.ownerFile, JSON.stringify({ pid: process.pid, claim: this.claim }), {
+        mode: 0o600,
+      });
+    } catch {
+      /* an unwritable directory is reported by the writes that matter */
+    }
+    return shared;
+  }
+
+  private releaseDirectory(): void {
+    try {
+      const held = JSON.parse(readFileSync(this.ownerFile, 'utf8')) as { claim?: unknown };
+      // Only ours. Another hub may have taken the directory over in the meantime,
+      // and removing its claim would hide the next collision.
+      if (held?.claim === this.claim) rmSync(this.ownerFile, { force: true });
+    } catch {
+      /* already gone */
+    }
+  }
+
+
 
   get serverId(): string {
     return this.data.serverId;
@@ -667,12 +931,19 @@ export class Store {
    * the cache - which is bounded by the retention limit.
    */
   touchHistory(): void {
-    // The cache already contains everything still queued for append. Writing
-    // it out and then draining the queue would append those lines a second
-    // time, so the queue is dropped rather than flushed.
+    // The cache already contains everything still queued for append. Writing it
+    // out and then draining the queue would append those lines a second time, so
+    // the queue is dropped rather than flushed - but only once the rewrite has
+    // actually happened. Dropped first, it lost the queued lines from memory
+    // while the file still held the content they were meant to replace.
+    const pending = this.historyPending.slice();
     this.historyPending.length = 0;
-    this.compact(this.historyFile, this.historyCache);
-    this.historyLines = this.historyCache.length;
+    if (this.compact(this.historyFile, this.historyCache)) {
+      this.historyLines = this.historyCache.length;
+      return;
+    }
+    // The rewrite failed, so the lines still belong to the queue.
+    this.historyPending.unshift(...pending);
   }
 
   since(seq: number): Notification[] {

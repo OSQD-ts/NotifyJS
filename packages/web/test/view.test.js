@@ -227,3 +227,52 @@ test('a ring stops itself even when nothing tells it to', async () => {
     assert.ok(ms >= 30_000 && ms <= 15 * 60_000, `bounded for ${String(hostile)}: ${ms}`);
   }
 });
+
+test('a notification with an unusable timestamp still renders', () => {
+  // `toISOString()` throws `RangeError` for a `ts` that is not a finite number
+  // in range, and that throw landed mid-render - before the `ack` that follows
+  // it, so the frame was never acknowledged, was replayed on every sync, and
+  // threw again each time: one bad timestamp froze the feed for good.
+  for (const ts of [NaN, undefined, 8.64e15 + 1, 'yesterday']) {
+    const li = view.renderNotificationItem({ ...base, ts }, { onAction() {} });
+    assert.equal(li.querySelector('.time').getAttribute('datetime'), '');
+    assert.equal(li.querySelector('.time').textContent, '\u2014');
+    assert.equal(li.querySelector('h3').textContent, 'Disk almost full', 'the alert still shows');
+  }
+});
+
+test('a refreshed role selector never silently lands on admin', () => {
+  // Replacing a single-select's options resets the selection to the first entry,
+  // and the first default role is `admin` - so a version of this that read the
+  // element after repopulating it turned "Create pairing code" into an admin code
+  // for a click that used to mint a viewer one.
+  const roles = ['admin', 'oncall', 'viewer'];
+
+  assert.equal(view.nextRoleChoice('', roles), 'viewer', 'nothing chosen yet');
+  assert.equal(view.nextRoleChoice('oncall', roles), 'oncall', 'a choice is kept');
+  assert.equal(view.nextRoleChoice('gone', roles), 'viewer', 'a role that no longer exists');
+  assert.equal(
+    view.nextRoleChoice('', ['admin', 'oncall']),
+    'admin',
+    'with no viewer role at all there is nothing safer to pick',
+  );
+});
+
+test('repopulating the role selector keeps the choice and never lands on admin', () => {
+  // The half of this that broke was the ordering - reading `value` after
+  // `replaceChildren` reads the first option, and the first default role is
+  // `admin` - so the whole operation is tested here, not just the decision.
+  const select = document.createElement('select');
+
+  view.populateRoleSelect(select, ['admin', 'oncall', 'viewer']);
+  assert.equal(select.value, 'viewer', 'an untouched selector starts somewhere safe');
+  assert.equal(select.options.length, 3);
+
+  select.value = 'oncall';
+  view.populateRoleSelect(select, ['admin', 'oncall', 'viewer']);
+  assert.equal(select.value, 'oncall', 'and a choice survives a refresh');
+
+  select.value = 'oncall';
+  view.populateRoleSelect(select, ['admin', 'viewer']);
+  assert.equal(select.value, 'viewer', 'a role that no longer exists falls back');
+});

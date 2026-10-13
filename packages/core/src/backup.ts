@@ -1,4 +1,4 @@
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 /**
@@ -42,8 +42,16 @@ function readLines(path: string): string[] {
   // that asks is the one that throws on the race.
   try {
     return readFileSync(path, 'utf8').split('\n').filter((line) => line.trim() !== '');
-  } catch {
-    return [];
+  } catch (err) {
+    // Only a file that is not there is empty. This used to swallow every error,
+    // so a log that existed and could not be read - a tarball restored under
+    // another account, a permission change, a failing disk - became a backup with
+    // no history in it and an export that reported success. An operator moving a
+    // hub to a new machine had no way of knowing, which is the worst place in this
+    // codebase for a silence. The store document above is read this way for the
+    // same reason.
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return [];
+    throw err;
   }
 }
 
@@ -135,6 +143,25 @@ export function importStore(
   mkdirSync(dir, { recursive: true, mode: 0o700 });
   const file = join(dir, STORE_FILE);
 
+  // Every target is checked before anything is written. The store was written
+  // first and the logs checked afterwards, so a restore that refused had already
+  // replaced `store.json` - and with it the hub's `serverId`, which every paired
+  // device's auth signature is built on - while telling the operator that nothing
+  // had happened. A half-done restore is worse than either outcome.
+  //
+  // This is about ordering, not about the race: the `wx` flags below are what
+  // make the refusal itself unraceable, and they stay.
+  if (!options.force) {
+    const targets = [file];
+    if (doc.history?.length) targets.push(join(dir, HISTORY_FILE));
+    if (doc.audit?.length) targets.push(join(dir, AUDIT_FILE));
+    for (const target of targets) {
+      if (existsSync(target)) {
+        throw new Error(`${target} already exists; pass --force to replace it`);
+      }
+    }
+  }
+
   // `wx` fails if the file is already there, which is the same refusal as
   // asking first - except it cannot be raced. Asking and then writing leaves a
   // window in which the store appears between the two, and the guard that
@@ -149,22 +176,48 @@ export function importStore(
     throw new Error(`${file} already exists; pass --force to replace it`);
   }
 
-  // Only when the backup carried them. A restore that silently emptied an
-  // existing history would be a second, quieter kind of data loss.
+  // Only when the backup carried them, and `[]` does not count as carrying
+  // them: `exportStore` always sets both fields, so a backup from a hub with no
+  // audit rows arrived with `audit: []` and wrote it straight over a live audit
+  // log. The comment below this one has always claimed otherwise, and the case
+  // it describes is real - a store set aside as corrupt leaves the two logs
+  // intact and full of this month's incidents, and a restore without `--force`
+  // then succeeded because only `store.json` was guarded.
+  //
+  // A restore that silently emptied an existing history would be a second,
+  // quieter kind of data loss.
   let restoredHistory = 0;
   let restoredAudit = 0;
-  if (doc.history) {
-    writeFileSync(join(dir, HISTORY_FILE), doc.history.map((l) => l + '\n').join(''), {
-      mode: 0o600,
-    });
+  if (doc.history?.length) {
+    writeLog(join(dir, HISTORY_FILE), doc.history, options.force);
     restoredHistory = doc.history.length;
   }
-  if (doc.audit) {
-    writeFileSync(join(dir, AUDIT_FILE), doc.audit.map((l) => l + '\n').join(''), { mode: 0o600 });
+  if (doc.audit?.length) {
+    writeLog(join(dir, AUDIT_FILE), doc.audit, options.force);
     restoredAudit = doc.audit.length;
   }
 
   return { restoredHistory, restoredAudit };
+}
+
+/**
+ * Writes one of the append-only logs, refusing to land on an existing one.
+ *
+ * The same occupancy guard `store.json` gets, for the same reason: these hold
+ * the incidents and the pairing trail, and a restore into a directory that still
+ * has them is either a mistake or something the operator should have to say out
+ * loud with `--force`.
+ */
+function writeLog(file: string, lines: string[], force: boolean | undefined): void {
+  try {
+    writeFileSync(file, lines.map((l) => l + '\n').join(''), {
+      mode: 0o600,
+      flag: force ? 'w' : 'wx',
+    });
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
+    throw new Error(`${file} already exists; pass --force to replace it`);
+  }
 }
 
 /** What an operator should be told before they hand this file to anybody. */

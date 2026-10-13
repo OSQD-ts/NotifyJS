@@ -22,6 +22,14 @@ export class Ringer {
   }
 
   start(ringSeconds?: number): void {
+    // Already ringing: the tone carries on, but this call's own deadline
+    // replaces the one it would have inherited. A second call arriving late in
+    // the first one's window was cut off when that window expired - the first
+    // call's `ringSeconds`, not its own - leaving a call on screen, unanswered
+    // and silent, for the rest of the hub's ring. The Android ringer has always
+    // re-posted the deadline for the call now ringing.
+    if (this.deadline) clearTimeout(this.deadline);
+    this.deadline = setTimeout(() => this.stop(), maxRingMs(ringSeconds));
     if (this.timer) return;
     const beep = () => {
       if (!this.ctx || this.ctx.state !== 'running') return;
@@ -36,8 +44,6 @@ export class Ringer {
     if (this.ctx?.state === 'suspended') void this.ctx.resume().then(beep, () => {});
     beep();
     this.timer = setInterval(beep, 2000);
-
-    this.deadline = setTimeout(() => this.stop(), maxRingMs(ringSeconds));
   }
 
   stop(): void {
@@ -80,19 +86,40 @@ export function speak(call: CallRequest): Promise<void> {
       u.lang = call.lang ?? 'en-US';
       u.rate = call.rate ?? 1;
       u.pitch = call.pitch ?? 1;
-      u.onend = () => (--remaining > 0 ? utter() : resolve());
+      u.onend = () => {
+        if (mine !== speechGeneration) return resolve();
+        if (--remaining > 0) utter();
+        else resolve();
+      };
       // A speech error must still settle the promise, or the call screen
       // would hang open with no way back.
       u.onerror = () => resolve();
       synth.speak(u);
     };
 
+    // Claimed before the flush below, which interrupts whatever was
+    // speaking: that utterance's `end` then belongs to a run that is over.
+    const mine = ++speechGeneration;
     synth.cancel();
     utter();
   });
 }
 
+/**
+ * Bumped by `stopSpeaking`, so a run part-way through its repeats stops too.
+ *
+ * Cancelling an utterance that is currently speaking dispatches `end` rather
+ * than `error` in Chromium - which the Electron renderer always is - so a
+ * hang-up decremented the repeat counter and started the message again, reading
+ * it out to a screen nobody is looking at, and each further cancel only burned
+ * one more repeat. The same counter settles a previous call's promise when a
+ * second call takes over. The system-speech fallback in the main process has
+ * always worked this way.
+ */
+let speechGeneration = 0;
+
 export function stopSpeaking(): void {
+  speechGeneration += 1;
   globalThis.speechSynthesis?.cancel();
 }
 

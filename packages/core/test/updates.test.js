@@ -23,6 +23,16 @@ test('versions compare numerically, not alphabetically', () => {
 
   assert.equal(compareVersions('1.2', '1.2.0'), 0, 'missing parts count as zero');
   assert.equal(isNewer('0.2.0-rc1', '0.2.0'), false, 'a prerelease is not newer than its release');
+
+  // The other direction, which the dropped suffix got wrong: the rolling build is
+  // published as a preview of the version *after* the last release, so somebody
+  // on `@osqd/notifyjs@next` was told the matching stable release was not newer
+  // and stayed on an untested preview.
+  assert.equal(isNewer('0.4.1', '0.4.1-main.7'), true, 'the release beats its own preview');
+  assert.equal(compareVersions('0.4.1-main.7', '0.4.1'), -1);
+  assert.equal(isNewer('0.4.1-main.10', '0.4.1-main.9'), true, 'later previews sort after earlier');
+  assert.equal(isNewer('0.4.1-main.7', '0.4.1-main.7'), false);
+  assert.equal(isNewer('0.5.0-main.1', '0.4.1'), true, 'a preview of a newer version still wins');
 });
 
 /** Stands in for the GitHub releases API. */
@@ -76,6 +86,21 @@ test('prereleases are opt-in', async () => {
     repository: 'x/y', currentVersion: '0.1.0', includePrerelease: true, fetchImpl: feed,
   });
   assert.ok(rolling.available);
+
+  // And with nothing but a prerelease in the feed, the flag is what decides. The
+  // assertion above is satisfied by the stable `v0.2.0` on its own, so making
+  // `includePrerelease` inert left this test green.
+  const onlyPre = releaseFeed([release('v0.3.0-rc1', { prerelease: true })]);
+  const ignored = await checkForUpdate({
+    repository: 'x/y', currentVersion: '0.1.0', fetchImpl: onlyPre,
+  });
+  assert.equal(ignored.available, false, 'a prerelease is not offered by default');
+
+  const opted = await checkForUpdate({
+    repository: 'x/y', currentVersion: '0.1.0', includePrerelease: true, fetchImpl: onlyPre,
+  });
+  assert.equal(opted.available, true, 'opting in offers it');
+  assert.equal(opted.latest.tag, 'v0.3.0-rc1', 'and offers exactly it');
 });
 
 test('drafts are never offered', async () => {
