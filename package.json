@@ -10,7 +10,7 @@
     "packages/web"
   ],
   "engines": {
-    "node": ">=20"
+    "node": ">=22.23.4"
   },
   "scripts": {
     "build": "npm run icons && npm run build -w @osqd/notifyjs-protocol && npm run build -w @osqd/notifyjs && npm run build -w @osqd/notifyjs-web && npm run build -w @osqd/notifyjs-cli",
