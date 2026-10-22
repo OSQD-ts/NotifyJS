@@ -21,7 +21,7 @@
 #
 # and the build then sits there rather than failing. Only the runtime stage
 # below is built per-architecture now, and it runs no Node at all.
-FROM --platform=$BUILDPLATFORM node:20-alpine@sha256:fb4cd12c85ee03686f6af5362a0b0d56d50c58a04632e6c0fb8363f609372293 AS build
+FROM --platform=$BUILDPLATFORM node:26.12.1-alpine@sha256:40cd011b55415bc894e45b02fdd5a5dfde056921b7d23a64c74f80497af48797 AS build
 
 WORKDIR /app
 
@@ -52,7 +52,7 @@ RUN npm run build && node scripts/bundle.mjs
 # ---------------------------------------------------------------------------
 # Runtime stage: the bundle and the dashboard, with no node_modules at all.
 # ---------------------------------------------------------------------------
-FROM node:20-alpine@sha256:fb4cd12c85ee03686f6af5362a0b0d56d50c58a04632e6c0fb8363f609372293
+FROM node:26.12.1-alpine@sha256:40cd011b55415bc894e45b02fdd5a5dfde056921b7d23a64c74f80497af48797
 
 RUN addgroup -S notifyjs && adduser -S notifyjs -G notifyjs
 
